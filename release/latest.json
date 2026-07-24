@@ -1,0 +1,11 @@
+{
+    "version":  "0.1.0",
+    "notes":  "EnvNexus AI 0.1.0：首次公开版本，包含多工具链目录与版本管理、本地/AI 诊断、托盘操作、五套主题、单实例与手动签名更新。",
+    "pub_date":  "2026-07-24T10:27:35Z",
+    "platforms":  {
+                      "windows-x86_64":  {
+                                             "signature":  "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSNjRwcHQ4bnFtUVR4Z0VEcG9VV1ExdHhkZjcxS0ZMNzV6YWxwTXVRWFlBWm1zcU45ejBLd1hBK3hFQmxualJUaDZHYmJzVXMxbWg4d1hKY0oxTGVQdnhCcnVwN0NzL3dzPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg0ODg4ODQzCWZpbGU6RW52TmV4dXMgQUlfMC4xLjBfeDY0LXNldHVwLmV4ZQpxbjhVN2JydFRhRFdGMUd1ZVVzZktrKytIMzZGc2d2aFBWSjZvS1l0SUhUa0twWXAzWlZEaFFwWm13dDdxMG14NGtlbEtxVitKODJ1RzMveHVTWDRCUT09Cg==",
+                                             "url":  "https://github.com/PuppetWen/EnvNexus-AI/releases/download/v0.1.0/EnvNexus-AI_0.1.0_x64-setup.exe"
+                                         }
+                  }
+}
