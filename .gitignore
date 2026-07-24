@@ -11,6 +11,10 @@ artifacts/
 release/EnvNexusAIData/
 release/EnvPilotData/
 release/EnvPilot*.exe
+release/EnvNexus-AI*.exe
+release/EnvNexus-AI*.sig
+release/latest.json
+release/SHA256SUMS.txt
 .env
 .env.*
 !.env.example
