@@ -1,6 +1,6 @@
 [package]
 name = "envnexus-ai"
-version = "0.1.0"
+version = "0.1.1"
 description = "An AI-assisted, safe and reversible Windows development environment manager"
 authors = ["EnvNexus AI Contributors"]
 edition = "2024"
