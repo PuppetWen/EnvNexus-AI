@@ -1,6 +1,7 @@
 node_modules/
 dist/
 .devtools/
+.claude/
 .envnexus-ai-data/
 .envpilot-data/
 .envnexus-ai-data-root.json

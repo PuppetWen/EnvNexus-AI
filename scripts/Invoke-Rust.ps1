@@ -24,6 +24,7 @@ if (Test-Path -LiteralPath $CargoExecutable) {
 }
 
 $MsvcRoots = @(
+    "D:\Environment\BuildTools\VC\Tools\MSVC",
     "E:\DevelopmentTools\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC",
     "E:\DevelopmentTools\Microsoft Visual Studio\2022\Enterprise\VC\Tools\MSVC",
     "${env:ProgramFiles}\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC",
