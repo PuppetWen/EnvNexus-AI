@@ -93,6 +93,8 @@ const state: {
   aiAnalyzing: boolean;
   terminalCommands?: TerminalCommandStatus;
   applicationUpdate?: ApplicationUpdateStatus;
+  toolSearchQuery: string;
+  toolFilter: string;
 } = {
   view: storedNavigation.view,
   trayReady: false,
@@ -108,6 +110,8 @@ const state: {
   aiAnalyzing: false,
   selectedToolId: storedNavigation.selectedToolId,
   selectedAiProviderId: storedNavigation.selectedAiProviderId,
+  toolSearchQuery: "",
+  toolFilter: "all",
 };
 
 let toolContextPromise: Promise<void> | undefined;
@@ -473,8 +477,19 @@ function renderTools(): string {
       <button class="secondary-button" id="tools-rescan">${icon("Radar", 17)} ${state.scan ? "重新扫描" : "扫描本机状态"}</button>
     </div>
     <div class="toolbar panel">
-      <label class="search-field">${icon("Search", 17)}<input id="tool-search" placeholder="搜索工具…" /></label>
-      <div class="filter-pills"><button class="active" data-tool-filter="all">全部</button><button data-tool-filter="installed">已安装</button><button data-tool-filter="issues">有问题</button></div>
+      <label class="search-field">${icon("Search", 17)}<input id="tool-search" placeholder="搜索工具…" value="${escapeHtml(state.toolSearchQuery)}" /></label>
+      <div class="filter-pills">${(
+        [
+          ["all", "全部"],
+          ["installed", "已安装"],
+          ["issues", "有问题"],
+        ] as const
+      )
+        .map(
+          ([filterId, label]) =>
+            `<button class="${state.toolFilter === filterId ? "active" : ""}" data-tool-filter="${filterId}">${label}</button>`,
+        )
+        .join("")}</div>
     </div>
     ${
       tools.length
@@ -1363,6 +1378,7 @@ function bindEvents(root: HTMLElement): void {
   root.querySelector("#hide-to-tray")?.addEventListener("click", async () => {
     try {
       state.notice = "EnvNexus AI 正在后台运行；双击或右键托盘图标可以恢复。";
+      render();
       await backend.hideToTray();
     } catch (error) {
       state.error = `最小化到托盘失败：${String(error)}`;
@@ -1586,6 +1602,7 @@ function bindEvents(root: HTMLElement): void {
       try {
         await navigator.clipboard.writeText(command);
         state.notice = "命令已复制到剪贴板。";
+        render();
       } catch {
         window.prompt("请复制下面的命令：", command);
       }
@@ -1689,15 +1706,15 @@ function bindEvents(root: HTMLElement): void {
   const filterButtons = Array.from(
     root.querySelectorAll<HTMLButtonElement>("[data-tool-filter]"),
   );
-  let activeToolFilter = "all";
+  // 搜索词和筛选放在全局 state 里，异步刷新（扫描完成、通知等）重建 DOM 后不丢失
   const applyToolFilter = (): void => {
-    const query = searchInput?.value.trim().toLocaleLowerCase() ?? "";
+    const query = state.toolSearchQuery.trim().toLocaleLowerCase();
     root.querySelectorAll<HTMLElement>("[data-tool-card]").forEach((card) => {
       const matchesQuery = (card.dataset.search ?? "").includes(query);
       const matchesFilter =
-        activeToolFilter === "all" ||
-        (activeToolFilter === "installed" && card.dataset.installed === "true") ||
-        (activeToolFilter === "issues" && card.dataset.issues === "true");
+        state.toolFilter === "all" ||
+        (state.toolFilter === "installed" && card.dataset.installed === "true") ||
+        (state.toolFilter === "issues" && card.dataset.issues === "true");
       card.hidden = !matchesQuery || !matchesFilter;
     });
     root.querySelectorAll<HTMLElement>("[data-tool-group]").forEach((group) => {
@@ -1707,14 +1724,20 @@ function bindEvents(root: HTMLElement): void {
       group.hidden = !visibleCards;
     });
   };
-  searchInput?.addEventListener("input", applyToolFilter);
+  searchInput?.addEventListener("input", () => {
+    state.toolSearchQuery = searchInput.value;
+    applyToolFilter();
+  });
   filterButtons.forEach((button) => {
     button.addEventListener("click", () => {
-      activeToolFilter = button.dataset.toolFilter ?? "all";
+      state.toolFilter = button.dataset.toolFilter ?? "all";
       filterButtons.forEach((candidate) => candidate.classList.toggle("active", candidate === button));
       applyToolFilter();
     });
   });
+  if (searchInput && (state.toolSearchQuery.trim() !== "" || state.toolFilter !== "all")) {
+    applyToolFilter();
+  }
   root.querySelectorAll<HTMLElement>("[data-save-android-root]").forEach((element) => {
     element.addEventListener("click", async () => {
       const path = root
@@ -2275,13 +2298,17 @@ async function handleTrayAction(action: TrayAction): Promise<void> {
 
 export async function startApp(): Promise<void> {
   applyTheme(getStoredTheme());
-  await listen<OperationProgress>("operation-progress", (event) => {
-    state.progress = event.payload;
-    if (state.applying) render();
-  });
-  await listen<TrayAction>("tray-action", (event) => {
-    void handleTrayAction(event.payload);
-  });
+  try {
+    await listen<OperationProgress>("operation-progress", (event) => {
+      state.progress = event.payload;
+      if (state.applying) render();
+    });
+    await listen<TrayAction>("tray-action", (event) => {
+      void handleTrayAction(event.payload);
+    });
+  } catch {
+    // 纯浏览器开发环境没有 Tauri 事件桥；事件订阅失败不应阻止界面渲染。
+  }
   render();
   try {
     const context = ensureToolContext();
