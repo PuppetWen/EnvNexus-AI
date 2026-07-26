@@ -10,20 +10,7 @@
     "frontendDist": "../dist"
   },
   "app": {
-    "windows": [
-      {
-        "title": "EnvNexus AI",
-        "width": 1400,
-        "height": 900,
-        "minWidth": 980,
-        "minHeight": 700,
-        "center": true,
-        "resizable": true,
-        "fullscreen": false,
-        "decorations": true,
-        "transparent": false
-      }
-    ],
+    "windows": [],
     "security": {
       "csp": "default-src 'self'; img-src 'self' asset: data:; style-src 'self' 'unsafe-inline'; connect-src ipc: http://ipc.localhost"
     }

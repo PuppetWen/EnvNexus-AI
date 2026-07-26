@@ -824,6 +824,10 @@ pub fn run() {
         .build()
         .expect("无法创建 AI HTTP 客户端");
     let preferences = app_preferences::read(&data_root).unwrap_or_default();
+    // WebView2 的浏览器数据（缓存、配置文件）默认写入 C 盘的
+    // %LOCALAPPDATA%\<identifier>；改为跟随应用数据根目录，
+    // 保证所有数据都留在用户选择的位置。
+    let webview_data_directory = data_root.join("webview");
     let state = Arc::new(AppState {
         registry: PluginRegistry::builtin(),
         plans: PlanService::new(data_root.clone()),
@@ -843,7 +847,16 @@ pub fn run() {
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(state)
-        .setup(|app| {
+        .setup(move |app| {
+            fs::create_dir_all(&webview_data_directory)?;
+            tauri::WebviewWindowBuilder::new(app, "main", tauri::WebviewUrl::default())
+                .title("EnvNexus AI")
+                .inner_size(1400.0, 900.0)
+                .min_inner_size(980.0, 700.0)
+                .center()
+                .resizable(true)
+                .data_directory(webview_data_directory.clone())
+                .build()?;
             setup_tray(app)?;
             Ok(())
         })
