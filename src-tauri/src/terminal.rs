@@ -93,8 +93,10 @@ pub fn prepare(registry: &PluginRegistry, data_root: &Path) -> AppResult<Termina
         for (command_name, operation) in OPERATIONS {
             let filename = format!("{prefix}-{command_name}.cmd");
             let body = if operation == "root" {
+                // cmd 中 shift 不影响 %*，不能用 %* 传剩余参数；
+                // 逐个展开 %2..%9，缺省参数会展开为空。
                 format!(
-                    "@echo off\r\nset \"_envnexus_action=%~1\"\r\nshift\r\n@\"{executable}\" root \"%_envnexus_action%\" \"{tool_id}\" %*\r\n@exit /b %errorlevel%\r\n"
+                    "@echo off\r\n@\"{executable}\" root \"%~1\" \"{tool_id}\" %2 %3 %4 %5 %6 %7 %8 %9\r\n@exit /b %errorlevel%\r\n"
                 )
             } else {
                 format!(
@@ -161,7 +163,7 @@ fn normalize_command_directory(path: PathBuf) -> AppResult<PathBuf> {
         ));
     }
     fs::create_dir_all(&path)?;
-    let canonical = fs::canonicalize(path)?;
+    let canonical = crate::paths::canonicalize_simplified(&path)?;
     if canonical.parent().is_none() {
         return Err(AppError::Message(
             "不能把磁盘根目录作为命令脚本目录".to_string(),
@@ -249,11 +251,17 @@ mod tests {
         let registry = PluginRegistry::builtin();
 
         let saved = save_directory(&registry, data.path(), custom.clone()).unwrap();
-        assert_eq!(saved.directory, fs::canonicalize(&custom).unwrap());
+        assert_eq!(
+            saved.directory,
+            crate::paths::canonicalize_simplified(&custom).unwrap()
+        );
         assert_eq!(saved.script_count, 0);
 
         let prepared = prepare(&registry, data.path()).unwrap();
-        assert_eq!(prepared.directory, fs::canonicalize(&custom).unwrap());
+        assert_eq!(
+            prepared.directory,
+            crate::paths::canonicalize_simplified(&custom).unwrap()
+        );
         assert_eq!(prepared.script_count, prepared.expected_script_count);
         assert!(custom.join("jdk-root.cmd").is_file());
     }

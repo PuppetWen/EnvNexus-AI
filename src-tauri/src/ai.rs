@@ -174,12 +174,17 @@ pub async fn fetch_models(
         .ok_or_else(|| AppError::Message("AI 厂商配置不存在".to_string()))?;
     let api_key = read_api_key(data_root, provider_id)?;
     let endpoint = format!("{}/models", provider.base_url.trim_end_matches('/'));
+    // Anthropic 默认每页 20 条、Gemini 默认 50 条；不带分页参数会截断模型列表。
     let request = match provider.protocol.as_str() {
         "anthropic" => client
             .get(endpoint)
+            .query(&[("limit", "1000")])
             .header("x-api-key", &api_key)
             .header("anthropic-version", ANTHROPIC_VERSION),
-        "gemini" => client.get(endpoint).header("x-goog-api-key", &api_key),
+        "gemini" => client
+            .get(endpoint)
+            .query(&[("pageSize", "1000")])
+            .header("x-goog-api-key", &api_key),
         _ => client.get(endpoint).bearer_auth(&api_key),
     };
     let value = checked_json(request).await?;

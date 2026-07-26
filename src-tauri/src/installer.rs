@@ -333,42 +333,63 @@ impl Installer {
             .await
             .map(|metadata| metadata.len())
             .unwrap_or(0);
-        let mut request_builder = self.client.get(&request.download_url);
+        // 客户端级 timeout 是整个响应体的总时限，会中断大文件下载；
+        // 这里为下载请求单独放宽总时限，卡死由客户端的 read_timeout 兜底。
+        let mut request_builder = self
+            .client
+            .get(&request.download_url)
+            .timeout(std::time::Duration::from_secs(4 * 3600));
         if existing > 0 {
             request_builder = request_builder.header(header::RANGE, format!("bytes={existing}-"));
         }
-        let response = request_builder.send().await?.error_for_status()?;
-        validate_final_download_host(response.url().host_str().unwrap_or_default())?;
-        let resumed = existing > 0 && response.status() == StatusCode::PARTIAL_CONTENT;
-        let offset = if resumed { existing } else { 0 };
-        let mut file = if resumed {
-            OpenOptions::new().append(true).open(&partial).await?
+        let response = request_builder.send().await?;
+        let mut received = existing;
+        let mut total = Some(existing).filter(|length| *length > 0);
+        if existing > 0 && response.status() == StatusCode::RANGE_NOT_SATISFIABLE {
+            // .part 已达到服务器文件长度（多半是上次在校验阶段被中断）。
+            // 有校验值时直接进入校验；没有校验值无法确认完整性，清除后要求重试，
+            // 避免这个 .part 永久卡住后续安装。
+            if request.checksum.is_none() || request.checksum_algorithm.is_none() {
+                let _ = tokio::fs::remove_file(&partial).await;
+                return Err(AppError::Message(
+                    "服务器拒绝续传范围且该来源未提供校验值；已清除部分下载，请重试完整下载"
+                        .to_string(),
+                ));
+            }
         } else {
-            AsyncFile::create(&partial).await?
-        };
-        let response_length = response.content_length();
-        let total = response_length.map(|length| length + offset);
-        let mut received = offset;
-        let mut stream = response.bytes_stream();
-        while let Some(chunk) = stream.next().await {
-            let chunk = chunk?;
-            file.write_all(&chunk).await?;
-            received += chunk.len() as u64;
-            emit_progress(
-                app,
-                operation_id,
-                "download",
-                if resumed {
-                    "正在断点续传"
-                } else {
-                    "正在下载官方发行包"
-                },
-                received,
-                total,
-            );
+            let response = response.error_for_status()?;
+            validate_final_download_host(response.url().host_str().unwrap_or_default())?;
+            let resumed = existing > 0 && response.status() == StatusCode::PARTIAL_CONTENT;
+            let offset = if resumed { existing } else { 0 };
+            let mut file = if resumed {
+                OpenOptions::new().append(true).open(&partial).await?
+            } else {
+                AsyncFile::create(&partial).await?
+            };
+            let response_length = response.content_length();
+            total = response_length.map(|length| length + offset);
+            received = offset;
+            let mut stream = response.bytes_stream();
+            while let Some(chunk) = stream.next().await {
+                let chunk = chunk?;
+                file.write_all(&chunk).await?;
+                received += chunk.len() as u64;
+                emit_progress(
+                    app,
+                    operation_id,
+                    "download",
+                    if resumed {
+                        "正在断点续传"
+                    } else {
+                        "正在下载官方发行包"
+                    },
+                    received,
+                    total,
+                );
+            }
+            file.flush().await?;
+            drop(file);
         }
-        file.flush().await?;
-        drop(file);
 
         emit_progress(
             app,
@@ -669,6 +690,8 @@ fn validate_final_download_host(host: &str) -> AppResult<()> {
         "builds.dotnet.microsoft.com",
         "download.visualstudio.microsoft.com",
         "windows.php.net",
+        // windows.php.net 的发行包会 302 重定向到这里
+        "downloads.php.net",
     ];
     if allowed.contains(&host.as_str()) {
         Ok(())
@@ -941,7 +964,9 @@ fn commit_staging(staging: &Path, destination: &Path) -> AppResult<()> {
         .collect::<Vec<_>>();
     if entries.len() == 1 && entries[0].is_dir() {
         fs::rename(&entries[0], destination)?;
-        fs::remove_dir(staging)?;
+        // rename 成功即视为提交完成；空暂存目录清理失败（如被杀毒软件短暂占用）
+        // 不能返回错误，否则调用方会把已提交的安装当作失败去回滚。
+        let _ = fs::remove_dir(staging);
     } else {
         fs::rename(staging, destination)?;
     }
@@ -1003,7 +1028,11 @@ fn verify_installation(request: &InstallRequest) -> AppResult<()> {
             continue;
         }
         let output = run_capture(&program, &args, Duration::from_secs(20))?;
-        if output.status.success() || !output_text(&output).is_empty() {
+        // 只有 sdkmanager 例外：它依赖外部 Java，没有 Java 时输出错误并返回非零，
+        // 不能因此判定 SDK 本身安装失败。其余工具必须以退出码为准，
+        // 否则打印错误后非零退出的损坏安装会被当作验证通过，修复回滚永不触发。
+        let lenient = request.tool_id == "android-sdk";
+        if output.status.success() || (lenient && !output_text(&output).is_empty()) {
             return Ok(());
         }
     }

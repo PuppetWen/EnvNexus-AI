@@ -6,6 +6,7 @@ mod environment;
 mod error;
 mod installer;
 mod model;
+mod paths;
 mod plans;
 mod plugins;
 mod process;
@@ -53,7 +54,7 @@ enum TrayCommand {
 }
 
 #[derive(Debug, Clone, Serialize)]
-#[serde(tag = "kind", rename_all = "camelCase")]
+#[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase")]
 enum TrayFrontendAction {
     Navigate {
         view: String,
@@ -258,7 +259,8 @@ fn configure_data_root(path: PathBuf) -> Result<PathBuf, String> {
         return Err("数据目录必须是绝对路径，且不能是磁盘根目录".to_string());
     }
     fs::create_dir_all(&path).map_err(|error| format!("无法创建数据目录：{error}"))?;
-    let path = fs::canonicalize(&path).map_err(|error| format!("无法解析数据目录：{error}"))?;
+    let path =
+        paths::canonicalize_simplified(&path).map_err(|error| format!("无法解析数据目录：{error}"))?;
     ensure_data_layout(&path).map_err(|error| format!("无法初始化数据目录：{error}"))?;
     let pointer_path =
         data_root_pointer_path().ok_or_else(|| "无法定位 EnvNexus AI 安装目录".to_string())?;
@@ -808,7 +810,10 @@ pub fn run() {
     let client = reqwest::Client::builder()
         .user_agent(format!("EnvNexus-AI/{}", env!("CARGO_PKG_VERSION")))
         .https_only(true)
+        // 总时限只适用于目录等小请求；安装器下载会按请求覆盖总时限，
+        // 由 read_timeout 检测传输中途卡死。
         .timeout(std::time::Duration::from_secs(30))
+        .read_timeout(std::time::Duration::from_secs(60))
         .build()
         .expect("无法创建 HTTP 客户端");
     let ai_client = reqwest::Client::builder()
@@ -1688,7 +1693,7 @@ fn normalize_install_root(path: PathBuf) -> Result<PathBuf, String> {
     }
     fs::create_dir_all(&path).map_err(|error| format!("无法创建安装目录：{error}"))?;
     let canonical =
-        fs::canonicalize(&path).map_err(|error| format!("无法解析安装目录：{error}"))?;
+        paths::canonicalize_simplified(&path).map_err(|error| format!("无法解析安装目录：{error}"))?;
     if canonical.parent().is_none() {
         return Err("不能把磁盘根目录作为工具安装目录".to_string());
     }
