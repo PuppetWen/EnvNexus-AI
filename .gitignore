@@ -13,6 +13,8 @@ release/EnvNexusAIData/
 release/EnvPilotData/
 release/EnvPilot*.exe
 release/EnvNexus-AI*.exe
+/EnvNexus-AI*.exe
+/EnvNexusAIData/
 release/EnvNexus-AI*.sig
 release/latest.json
 release/SHA256SUMS.txt
