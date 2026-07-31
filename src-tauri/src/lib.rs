@@ -1,5 +1,6 @@
 mod ai;
 mod app_preferences;
+pub mod application_update;
 pub mod cli;
 mod diagnostics;
 mod environment;
@@ -96,6 +97,7 @@ struct AppState {
     registry: PluginRegistry,
     client: reqwest::Client,
     ai_client: reqwest::Client,
+    update_client: reqwest::Client,
     plans: PlanService,
     installer: Installer,
     data_root: PathBuf,
@@ -119,7 +121,34 @@ fn bootstrap(state: State<'_, Arc<AppState>>) -> BootstrapState {
         data_root: state.data_root.clone(),
         config_ready: state.data_root.is_dir(),
         platform: std::env::consts::OS.to_string(),
+        installation_kind: application_update::detect_install_kind()
+            .as_str()
+            .to_string(),
     }
+}
+
+#[tauri::command]
+async fn prepare_application_update(
+    request: application_update::PrepareApplicationUpdateRequest,
+    app: AppHandle,
+    state: State<'_, Arc<AppState>>,
+) -> Result<application_update::PreparedApplicationUpdate, String> {
+    application_update::prepare(&state.update_client, &state.data_root, request, &app)
+        .await
+        .map_err(error::command_error)
+}
+
+#[tauri::command]
+fn launch_application_update(
+    operation_id: String,
+    state: State<'_, Arc<AppState>>,
+) -> Result<(), String> {
+    application_update::launch(&state.data_root, &operation_id).map_err(error::command_error)
+}
+
+#[tauri::command]
+fn confirm_application_update_started() -> Result<bool, String> {
+    application_update::confirm_new_version_started().map_err(error::command_error)
 }
 
 #[tauri::command]
@@ -825,6 +854,7 @@ pub fn run() {
             data_root.display()
         );
     }
+    application_update::cleanup_stale_updates(&data_root);
     let client = reqwest::Client::builder()
         .user_agent(format!("EnvNexus-AI/{}", env!("CARGO_PKG_VERSION")))
         .https_only(true)
@@ -849,7 +879,8 @@ pub fn run() {
     let state = Arc::new(AppState {
         registry: PluginRegistry::builtin(),
         plans: PlanService::new(data_root.clone()),
-        installer: Installer::new(download_client, data_root.clone()),
+        installer: Installer::new(download_client.clone(), data_root.clone()),
+        update_client: download_client,
         client,
         ai_client,
         data_root,
@@ -908,7 +939,10 @@ pub fn run() {
             list_environment_backups,
             preview_restore_environment,
             preview_diagnostic_repair,
-            apply_plan
+            apply_plan,
+            prepare_application_update,
+            launch_application_update,
+            confirm_application_update_started
         ])
         .run(tauri::generate_context!())
         .expect("运行 EnvNexus AI 时发生错误");
@@ -1813,6 +1847,7 @@ fn ensure_data_layout(root: &Path) -> std::io::Result<()> {
         "transactions",
         "tools",
         "commands",
+        "updates",
     ] {
         fs::create_dir_all(root.join(directory))?;
     }

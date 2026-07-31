@@ -6,7 +6,7 @@
   "permissions": [
     "core:default",
     "dialog:default",
-    "process:allow-restart",
-    "updater:default"
+    "process:allow-exit",
+    "updater:allow-check"
   ]
 }

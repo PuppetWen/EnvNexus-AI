@@ -8,6 +8,10 @@ const versioningSource = readFileSync(
   join(process.cwd(), "src-tauri", "src", "versioning.rs"),
   "utf8",
 );
+const sourceProviders = readFileSync(
+  join(process.cwd(), "src-tauri", "src", "sources.rs"),
+  "utf8",
+);
 
 describe("official version catalog queries", () => {
   it("tracks loading state independently from transient DOM nodes", () => {
@@ -36,5 +40,22 @@ describe("official version catalog queries", () => {
     expect(versioningSource).toContain(
       '["3.14.6", "3.14.5", "3.13.14", "3.9.20"]',
     );
+  });
+
+  it("renders every returned version inside a themed internal scroll area", () => {
+    expect(appSource).toMatch(/catalog\.versions\s*\.map\(/);
+    expect(appSource).toContain("catalog.versions.length");
+    expect(styles).toMatch(
+      /\.tool-detail-section \.remote-stack\s*\{[^}]*overflow-y: auto;[^}]*scrollbar-gutter: stable;/s,
+    );
+  });
+
+  it("does not truncate official catalogs and batches the Python file lookup", () => {
+    expect(sourceProviders).not.toMatch(/\.truncate\(|\.take\(/);
+    expect(sourceProviders).toContain(
+      'const FILES_SOURCE: &str = "https://www.python.org/api/v2/downloads/release_file/";',
+    );
+    expect(sourceProviders).toContain("build_python_versions(releases, files)");
+    expect(sourceProviders).toContain("checked_github_releases");
   });
 });

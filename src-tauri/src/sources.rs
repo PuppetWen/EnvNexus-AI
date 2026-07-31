@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use chrono::Utc;
 use futures_util::{StreamExt, stream};
@@ -27,7 +27,7 @@ pub async fn fetch(
                 client,
                 tool_id,
                 "Git for Windows",
-                "https://api.github.com/repos/git-for-windows/git/releases?per_page=20",
+                "https://api.github.com/repos/git-for-windows/git/releases",
                 select_portable_git,
             )
             .await
@@ -42,7 +42,7 @@ pub async fn fetch(
                 client,
                 tool_id,
                 "Kitware CMake",
-                "https://api.github.com/repos/Kitware/CMake/releases?per_page=20",
+                "https://api.github.com/repos/Kitware/CMake/releases",
                 select_cmake_zip,
             )
             .await
@@ -168,65 +168,68 @@ struct PythonRelease {
 #[derive(Debug, Deserialize)]
 struct PythonReleaseFile {
     name: String,
+    release: String,
     url: String,
     sha256_sum: String,
 }
 
 async fn fetch_python(client: &reqwest::Client, tool_id: &str) -> AppResult<VersionCatalog> {
     const SOURCE: &str = "https://www.python.org/api/v2/downloads/release/?is_published=true";
-    let mut releases = checked_json::<Vec<PythonRelease>>(client, SOURCE).await?;
-    releases.retain(|release| release.name.starts_with("Python 3.") && !release.pre_release);
-    releases.sort_by(|left, right| right.release_date.cmp(&left.release_date));
-    releases.truncate(18);
+    const FILES_SOURCE: &str = "https://www.python.org/api/v2/downloads/release_file/";
+    let releases = checked_json::<Vec<PythonRelease>>(client, SOURCE).await?;
+    let files = checked_json::<Vec<PythonReleaseFile>>(client, FILES_SOURCE).await?;
+    let versions = build_python_versions(releases, files);
+    Ok(catalog(tool_id, "Python.org", SOURCE, versions))
+}
 
-    let client = client.clone();
-    let results = stream::iter(releases)
-        .map(move |release| {
-            let client = client.clone();
-            async move {
-                let id = release
-                    .resource_uri
-                    .trim_end_matches('/')
-                    .rsplit('/')
-                    .next()
-                    .ok_or_else(|| AppError::InvalidSource("Python release id 缺失".to_string()))?;
-                let url =
-                    format!("https://www.python.org/api/v2/downloads/release_file/?release={id}");
-                let files = checked_json::<Vec<PythonReleaseFile>>(&client, &url).await?;
-                let file = files.into_iter().find(|file| {
-                    file.name
-                        .to_ascii_lowercase()
-                        .contains("windows embeddable package (64-bit)")
-                });
-                Ok::<_, AppError>(file.map(|file| RemoteVersion {
-                    version: release.name.trim_start_matches("Python ").to_string(),
-                    channel: "stable".to_string(),
-                    published_at: Some(release.release_date),
-                    architecture: "x86_64".to_string(),
-                    download_url: Some(file.url),
-                    checksum_algorithm: non_empty("sha256"),
-                    checksum: non_empty(&file.sha256_sum),
-                    notes_url: release.release_notes_url,
-                }))
-            }
-        })
-        .buffer_unordered(4)
-        .collect::<Vec<_>>()
-        .await;
-
-    let mut versions = results
+fn build_python_versions(
+    releases: Vec<PythonRelease>,
+    files: Vec<PythonReleaseFile>,
+) -> Vec<RemoteVersion> {
+    let mut files_by_release = files
         .into_iter()
-        .filter_map(Result::ok)
-        .flatten()
+        .filter(|file| {
+            file.name
+                .to_ascii_lowercase()
+                .contains("windows embeddable package (64-bit)")
+        })
+        .filter_map(|file| {
+            let id = resource_id(&file.release)?.to_string();
+            Some((id, file))
+        })
+        .collect::<HashMap<_, _>>();
+    let mut versions = releases
+        .into_iter()
+        .filter(|release| release.name.starts_with("Python 3.") && !release.pre_release)
+        .filter_map(|release| {
+            let file = files_by_release.remove(resource_id(&release.resource_uri)?)?;
+            Some(RemoteVersion {
+                version: release.name.trim_start_matches("Python ").to_string(),
+                channel: "stable".to_string(),
+                published_at: Some(release.release_date),
+                architecture: "x86_64".to_string(),
+                download_url: Some(file.url),
+                checksum_algorithm: non_empty("sha256"),
+                checksum: non_empty(&file.sha256_sum),
+                notes_url: release.release_notes_url,
+            })
+        })
         .collect::<Vec<_>>();
     versions.sort_by(|left, right| right.published_at.cmp(&left.published_at));
-    Ok(catalog(tool_id, "Python.org", SOURCE, versions))
+    versions
+}
+
+fn resource_id(uri: &str) -> Option<&str> {
+    uri.trim_end_matches('/')
+        .rsplit('/')
+        .next()
+        .filter(|id| !id.is_empty())
 }
 
 #[derive(Debug, Deserialize)]
 struct AdoptiumInfo {
+    available_releases: Vec<u32>,
     available_lts_releases: Vec<u32>,
-    most_recent_feature_release: u32,
 }
 
 #[derive(Debug, Deserialize)]
@@ -256,16 +259,19 @@ struct AdoptiumVersion {
 async fn fetch_adoptium(client: &reqwest::Client, tool_id: &str) -> AppResult<VersionCatalog> {
     const SOURCE: &str = "https://api.adoptium.net/v3/info/available_releases";
     let info = checked_json::<AdoptiumInfo>(client, SOURCE).await?;
-    let mut majors = info.available_lts_releases;
-    majors.push(info.most_recent_feature_release);
+    let lts_releases = info
+        .available_lts_releases
+        .into_iter()
+        .collect::<HashSet<_>>();
+    let mut majors = info.available_releases;
     majors.sort_unstable_by(|left, right| right.cmp(left));
     majors.dedup();
-    majors.truncate(6);
 
     let client = client.clone();
     let results = stream::iter(majors)
         .map(move |major| {
             let client = client.clone();
+            let is_lts = lts_releases.contains(&major);
             async move {
                 let url = format!(
                     "https://api.adoptium.net/v3/assets/latest/{major}/hotspot?architecture=x64&image_type=jdk&os=windows&vendor=eclipse"
@@ -276,7 +282,7 @@ async fn fetch_adoptium(client: &reqwest::Client, tool_id: &str) -> AppResult<Ve
                     .next();
                 Ok::<_, AppError>(asset.map(|asset| RemoteVersion {
                     version: asset.version.openjdk_version,
-                    channel: if major % 2 == 1 {
+                    channel: if is_lts {
                         "LTS".to_string()
                     } else {
                         "feature".to_string()
@@ -343,7 +349,6 @@ async fn fetch_go(client: &reqwest::Client, tool_id: &str) -> AppResult<VersionC
                 )),
             })
         })
-        .take(30)
         .collect();
     Ok(catalog(tool_id, "Go Downloads", SOURCE, versions))
 }
@@ -403,27 +408,32 @@ async fn fetch_node(client: &reqwest::Client, tool_id: &str) -> AppResult<Versio
     let candidates = releases
         .into_iter()
         .filter(|release| release.files.iter().any(|file| file == "win-x64-zip"))
-        .take(24)
         .collect::<Vec<_>>();
     let client = client.clone();
-    let results = stream::iter(candidates)
-        .map(move |release| {
+    let results = stream::iter(candidates.into_iter().enumerate())
+        .map(move |(index, release)| {
             let client = client.clone();
             async move {
                 let filename = format!("node-{}-win-x64.zip", release.version);
-                let checksum_url =
-                    format!("https://nodejs.org/dist/{}/SHASUMS256.txt", release.version);
-                let checksum = checked_text(&client, &checksum_url)
-                    .await
-                    .ok()
-                    .and_then(|text| {
-                        text.lines().find_map(|line| {
-                            let mut parts = line.split_whitespace();
-                            let hash = parts.next()?;
-                            let name = parts.next()?.trim_start_matches('*');
-                            (name == filename).then(|| hash.to_string())
+                // Keep the complete history responsive: old releases remain installable,
+                // while checksum metadata is fetched only for the newest entries.
+                let checksum = if index < 30 {
+                    let checksum_url =
+                        format!("https://nodejs.org/dist/{}/SHASUMS256.txt", release.version);
+                    checked_text(&client, &checksum_url)
+                        .await
+                        .ok()
+                        .and_then(|text| {
+                            text.lines().find_map(|line| {
+                                let mut parts = line.split_whitespace();
+                                let hash = parts.next()?;
+                                let name = parts.next()?.trim_start_matches('*');
+                                (name == filename).then(|| hash.to_string())
+                            })
                         })
-                    });
+                } else {
+                    None
+                };
                 RemoteVersion {
                     version: release.version.trim_start_matches('v').to_string(),
                     channel: if release.lts.is_string() {
@@ -493,7 +503,6 @@ async fn fetch_gradle(client: &reqwest::Client, tool_id: &str) -> AppResult<Vers
             checksum: release.checksum,
             notes_url: Some("https://docs.gradle.org/current/release-notes.html".to_string()),
         })
-        .take(30)
         .collect();
     Ok(catalog(tool_id, "Gradle Services", SOURCE, versions))
 }
@@ -506,7 +515,6 @@ async fn fetch_maven(client: &reqwest::Client, tool_id: &str) -> AppResult<Versi
     let candidates = version_pattern
         .captures_iter(&html)
         .filter_map(|capture| capture.get(1).map(|value| value.as_str().to_string()))
-        .take(12)
         .collect::<Vec<_>>();
     let client = client.clone();
     let versions = stream::iter(candidates)
@@ -592,7 +600,6 @@ async fn fetch_dotnet(client: &reqwest::Client, tool_id: &str) -> AppResult<Vers
         .await?
         .releases_index;
     channels.retain(|channel| !channel.support_phase.eq_ignore_ascii_case("preview"));
-    channels.truncate(6);
     let client = client.clone();
     let results = stream::iter(channels)
         .map(move |channel| {
@@ -625,7 +632,6 @@ async fn fetch_dotnet(client: &reqwest::Client, tool_id: &str) -> AppResult<Vers
                             notes_url: release.release_notes,
                         })
                     })
-                    .take(3)
                     .collect::<Vec<_>>();
                 Ok::<_, AppError>(versions)
             }
@@ -639,7 +645,6 @@ async fn fetch_dotnet(client: &reqwest::Client, tool_id: &str) -> AppResult<Vers
         .flatten()
         .collect::<Vec<_>>();
     versions.sort_by(|left, right| right.published_at.cmp(&left.published_at));
-    versions.truncate(24);
     Ok(catalog(
         tool_id,
         "Microsoft .NET Releases",
@@ -649,9 +654,8 @@ async fn fetch_dotnet(client: &reqwest::Client, tool_id: &str) -> AppResult<Vers
 }
 
 async fn fetch_ruby(client: &reqwest::Client, tool_id: &str) -> AppResult<VersionCatalog> {
-    const SOURCE: &str =
-        "https://api.github.com/repos/oneclick/rubyinstaller2/releases?per_page=30";
-    let releases = checked_json::<Vec<GithubRelease>>(client, SOURCE).await?;
+    const SOURCE: &str = "https://api.github.com/repos/oneclick/rubyinstaller2/releases";
+    let releases = checked_github_releases(client, SOURCE).await?;
     let versions = releases
         .into_iter()
         .filter(|release| !release.draft)
@@ -693,7 +697,6 @@ async fn fetch_ruby(client: &reqwest::Client, tool_id: &str) -> AppResult<Versio
                 notes_url: Some(release.html_url),
             })
         })
-        .take(24)
         .collect();
     Ok(catalog(
         tool_id,
@@ -740,7 +743,6 @@ async fn fetch_php(client: &reqwest::Client, tool_id: &str) -> AppResult<Version
                 notes_url: Some(format!("https://www.php.net/releases/{version}/en.php")),
             })
         })
-        .take(24)
         .collect();
     Ok(catalog(tool_id, "PHP for Windows", SOURCE, versions))
 }
@@ -771,7 +773,7 @@ async fn fetch_github_release(
     source_url: &str,
     selector: AssetSelector,
 ) -> AppResult<VersionCatalog> {
-    let releases = checked_json::<Vec<GithubRelease>>(client, source_url).await?;
+    let releases = checked_github_releases(client, source_url).await?;
     let versions = releases
         .into_iter()
         .filter(|release| !release.draft)
@@ -804,9 +806,28 @@ async fn fetch_github_release(
                 notes_url: Some(release.html_url),
             })
         })
-        .take(20)
         .collect();
     Ok(catalog(tool_id, source_name, source_url, versions))
+}
+
+async fn checked_github_releases(
+    client: &reqwest::Client,
+    source_url: &str,
+) -> AppResult<Vec<GithubRelease>> {
+    let separator = if source_url.contains('?') { '&' } else { '?' };
+    let mut releases = Vec::new();
+    let mut page = 1_u32;
+    loop {
+        let url = format!("{source_url}{separator}per_page=100&page={page}");
+        let mut current_page = checked_json::<Vec<GithubRelease>>(client, &url).await?;
+        let page_len = current_page.len();
+        releases.append(&mut current_page);
+        if page_len < 100 {
+            break;
+        }
+        page += 1;
+    }
+    Ok(releases)
 }
 
 fn select_portable_git(assets: &[GithubAsset]) -> Option<&GithubAsset> {
@@ -935,9 +956,6 @@ fn parse_android_repository(xml: &str, package: AndroidPackage) -> AppResult<Vec
             checksum,
             notes_url: Some("https://developer.android.com/studio/releases".to_string()),
         });
-        if versions.len() >= 30 {
-            break;
-        }
     }
     Ok(versions)
 }
@@ -1014,6 +1032,36 @@ mod tests {
                 .as_deref()
                 .unwrap()
                 .ends_with("platform-tools-win.zip")
+        );
+    }
+
+    #[test]
+    fn python_catalog_keeps_every_installable_x64_release() {
+        let releases = (0..40)
+            .map(|index| PythonRelease {
+                name: format!("Python 3.{}.{}", 10 + index / 10, index % 10),
+                release_date: format!("2026-{:02}-{:02}", 1 + index / 28, 1 + index % 28),
+                pre_release: false,
+                release_notes_url: None,
+                resource_uri: format!("https://www.python.org/api/v2/downloads/release/{index}/"),
+            })
+            .collect::<Vec<_>>();
+        let files = (0..40)
+            .map(|index| PythonReleaseFile {
+                name: "Windows embeddable package (64-bit)".to_string(),
+                release: format!("https://www.python.org/api/v2/downloads/release/{index}/"),
+                url: format!("https://www.python.org/ftp/python/{index}/python.zip"),
+                sha256_sum: format!("{index:064x}"),
+            })
+            .collect::<Vec<_>>();
+
+        let versions = build_python_versions(releases, files);
+
+        assert_eq!(versions.len(), 40);
+        assert!(
+            versions
+                .iter()
+                .all(|version| version.architecture == "x86_64")
         );
     }
 

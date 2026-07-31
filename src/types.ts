@@ -117,6 +117,7 @@ export interface BootstrapState {
   dataRoot: string;
   configReady: boolean;
   platform: string;
+  installationKind: "installed" | "portable";
 }
 
 export type CloseBehavior = "minimizeToTray" | "exit";
@@ -243,6 +244,41 @@ export interface OperationProgress {
   receivedBytes: number;
   totalBytes?: number;
   percent?: number;
+}
+
+export interface ApplicationUpdateAsset {
+  url: string;
+  signature: string;
+  sha256: string;
+}
+
+export interface PrepareApplicationUpdateRequest {
+  version: string;
+  installer: ApplicationUpdateAsset;
+  portable: ApplicationUpdateAsset;
+}
+
+export interface PreparedApplicationUpdate {
+  operationId: string;
+  version: string;
+  installKind: "installed" | "portable";
+  message: string;
+}
+
+export interface ApplicationUpdateProgress {
+  operationId: string;
+  phase:
+    | "preparing"
+    | "downloading"
+    | "retrying"
+    | "verifying"
+    | "ready";
+  message: string;
+  receivedBytes: number;
+  totalBytes?: number;
+  percent?: number;
+  attempt: number;
+  maxAttempts: number;
 }
 
 export interface OperationResult {

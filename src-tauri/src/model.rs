@@ -132,6 +132,7 @@ pub struct BootstrapState {
     pub data_root: PathBuf,
     pub config_ready: bool,
     pub platform: String,
+    pub installation_kind: String,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]

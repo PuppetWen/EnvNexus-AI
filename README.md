@@ -53,8 +53,8 @@ AI 不会绕过本地安全边界：它不能直接修改环境。任何一键�
 
 从 [GitHub Releases](https://github.com/PuppetWen/EnvNexus-AI/releases/latest) 下载：
 
-- `EnvNexus-AI_0.1.2_x64-setup.exe`：当前用户安装版，可选择安装目录；检测到已有安装时会复用原路径并原地升级。
-- `EnvNexus-AI_0.1.2_x64-portable.exe`：便携主程序；App 内更新会启动当前用户安装程序，不会静默覆盖原便携文件。
+- `EnvNexus-AI_0.1.3_x64-setup.exe`：当前用户安装版，可选择安装目录；检测到已有安装时会复用原路径并原地升级。
+- `EnvNexus-AI_0.1.3_x64-portable.exe`：便携主程序；App 内更新会在原路径安全自替换。
 - `SHA256SUMS.txt`：下载文件校验值。
 
 首次打开不会扫描电脑。可先进入“工具链”为各工具设置目录，再按需扫描或查询官方版本。
@@ -78,7 +78,7 @@ env-repair "PATH_DUPLICATE_用户"
 
 ### App 内更新
 
-“设置 → 应用更新 → 检查更新”会手动连接本仓库的最新 GitHub Release。发现新版本后显示版本号和发布说明；用户再次确认后，App 下载带签名的 Windows 安装包、使用内置公钥验证签名并启动更新。App 不会在启动时自动检查更新。
+App 启动后会连接本仓库的最新 GitHub Release 检查版本，“设置 → 应用更新”也支持手动重试。用户确认更新后，App 会自动续传或重试下载，校验 SHA-256 与内置公钥签名；安装版静默覆盖原安装目录，便携版在原路径安全自替换。替换前会保留旧主程序，新版本未能完成启动确认时自动回滚；启动成功后自动清理备份和更新包。
 
 ### 从源码构建
 
@@ -128,8 +128,8 @@ AI cannot bypass local safety controls or directly change the environment. One-c
 
 Download the latest build from [GitHub Releases](https://github.com/PuppetWen/EnvNexus-AI/releases/latest):
 
-- `EnvNexus-AI_0.1.2_x64-setup.exe`: per-user installer with a selectable install directory. Existing installations are upgraded in their previous location.
-- `EnvNexus-AI_0.1.2_x64-portable.exe`: portable executable. In-app updating launches the per-user installer instead of silently replacing the portable file.
+- `EnvNexus-AI_0.1.3_x64-setup.exe`: per-user installer with a selectable install directory. Existing installations are upgraded in their previous location.
+- `EnvNexus-AI_0.1.3_x64-portable.exe`: portable executable. In-app updates safely replace it in its original location.
 - `SHA256SUMS.txt`: release checksums.
 
 The first launch does not scan the machine. You can configure each tool's installation root before running a scan or querying official releases.
@@ -152,7 +152,7 @@ Read-only commands reuse saved state and do not trigger a scan. Mutating command
 
 ### In-app updates
 
-EnvNexus AI checks the latest GitHub Release once after the interface opens. The dot beside “Settings” stays green when the current version is up to date and turns red when an update is available. “Settings → Application update” displays the detailed state and also supports a manual retry. After confirmation, the app downloads the signed Windows installer, validates it with the embedded public key, and starts an in-place update.
+EnvNexus AI checks the latest GitHub Release once after the interface opens. The brand status dot stays green when the current version is up to date and turns red when an update is available. After confirmation, downloads resume or retry automatically and are verified with SHA-256 plus the embedded public key. Installed builds update silently in place; portable builds replace themselves in their original location. The previous executable is retained until the new version confirms startup, then backups and update packages are removed automatically.
 
 ### Build from source
 
