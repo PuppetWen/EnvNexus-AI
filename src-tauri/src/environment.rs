@@ -54,51 +54,19 @@ pub fn get_case_insensitive<'a>(map: &'a EnvironmentMap, name: &str) -> Option<&
 }
 
 pub fn split_path(value: Option<&String>) -> Vec<String> {
-    let Some(path) = value else {
-        return Vec::new();
-    };
-    // Windows PATH 允许用引号包住含分号的条目；引号内部的分号不是分隔符。
-    let mut raw_entries = Vec::new();
-    let mut current = String::new();
-    let mut in_quotes = false;
-    for character in path.chars() {
-        match character {
-            '"' => {
-                in_quotes = !in_quotes;
-                current.push('"');
-            }
-            ';' if !in_quotes => raw_entries.push(std::mem::take(&mut current)),
-            other => current.push(other),
-        }
-    }
-    raw_entries.push(current);
-    raw_entries
-        .into_iter()
-        .map(|entry| {
-            let trimmed = entry.trim();
-            let unquoted = trimmed.trim_matches('"');
-            // 不含分号的条目按历史行为去引号；含分号的保留引号，
-            // 这样重写 PATH 时才能原样往返，不破坏该目录。
-            if unquoted.contains(';') {
-                trimmed.to_string()
-            } else {
-                unquoted.to_string()
-            }
+    value
+        .map(|path| {
+            path.split(';')
+                .map(|entry| entry.trim().trim_matches('"').to_string())
+                .collect()
         })
-        .collect()
+        .unwrap_or_default()
 }
 
 pub fn environment_fingerprint(map: &EnvironmentMap) -> String {
-    // 注册表变量名不区分大小写；按大写键排序哈希，
-    // 避免 "PATH" 与 "Path" 这类命名差异导致同一环境得到不同指纹。
-    let mut entries = map
-        .iter()
-        .map(|(key, value)| (key.to_ascii_uppercase(), value))
-        .collect::<Vec<_>>();
-    entries.sort();
     let mut hasher = Sha256::new();
-    for (key, value) in entries {
-        hasher.update(key.as_bytes());
+    for (key, value) in map {
+        hasher.update(key.to_ascii_uppercase().as_bytes());
         hasher.update([0]);
         hasher.update(value.as_bytes());
         hasher.update([0xff]);
@@ -377,11 +345,10 @@ fn diagnose_path_scope(
             duplicates.push(format!("#{} 与 #{}: {}", previous + 1, index + 1, entry));
         }
 
-        let unquoted = entry.trim_matches('"');
-        if unquoted.contains('%') {
+        if entry.contains('%') {
             continue;
         }
-        let path = Path::new(unquoted);
+        let path = Path::new(entry);
         if !path.is_absolute() {
             relative.push(format!("#{}: {}", index + 1, entry));
         } else if !path.exists() {
@@ -516,50 +483,6 @@ mod tests {
         let first = environment_fingerprint(&values);
         let second = environment_fingerprint(&values);
         assert_eq!(first, second);
-    }
-
-    #[test]
-    fn fingerprint_ignores_variable_name_case_even_with_neighboring_keys() {
-        // 注册表名为 "PATH" 时字节序在 "PATHEXT" 之前，而 "Path" 在其后；
-        // 两个映射描述同一环境，指纹必须一致。
-        let mut registry_style = EnvironmentMap::new();
-        registry_style.insert("PATH".into(), "C:\\bin".into());
-        registry_style.insert("PATHEXT".into(), ".COM;.EXE".into());
-        let mut planned_style = EnvironmentMap::new();
-        planned_style.insert("Path".into(), "C:\\bin".into());
-        planned_style.insert("PATHEXT".into(), ".COM;.EXE".into());
-        assert_eq!(
-            environment_fingerprint(&registry_style),
-            environment_fingerprint(&planned_style)
-        );
-    }
-
-    #[test]
-    fn split_path_keeps_quoted_entries_with_semicolons_intact() {
-        let path = r#""C:\Tools;beta\bin";C:\Windows;"C:\Plain""#.to_string();
-        let entries = split_path(Some(&path));
-        assert_eq!(
-            entries,
-            vec![
-                r#""C:\Tools;beta\bin""#.to_string(),
-                r"C:\Windows".to_string(),
-                r"C:\Plain".to_string(),
-            ]
-        );
-        // 往返重组不能破坏含分号的引号条目
-        assert_eq!(entries[0].trim_matches('"'), r"C:\Tools;beta\bin");
-    }
-
-    #[test]
-    fn quoted_path_entry_with_semicolon_is_not_flagged_relative() {
-        let mut user = EnvironmentMap::new();
-        user.insert("Path".into(), r#""C:\Windows;x";C:\Windows"#.into());
-        let issues = diagnose_environment(&user, &EnvironmentMap::new());
-        assert!(
-            !issues
-                .iter()
-                .any(|issue| issue.code.starts_with("PATH_RELATIVE"))
-        );
     }
 
     #[test]

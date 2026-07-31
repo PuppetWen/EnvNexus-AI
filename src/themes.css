@@ -11,6 +11,15 @@
  *  professional-minimal 冷灰白 × 克制蓝 —— 企业级清爽
  */
 
+:root {
+  /*
+   * Path separators must keep the Windows reverse-solidus glyph even when the
+   * document language or UI font changes to Japanese.
+   */
+  --font-path:
+    "Cascadia Mono", "Cascadia Code", Consolas, "Courier New", monospace;
+}
+
 :root,
 :root[data-theme="modern-tech"] {
   color-scheme: dark;

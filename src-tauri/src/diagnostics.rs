@@ -298,10 +298,6 @@ pub fn guidance_for(
 }
 
 pub fn issue_tool_id(code: &str) -> Option<&'static str> {
-    // 工具级诊断码由 descriptor.id 大写生成，含连字符（如 ANDROID-NDK_NO_DEFAULT）；
-    // 统一为下划线后再匹配，避免 android-ndk 误落到 ANDROID 前缀。
-    let code = code.replace('-', "_");
-    let code = code.as_str();
     [
         ("ANDROID_SDK", "android-sdk"),
         ("ANDROID_NDK", "android-ndk"),

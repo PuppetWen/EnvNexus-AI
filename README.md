@@ -53,8 +53,8 @@ AI 不会绕过本地安全边界：它不能直接修改环境。任何一键�
 
 从 [GitHub Releases](https://github.com/PuppetWen/EnvNexus-AI/releases/latest) 下载：
 
-- `EnvNexus-AI_0.1.0_x64-setup.exe`：当前用户安装版，支持 App 内更新。
-- `EnvNexus-AI_0.1.0_x64-portable.exe`：便携主程序；App 内更新会启动当前用户安装程序，不会静默覆盖原便携文件。
+- `EnvNexus-AI_0.1.2_x64-setup.exe`：当前用户安装版，可选择安装目录；检测到已有安装时会复用原路径并原地升级。
+- `EnvNexus-AI_0.1.2_x64-portable.exe`：便携主程序；App 内更新会启动当前用户安装程序，不会静默覆盖原便携文件。
 - `SHA256SUMS.txt`：下载文件校验值。
 
 首次打开不会扫描电脑。可先进入“工具链”为各工具设置目录，再按需扫描或查询官方版本。
@@ -128,8 +128,8 @@ AI cannot bypass local safety controls or directly change the environment. One-c
 
 Download the latest build from [GitHub Releases](https://github.com/PuppetWen/EnvNexus-AI/releases/latest):
 
-- `EnvNexus-AI_0.1.0_x64-setup.exe`: per-user installer with in-app updating.
-- `EnvNexus-AI_0.1.0_x64-portable.exe`: portable executable. In-app updating launches the per-user installer instead of silently replacing the portable file.
+- `EnvNexus-AI_0.1.2_x64-setup.exe`: per-user installer with a selectable install directory. Existing installations are upgraded in their previous location.
+- `EnvNexus-AI_0.1.2_x64-portable.exe`: portable executable. In-app updating launches the per-user installer instead of silently replacing the portable file.
 - `SHA256SUMS.txt`: release checksums.
 
 The first launch does not scan the machine. You can configure each tool's installation root before running a scan or querying official releases.
@@ -152,7 +152,7 @@ Read-only commands reuse saved state and do not trigger a scan. Mutating command
 
 ### In-app updates
 
-Use “Settings → Application update → Check for updates” to query the latest GitHub Release. EnvNexus AI displays the version and release notes first. After confirmation, it downloads the signed Windows installer, validates it with the embedded public key, and starts the update. It never checks automatically at startup.
+EnvNexus AI checks the latest GitHub Release once after the interface opens. The dot beside “Settings” stays green when the current version is up to date and turns red when an update is available. “Settings → Application update” displays the detailed state and also supports a manual retry. After confirmation, the app downloads the signed Windows installer, validates it with the embedded public key, and starts an in-place update.
 
 ### Build from source
 

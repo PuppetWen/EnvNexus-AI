@@ -59,8 +59,8 @@ impl PlanService {
     ) -> AppResult<OperationPlan> {
         let plugin = registry.get(tool_id)?;
         let descriptor = plugin.descriptor();
-        let installation_path = crate::paths::canonicalize_simplified(&installation_path)
-            .map_err(|error| {
+        let installation_path =
+            crate::paths::canonicalize_simplified(&installation_path).map_err(|error| {
                 AppError::Message(format!(
                     "所选安装目录无法访问（{}）：{error}",
                     installation_path.display()
@@ -259,8 +259,8 @@ impl PlanService {
         installation_path: PathBuf,
     ) -> AppResult<OperationPlan> {
         let descriptor = registry.get(tool_id)?.descriptor().clone();
-        let installation_path = crate::paths::canonicalize_simplified(&installation_path)
-            .map_err(|error| {
+        let installation_path =
+            crate::paths::canonicalize_simplified(&installation_path).map_err(|error| {
                 AppError::Message(format!(
                     "安装目录无法访问（{}）：{error}",
                     installation_path.display()
@@ -588,8 +588,8 @@ impl PlanService {
         command_directory: PathBuf,
         enable: bool,
     ) -> AppResult<OperationPlan> {
-        let command_directory = crate::paths::canonicalize_simplified(&command_directory)
-            .map_err(|error| {
+        let command_directory =
+            crate::paths::canonicalize_simplified(&command_directory).map_err(|error| {
                 AppError::Message(format!(
                     "命令目录无法访问（{}）：{error}",
                     command_directory.display()
@@ -712,12 +712,6 @@ impl PlanService {
         plan: &OperationPlan,
     ) -> AppResult<()> {
         let user = read_environment(EnvironmentScope::User)?;
-        // take_confirmed 之后仍可能有外部进程（setx、安装器）改写 HKCU；
-        // 写入前用同一份快照再核对一次指纹，尽量缩小覆盖外部修改的窗口。
-        let system = read_environment(EnvironmentScope::System)?;
-        if combined_fingerprint(&user, &system) != plan.environment_fingerprint {
-            return Err(AppError::StaleEnvironment);
-        }
         match &plan.action {
             PlannedAction::Switch {
                 tool_id,
@@ -814,10 +808,6 @@ impl PlanService {
             return Ok(None);
         };
         let current = read_environment(EnvironmentScope::User)?;
-        let system = read_environment(EnvironmentScope::System)?;
-        if combined_fingerprint(&current, &system) != plan.environment_fingerprint {
-            return Err(AppError::StaleEnvironment);
-        }
         let backup_path = self.write_backup(&plan.id, &current)?;
         if let Err(error) = write_user_environment(updated) {
             let _ = write_user_environment(&current);
@@ -914,14 +904,10 @@ fn diagnostic_environment_update(
             let remaining = current_path
                 .iter()
                 .filter(|entry| {
-                    let unquoted = entry.trim_matches('"');
-                    if unquoted.is_empty()
-                        || unquoted.contains('%')
-                        || !Path::new(unquoted).is_absolute()
-                    {
+                    if entry.is_empty() || entry.contains('%') || !Path::new(entry).is_absolute() {
                         return true;
                     }
-                    if Path::new(unquoted).exists() {
+                    if Path::new(entry).exists() {
                         return true;
                     }
                     if path_matches_protected_manager(entry, &protected) {
@@ -960,10 +946,7 @@ fn diagnostic_environment_update(
             current_path
                 .iter()
                 .filter(|entry| {
-                    let unquoted = entry.trim_matches('"');
-                    unquoted.contains('%')
-                        || unquoted.is_empty()
-                        || Path::new(unquoted).is_absolute()
+                    entry.contains('%') || entry.is_empty() || Path::new(entry).is_absolute()
                 })
                 .cloned()
                 .collect(),
@@ -1598,7 +1581,6 @@ fn normalize_key(value: &str) -> String {
     value
         .trim()
         .trim_matches('"')
-        .trim_start_matches(r"\\?\")
         .trim_end_matches(['\\', '/'])
         .replace('/', "\\")
         .to_ascii_lowercase()
@@ -1645,25 +1627,12 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> AppResult<()> {
 
 #[cfg(windows)]
 fn write_user_environment(values: &EnvironmentMap) -> AppResult<()> {
-    use winreg::{RegValue, enums::{KEY_READ, RegType}, types::FromRegValue};
-
     let root = RegKey::predef(HKEY_CURRENT_USER);
     let key = root
-        .open_subkey_with_flags("Environment", KEY_READ | KEY_SET_VALUE)
+        .open_subkey_with_flags("Environment", KEY_SET_VALUE)
         .map_err(|error| AppError::Message(format!("打开 HKCU\\Environment 失败：{error}")))?;
-    // 记录现有字符串值的名称、注册表类型和原文，
-    // 非字符串值（REG_DWORD 等）不属于本工具管理范围，保持原样。
-    let mut current = Vec::new();
-    for entry in key.enum_values() {
-        let Ok((name, raw)) = entry else {
-            continue;
-        };
-        let Ok(text) = String::from_reg_value(&raw) else {
-            continue;
-        };
-        current.push((name, raw.vtype, text));
-    }
-    for (name, _, _) in &current {
+    let current = read_environment(EnvironmentScope::User)?;
+    for name in current.keys() {
         if !values
             .keys()
             .any(|candidate| candidate.eq_ignore_ascii_case(name))
@@ -1674,31 +1643,7 @@ fn write_user_environment(values: &EnvironmentMap) -> AppResult<()> {
         }
     }
     for (name, value) in values {
-        let existing = current
-            .iter()
-            .find(|(existing_name, _, _)| existing_name.eq_ignore_ascii_case(name));
-        // 值未变化时不重写，保留原始注册表类型和名称大小写。
-        if existing.is_some_and(|(_, _, text)| text == value) {
-            continue;
-        }
-        // Windows 只对 REG_EXPAND_SZ 展开 %VAR%；沿用既有类型，新值含 % 时按可展开类型写入。
-        let vtype = match existing {
-            Some((_, RegType::REG_EXPAND_SZ, _)) => RegType::REG_EXPAND_SZ,
-            Some((_, RegType::REG_SZ, _)) => RegType::REG_SZ,
-            _ => {
-                if value.contains('%') {
-                    RegType::REG_EXPAND_SZ
-                } else {
-                    RegType::REG_SZ
-                }
-            }
-        };
-        let bytes = value
-            .encode_utf16()
-            .chain(std::iter::once(0))
-            .flat_map(u16::to_le_bytes)
-            .collect::<Vec<u8>>();
-        key.set_raw_value(name, &RegValue { bytes, vtype })
+        key.set_value(name, value)
             .map_err(|error| AppError::Message(format!("写入用户环境变量 {name} 失败：{error}")))?;
     }
     Ok(())

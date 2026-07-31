@@ -73,11 +73,13 @@ const state: {
   toolDefinitions: ToolDefinition[];
   scan?: EnvironmentScan;
   catalogs: Map<string, VersionCatalog>;
+  fetchingCatalogs: Set<string>;
   scanning: boolean;
   error?: string;
   selectedToolId?: string;
   pendingPlan?: OperationPlan;
   applying: boolean;
+  operationPanelMinimized: boolean;
   progress?: OperationProgress;
   notice?: string;
   backups: EnvironmentBackupSummary[];
@@ -100,8 +102,10 @@ const state: {
   trayReady: false,
   toolDefinitions: [],
   catalogs: new Map(),
+  fetchingCatalogs: new Set(),
   scanning: false,
   applying: false,
+  operationPanelMinimized: false,
   backups: [],
   logs: [],
   toolRoots: {},
@@ -215,6 +219,8 @@ function managedTools(): ToolView[] {
 function renderShell(): string {
   const active = state.view;
   const activeNav = active === "tool-detail" ? "tools" : active;
+  const hasBackgroundOperation =
+    state.applying && state.operationPanelMinimized;
   const selectedTool =
     active === "tool-detail"
       ? managedTools().find((tool) => tool.id === state.selectedToolId)
@@ -223,6 +229,12 @@ function renderShell(): string {
   const diagnosticCount =
     (scan?.issues.length ?? 0) +
     (scan?.tools.reduce((total, tool) => total + tool.issues.length, 0) ?? 0);
+  const updateAvailable = state.applicationUpdate?.phase === "available";
+  const updateIndicatorLabel = updateAvailable
+    ? `发现新版本 ${state.applicationUpdate?.availableVersion ?? ""}`
+    : state.applicationUpdate?.phase === "error"
+      ? "更新检查失败，请进入设置重试"
+      : "当前未发现新版本";
   const score = healthScore(scan);
   return `
     <div class="app-shell">
@@ -242,6 +254,7 @@ function renderShell(): string {
                   ${icon(item.icon)}
                   <span>${item.label}</span>
                   ${item.id === "diagnostics" && diagnosticCount ? `<em>${diagnosticCount}</em>` : ""}
+                  ${item.id === "settings" ? `<i class="nav-update-dot ${updateAvailable ? "available" : "current"}" role="status" aria-label="${escapeHtml(updateIndicatorLabel)}" title="${escapeHtml(updateIndicatorLabel)}"></i>` : ""}
                 </button>
               `,
             )
@@ -257,12 +270,12 @@ function renderShell(): string {
         </div>
         <div class="data-root">
           <span>数据目录</span>
-          <code title="${escapeHtml(state.bootstrap?.dataRoot ?? "正在读取…")}">${escapeHtml(
+          <code class="path-text" lang="en-US" dir="ltr" title="${escapeHtml(state.bootstrap?.dataRoot ?? "正在读取…")}">${escapeHtml(
             state.bootstrap?.dataRoot ?? "正在读取…",
           )}</code>
         </div>
       </aside>
-      <main class="main">
+      <main class="main${hasBackgroundOperation ? " has-background-operation" : ""}">
         <header class="topbar">
           <div class="breadcrumb">
             <span>工作区</span>
@@ -278,10 +291,11 @@ function renderShell(): string {
           </div>
         </header>
         <section class="content">
-          ${state.error ? `<div class="error-banner">${icon("CircleAlert")}<span>${escapeHtml(state.error)}</span></div>` : ""}
-          ${state.notice ? `<div class="notice-banner">${icon("CircleCheck")}<span>${escapeHtml(state.notice)}</span><button id="dismiss-notice">${icon("X", 14)}</button></div>` : ""}
+          ${state.error ? `<div class="error-banner path-context">${icon("CircleAlert")}<span>${escapeHtml(state.error)}</span></div>` : ""}
+          ${state.notice ? `<div class="notice-banner path-context">${icon("CircleCheck")}<span>${escapeHtml(state.notice)}</span><button id="dismiss-notice">${icon("X", 14)}</button></div>` : ""}
           ${renderView(score)}
         </section>
+        ${renderBackgroundOperation()}
         ${renderOverlays()}
       </main>
     </div>
@@ -418,9 +432,9 @@ function renderToolCard(tool: ToolInventory): string {
         <span>默认版本</span>
         <strong>${current ? escapeHtml(current.version) : "未安装"}</strong>
       </div>
-      <div class="tool-location" title="${escapeHtml(current?.path ?? "未发现路径")}">
+      <div class="tool-location" lang="en-US" dir="ltr" title="${escapeHtml(current?.path ?? "未发现路径")}">
         ${icon("FolderClosed", 14)}
-        <code>${escapeHtml(current?.path ?? "未发现路径")}</code>
+        <code class="path-text" lang="en-US" dir="ltr">${escapeHtml(current?.path ?? "未发现路径")}</code>
       </div>
       <div class="tool-footer">
         <span>${tool.installedVersions.length} 个已安装版本</span>
@@ -520,9 +534,9 @@ function renderToolGroup(
         android
           ? `<div class="android-root-inline panel">
                <div class="path-icon">${icon("FolderCog", 21)}</div>
-               <div><span>Android 统一安装根目录</span><code>${escapeHtml(state.androidRoot ?? "尚未设置")}</code><small>可直接填写或浏览选择；保存后同步到 SDK、NDK、JDK、Gradle、CMake、ADB。</small></div>
+               <div><span>Android 统一安装根目录</span><small>可直接填写或浏览选择；保存后同步到 SDK、NDK、JDK、Gradle、CMake、ADB。</small></div>
                <div class="inline-root-actions">
-                 <input data-android-root-input value="${escapeHtml(state.androidRoot ?? "")}" placeholder="例如 E:\\Development\\Android" spellcheck="false">
+                 <input class="path-input" lang="en-US" dir="ltr" data-android-root-input value="${escapeHtml(state.androidRoot ?? "")}" placeholder="例如 E:\\Development\\Android" spellcheck="false">
                  <button class="secondary-button" data-save-android-root>保存路径</button>
                  <button class="secondary-button" data-select-android-root>浏览</button>
                </div>
@@ -551,7 +565,7 @@ function renderToolLibraryCard(tool: ToolView): string {
         <span><small>当前默认</small><strong>${escapeHtml(tool.scanned ? (tool.defaultVersion?.version ?? "未安装") : "未扫描")}</strong></span>
         <span><small>本机版本</small><strong>${tool.installedVersions.length}</strong></span>
       </span>
-      <span class="tool-library-path ${root ? "" : "unset"}">${icon("Folder", 14)}<code>${escapeHtml(root ?? "未设置安装目录")}</code></span>
+      <span class="tool-library-path ${root ? "" : "unset"}">${icon("Folder", 14)}<code class="path-text" lang="en-US" dir="ltr">${escapeHtml(root ?? "未设置安装目录")}</code></span>
       <span class="tool-library-open">进入独立管理页 ${icon("ArrowRight", 15)}</span>
     </button>
   `;
@@ -570,6 +584,7 @@ function renderToolDetail(): string {
     `;
   }
   const catalog = state.catalogs.get(tool.id);
+  const fetchingCatalog = state.fetchingCatalogs.has(tool.id);
   const installRoot = state.toolRoots[tool.id];
   const sharedAndroidRoot = androidWorkspaceTools.has(tool.id);
   return `
@@ -591,11 +606,10 @@ function renderToolDetail(): string {
         <div>
           <p class="eyebrow">${sharedAndroidRoot ? "SHARED ANDROID ROOT" : "DEFAULT INSTALL ROOT"}</p>
           <h2>${sharedAndroidRoot ? "Android 共用安装根目录" : `${escapeHtml(tool.displayName)} 默认安装根目录`}</h2>
-          <code>${escapeHtml(installRoot ?? "尚未设置；设置后才能安装官方版本")}</code>
           <p>${sharedAndroidRoot ? "该目录同时用于 SDK、NDK、JDK、Gradle、CMake 与 ADB，修改后会同步到整个 Android 分组。" : "选择结果保存在 EnvNexus AI 数据目录中；以后安装该工具的新版本会自动使用此根目录。"}</p>
         </div>
         <div class="install-root-actions">
-          <input data-tool-root-input="${escapeHtml(tool.id)}" value="${escapeHtml(installRoot ?? "")}" placeholder="例如 E:\\Development\\${escapeHtml(tool.id)}" spellcheck="false">
+          <input class="path-input" lang="en-US" dir="ltr" data-tool-root-input="${escapeHtml(tool.id)}" value="${escapeHtml(installRoot ?? "")}" placeholder="例如 E:\\Development\\${escapeHtml(tool.id)}" spellcheck="false">
           <button class="${installRoot ? "secondary-button" : "primary-button"}" data-save-tool-root="${escapeHtml(tool.id)}">${icon("Save", 16)} 保存路径</button>
           <button class="secondary-button" data-select-tool-root="${escapeHtml(tool.id)}">${icon("FolderOpen", 16)} 浏览</button>
         </div>
@@ -610,7 +624,7 @@ function renderToolDetail(): string {
                     .map(
                       (version) => `
                         <article class="version-item ${version.isDefault ? "default" : ""}">
-                          <div><strong>${escapeHtml(version.version)}</strong><span>${version.isDefault ? "当前默认" : version.managed ? "EnvNexus AI 受管" : escapeHtml(version.source)}</span><code title="${escapeHtml(version.path)}">${escapeHtml(version.path)}</code></div>
+                          <div><strong>${escapeHtml(version.version)}</strong><span>${version.isDefault ? "当前默认" : version.managed ? "EnvNexus AI 受管" : escapeHtml(version.source)}</span><code class="path-text" lang="en-US" dir="ltr" title="${escapeHtml(version.path)}">${escapeHtml(version.path)}</code></div>
                           <div class="version-actions">
                             ${!version.isDefault ? `<button class="secondary-button" data-switch-path="${encodeURIComponent(version.path)}">切换默认</button>` : ""}
                             ${version.managed ? `<button class="secondary-button" data-repair-path="${encodeURIComponent(version.path)}">修复</button>` : ""}
@@ -627,11 +641,11 @@ function renderToolDetail(): string {
         <section class="tool-detail-section panel">
           <div class="drawer-section-title">
             <div><p class="eyebrow">OFFICIAL RELEASES</p><h3>官方可安装版本</h3></div>
-            <button class="text-button" data-fetch-versions="${escapeHtml(tool.id)}">${catalog ? "刷新版本" : "查询官方源"}</button>
+            <button class="text-button" data-fetch-versions="${escapeHtml(tool.id)}" ${fetchingCatalog ? "disabled" : ""}>${fetchingCatalog ? `${icon("LoaderCircle", 14)} 查询中…` : catalog ? "刷新版本" : "查询官方源"}</button>
           </div>
           ${
             catalog
-              ? `<div class="source-proof">${icon("BadgeCheck", 15)}<span>${escapeHtml(catalog.sourceName)}</span><time>${new Date(catalog.fetchedAt).toLocaleString(state.appPreferences?.language ?? "zh-CN")}</time></div>
+              ? `<div class="source-proof ${catalog.cached ? "cached" : ""}">${icon(catalog.cached ? "CloudOff" : "BadgeCheck", 15)}<span>${escapeHtml(catalog.sourceName)}${catalog.cached ? " · 网络不可用，显示上次成功结果" : ""}</span><time>${new Date(catalog.fetchedAt).toLocaleString(state.appPreferences?.language ?? "zh-CN")}</time></div>
                  <div class="version-stack remote-stack">
                    ${catalog.versions
                      .slice(0, 30)
@@ -708,7 +722,7 @@ function renderDiagnostics(): string {
                 (manager) => `
                   <article>
                     <span>${icon("Waypoints", 18)}</span>
-                    <div><strong>${escapeHtml(manager.displayName)}</strong><p>管理 ${manager.toolIds.map(escapeHtml).join(" / ")}${manager.currentVersion ? ` · 当前 ${escapeHtml(manager.currentVersion)}` : ""}</p><code>${escapeHtml(manager.evidence)}</code></div>
+                    <div><strong>${escapeHtml(manager.displayName)}</strong><p>管理 ${manager.toolIds.map(escapeHtml).join(" / ")}${manager.currentVersion ? ` · 当前 ${escapeHtml(manager.currentVersion)}` : ""}</p><code class="path-context">${escapeHtml(manager.evidence)}</code></div>
                   </article>`,
               )
               .join("")}</div>`
@@ -731,7 +745,7 @@ function renderDiagnostics(): string {
                     <div class="log-line">
                       <span>${escapeHtml(entry.level)}</span>
                       <time>${new Date(entry.timestamp).toLocaleString(state.appPreferences?.language ?? "zh-CN")}</time>
-                      <p>${escapeHtml(entry.event)}<br><code>${escapeHtml(entry.path)}</code></p>
+                      <p>${escapeHtml(entry.event)}<br><code class="path-text" lang="en-US" dir="ltr">${escapeHtml(entry.path)}</code></p>
                     </div>`,
                 )
                 .join("")
@@ -750,7 +764,7 @@ function renderDiagnostic(issue: DiagnosticIssue): string {
   return `
     <article class="diagnostic-item ${issue.level}">
       <span>${icon(issue.level === "error" ? "CircleX" : issue.level === "warning" ? "TriangleAlert" : "Info", 19)}</span>
-      <div><strong>${escapeHtml(issue.title)}</strong><p>${escapeHtml(issue.detail)}</p>${issue.evidence ? `<code>${escapeHtml(issue.evidence)}</code>` : ""}</div>
+      <div><strong>${escapeHtml(issue.title)}</strong><p class="path-context">${escapeHtml(issue.detail)}</p>${issue.evidence ? `<code class="path-context">${escapeHtml(issue.evidence)}</code>` : ""}</div>
       <div class="diagnostic-actions">
         <button class="analysis-action" data-local-guidance="${encodeURIComponent(issue.code)}">${icon("ClipboardCheck", 14)} 本地分析与建议</button>
         ${
@@ -829,6 +843,9 @@ function renderCommands(): string {
         <p>脚本调用同一个 EnvNexus AI 主程序。PATH 变更会先显示差异、备份与确认计划。</p>
         <div class="command-directory-editor">
           <input
+            class="path-input"
+            lang="en-US"
+            dir="ltr"
             id="terminal-command-directory"
             type="text"
             value="${escapeHtml(status?.directory ?? "")}"
@@ -877,7 +894,7 @@ function renderCommands(): string {
                 <p><code>${prefix}-list</code><span>已安装版本与当前默认版本</span></p>
                 <p><code>${prefix}-versions</code><span>查询官方可安装版本</span></p>
                 <p><code>${prefix}-root get</code><span>查看管理目录</span></p>
-                <p><code>${prefix}-root set "E:\\..."</code><span>设置管理目录</span></p>
+                <p><code class="path-context">${prefix}-root set "E:\\..."</code><span>设置管理目录</span></p>
                 <p><code>${prefix}-install &lt;version&gt;</code><span>预览安装；加 <b>--yes</b> 执行</span></p>
                 <p><code>${prefix}-use &lt;path&gt;</code><span>预览默认版本切换</span></p>
                 <p><code>${prefix}-repair &lt;path&gt;</code><span>预览受管版本修复</span></p>
@@ -967,7 +984,7 @@ function renderSettings(): string {
     </section>
     <section class="settings-section panel horizontal">
       <div class="settings-copy"><p class="eyebrow">STORAGE</p><h2>数据根目录</h2><p>配置、缓存、日志、备份和下载包统一存放。</p></div>
-      <div class="path-setting"><code>${escapeHtml(state.bootstrap?.dataRoot ?? "正在读取…")}</code><button class="secondary-button" id="change-data-root">更改</button></div>
+      <div class="path-setting"><code class="path-text" lang="en-US" dir="ltr">${escapeHtml(state.bootstrap?.dataRoot ?? "正在读取…")}</code><button class="secondary-button" id="change-data-root">更改</button></div>
     </section>
     ${renderApplicationUpdate()}
     ${renderAiSettings()}
@@ -976,7 +993,7 @@ function renderSettings(): string {
 
 function renderApplicationUpdate(): string {
   const status = state.applicationUpdate;
-  const currentVersion = state.bootstrap?.appVersion ?? "0.1.0";
+  const currentVersion = state.bootstrap?.appVersion ?? "0.1.2";
   const statusIcon =
     status?.phase === "error"
       ? "CircleAlert"
@@ -992,14 +1009,14 @@ function renderApplicationUpdate(): string {
     : "";
   const progress =
     status?.phase === "downloading"
-      ? `<div class="update-progress"><div><i style="width:${status.progressPercent ?? 3}%"></i></div><span>${Math.round(status.progressPercent ?? 0)}%</span></div>`
+      ? `<div class="update-progress"><div><i data-app-update-progress-bar style="width:${status.progressPercent ?? 3}%"></i></div><span data-app-update-percent>${Math.round(status.progressPercent ?? 0)}%</span></div>`
       : "";
   return `
     <section class="settings-section panel update-settings-section">
       <div class="settings-copy">
         <p class="eyebrow">APPLICATION UPDATE</p>
         <h2>应用更新</h2>
-        <p>仅在点击检查时连接 GitHub。发现新版本后先显示版本与发布说明，确认后才下载经过签名验证的安装包。</p>
+        <p>程序启动时自动连接 GitHub Releases 检查版本；发现更新后显示版本与发布说明，确认后才下载经过签名验证的安装包。</p>
       </div>
       <div class="update-settings-content">
         <div class="update-version-row">
@@ -1011,11 +1028,11 @@ function renderApplicationUpdate(): string {
           status
             ? `<div class="update-status update-status-${status.phase}">
                 ${icon(statusIcon as keyof typeof icons, 18)}
-                <div><strong>${status.phase === "available" ? `发现 EnvNexus AI ${escapeHtml(status.availableVersion ?? "")}` : escapeHtml(status.message)}</strong>
+                <div><strong ${status.phase === "downloading" ? "data-app-update-message" : ""}>${status.phase === "available" ? `发现 EnvNexus AI ${escapeHtml(status.availableVersion ?? "")}` : escapeHtml(status.message)}</strong>
                 ${status.phase === "available" ? `<span>${escapeHtml(status.message)}</span>` : ""}</div>
                 ${status.phase === "available" ? `<button class="primary-button" id="install-app-update">${icon("Download", 16)} 确认并更新</button>` : ""}
               </div>${notes}${progress}`
-            : `<div class="update-idle-note">${icon("ShieldCheck", 16)} 更新元数据来自 GitHub Releases，安装前由内置公钥验证签名；不会在启动时自动联网。</div>`
+            : `<div class="update-idle-note">${icon("ShieldCheck", 16)} 正在等待启动检查；更新元数据来自 GitHub Releases，安装前由内置公钥验证签名。</div>`
         }
         <p class="update-portable-note">${icon("Info", 14)} Windows 安装版会原地升级；便携版确认更新后会启动当前用户安装程序，原便携文件不会被静默覆盖。</p>
       </div>
@@ -1175,6 +1192,7 @@ function collectAiProviderInput(root: HTMLElement): AiProviderInput | undefined 
 }
 
 function renderOverlays(): string {
+  if (state.applying && state.operationPanelMinimized) return "";
   if (state.pendingPlan) return renderPlanModal(state.pendingPlan);
   if (state.diagnosticGuidance) {
     return renderDiagnosticGuidanceModal(state.diagnosticGuidance);
@@ -1183,13 +1201,44 @@ function renderOverlays(): string {
   return "";
 }
 
+function operationPercent(progress = state.progress): number {
+  const percent = progress?.percent;
+  return percent !== undefined && Number.isFinite(percent)
+    ? Math.min(100, Math.max(0, percent))
+    : 4;
+}
+
+function operationPercentLabel(progress = state.progress): string {
+  return progress?.percent !== undefined && Number.isFinite(progress.percent)
+    ? `${operationPercent(progress).toFixed(1)}%`
+    : "处理中";
+}
+
+function renderBackgroundOperation(): string {
+  if (!state.applying || !state.operationPanelMinimized) return "";
+  return `
+    <aside class="background-operation panel" data-background-operation aria-live="polite" aria-label="后台任务">
+      <span class="background-operation-icon">${icon("LoaderCircle", 19)}</span>
+      <div class="background-operation-copy">
+        <small>BACKGROUND TASK</small>
+        <strong data-operation-message>${escapeHtml(state.progress?.message ?? "正在后台启动任务…")}</strong>
+        <div class="background-operation-progress">
+          <span><i data-operation-progress-bar style="width:${operationPercent()}%"></i></span>
+          <span data-operation-percent>${operationPercentLabel()}</span>
+        </div>
+      </div>
+      <button class="secondary-button" id="show-operation-progress">查看进度</button>
+    </aside>
+  `;
+}
+
 function renderDiagnosticGuidanceModal(guidance: DiagnosticGuidance): string {
   const aiReady = Boolean(
     activeAiProvider()?.apiKeyConfigured && activeAiProvider()?.selectedModel,
   );
   const list = (items: string[]) =>
     items.length
-      ? `<ul>${items.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul>`
+      ? `<ul class="path-context">${items.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul>`
       : `<p class="guidance-empty">没有额外项目。</p>`;
   return `
     <div class="overlay plan-overlay">
@@ -1213,7 +1262,7 @@ function renderDiagnosticGuidanceModal(guidance: DiagnosticGuidance): string {
                   (command, index) => `
                     <article class="${command.changesEnvironment ? "changes-environment" : ""}">
                       <span><strong>${escapeHtml(command.label)}</strong><small>${escapeHtml(command.shell)}${command.requiresElevation ? " · 需要管理员权限" : command.changesEnvironment ? " · 会修改用户环境" : " · 只读"}</small></span>
-                      <code>${escapeHtml(command.command)}</code>
+                      <code class="path-context">${escapeHtml(command.command)}</code>
                       <button class="secondary-button" data-copy-guidance-command="${index}">${icon("Copy", 14)} 复制</button>
                     </article>`,
                 )
@@ -1248,7 +1297,7 @@ function renderAiAnalysisModal(analysis: AiDiagnosticAnalysis): string {
         </header>
         <div class="ai-analysis-body">
           <div class="ai-analysis-warning">${icon("TriangleAlert", 16)} AI 输出仅作为处理建议；可执行修复仍必须使用 EnvNexus AI 的本地差异计划。</div>
-          <pre>${escapeHtml(analysis.content)}</pre>
+          <pre class="path-context">${escapeHtml(analysis.content)}</pre>
         </div>
         <footer class="plan-footer">
           <span>${icon("ShieldCheck", 14)} AI 未执行任何环境变更</span>
@@ -1264,36 +1313,35 @@ function renderPlanModal(plan: OperationPlan): string {
     <div class="overlay plan-overlay">
       <section class="plan-modal panel" role="dialog" aria-modal="true" aria-label="变更确认">
         <header class="plan-header">
-          <div><p class="eyebrow">CONFIRM OPERATION</p><h2>${escapeHtml(plan.title)}</h2><p>${escapeHtml(plan.summary)}</p></div>
-          ${!state.applying ? `<button class="icon-button" id="cancel-plan">${icon("X")}</button>` : ""}
+          <div><p class="eyebrow">CONFIRM OPERATION</p><h2>${escapeHtml(plan.title)}</h2><p class="path-context">${escapeHtml(plan.summary)}</p></div>
+          ${state.applying ? `<button class="icon-button" id="minimize-operation" aria-label="后台运行">${icon("Minimize2")}</button>` : `<button class="icon-button" id="cancel-plan">${icon("X")}</button>`}
         </header>
         ${
           state.applying
-            ? `<div class="operation-progress">
+            ? `<div class="operation-progress" data-operation-progress>
                  <span class="progress-icon">${icon(state.progress?.phase === "complete" ? "CircleCheck" : "LoaderCircle", 28)}</span>
-                 <strong>${escapeHtml(state.progress?.message ?? "正在启动事务…")}</strong>
-                 <div class="progress-track"><i style="width:${state.progress?.percent ?? 4}%"></i></div>
-                 <small>${state.progress?.percent !== undefined ? `${state.progress.percent.toFixed(1)}%` : "请勿关闭 App"}</small>
+                 <strong data-operation-message>${escapeHtml(state.progress?.message ?? "正在后台启动任务…")}</strong>
+                 <div class="progress-track"><i data-operation-progress-bar style="width:${operationPercent()}%"></i></div>
+                 <small data-operation-percent>${operationPercentLabel()}</small>
                </div>`
             : `<div class="plan-body">
                  ${plan.requiresElevation ? `<div class="plan-blocker">${icon("ShieldAlert", 19)}<div><strong>当前计划被安全边界阻止</strong><p>系统 PATH 会遮蔽用户版本；本版本不擅自修改系统级配置。</p></div></div>` : ""}
                  ${
                    plan.warnings.length
-                     ? `<div class="plan-warnings">${plan.warnings.map((warning) => `<p>${icon("TriangleAlert", 15)}<span>${escapeHtml(warning)}</span></p>`).join("")}</div>`
+                     ? `<div class="plan-warnings path-context">${plan.warnings.map((warning) => `<p>${icon("TriangleAlert", 15)}<span>${escapeHtml(warning)}</span></p>`).join("")}</div>`
                      : ""
                  }
                  <div class="plan-columns">
-                   <div><p class="eyebrow">STEPS</p><ol class="plan-steps">${plan.steps.map((step) => `<li class="${step.destructive ? "destructive" : ""}"><span>${icon(step.destructive ? "Trash2" : "Check", 14)}</span><p>${escapeHtml(step.description)}</p></li>`).join("")}</ol></div>
+                   <div><p class="eyebrow">STEPS</p><ol class="plan-steps path-context">${plan.steps.map((step) => `<li class="${step.destructive ? "destructive" : ""}"><span>${icon(step.destructive ? "Trash2" : "Check", 14)}</span><p>${escapeHtml(step.description)}</p></li>`).join("")}</ol></div>
                    <div><p class="eyebrow">ENVIRONMENT DIFF</p>${renderEnvironmentDiffs(plan)}</div>
                  </div>
                </div>`
         }
         <footer class="plan-footer">
-          <span>${icon("LockKeyhole", 14)} 计划将在 ${new Date(plan.expiresAt).toLocaleTimeString("zh-CN")} 过期</span>
           ${
             !state.applying
-              ? `<div><button class="secondary-button" id="cancel-plan">取消</button><button class="primary-button" id="confirm-plan" ${plan.requiresElevation ? "disabled" : ""}>${icon("ShieldCheck", 16)} 确认并执行</button></div>`
-              : ""
+              ? `<span>${icon("LockKeyhole", 14)} 计划将在 ${new Date(plan.expiresAt).toLocaleTimeString("zh-CN")} 过期</span><div><button class="secondary-button" id="cancel-plan">取消</button><button class="primary-button" id="confirm-plan" ${plan.requiresElevation ? "disabled" : ""}>${icon("ShieldCheck", 16)} 确认并执行</button></div>`
+              : `<span>${icon("Info", 14)} 可继续使用应用或最小化到托盘；退出应用会中止任务</span><div><button class="primary-button" id="minimize-operation">${icon("Minimize2", 16)} 后台运行</button></div>`
           }
         </footer>
       </section>
@@ -1309,8 +1357,8 @@ function renderEnvironmentDiffs(plan: OperationPlan): string {
     .map(
       (diff) => `
         <article><strong>${escapeHtml(diff.variable)} <small>${diff.scope === "user" ? "用户级" : "系统级"}</small></strong>
-          ${diff.added.map((value) => `<code class="add">+ ${escapeHtml(value)}</code>`).join("")}
-          ${diff.removed.map((value) => `<code class="remove">- ${escapeHtml(value)}</code>`).join("")}
+          ${diff.added.map((value) => `<code class="add path-context">+ ${escapeHtml(value)}</code>`).join("")}
+          ${diff.removed.map((value) => `<code class="remove path-context">- ${escapeHtml(value)}</code>`).join("")}
         </article>`,
     )
     .join("")}</div>`;
@@ -1880,16 +1928,19 @@ function bindEvents(root: HTMLElement): void {
   root.querySelectorAll<HTMLButtonElement>("[data-fetch-versions]").forEach((element) => {
     element.addEventListener("click", async () => {
       const toolId = element.dataset.fetchVersions;
-      if (!toolId) return;
-      element.disabled = true;
-      element.textContent = "查询中…";
+      if (!toolId || state.fetchingCatalogs.has(toolId)) return;
+      state.fetchingCatalogs.add(toolId);
+      state.error = undefined;
+      render();
       try {
         state.catalogs.set(toolId, await backend.fetchVersions(toolId));
         state.error = undefined;
       } catch (error) {
         state.error = `官方版本查询失败：${String(error)}`;
+      } finally {
+        state.fetchingCatalogs.delete(toolId);
+        render();
       }
-      render();
     });
   });
   root.querySelectorAll<HTMLButtonElement>("[data-install-version]").forEach((element) => {
@@ -1963,6 +2014,18 @@ function bindEvents(root: HTMLElement): void {
       render();
     });
   });
+  root.querySelectorAll("#minimize-operation").forEach((element) => {
+    element.addEventListener("click", () => {
+      if (!state.applying) return;
+      state.operationPanelMinimized = true;
+      render();
+    });
+  });
+  root.querySelector("#show-operation-progress")?.addEventListener("click", () => {
+    if (!state.applying || !state.pendingPlan) return;
+    state.operationPanelMinimized = false;
+    render();
+  });
   root.querySelector("#confirm-plan")?.addEventListener("click", () => void applyPendingPlan());
   root.querySelector("#dismiss-notice")?.addEventListener("click", () => {
     state.notice = undefined;
@@ -2008,7 +2071,9 @@ function bindEvents(root: HTMLElement): void {
   });
 }
 
-async function checkForApplicationUpdate(): Promise<void> {
+async function checkForApplicationUpdate(
+  options: { automatic?: boolean } = {},
+): Promise<void> {
   if (
     state.applicationUpdate?.phase === "checking" ||
     state.applicationUpdate?.phase === "downloading"
@@ -2017,7 +2082,9 @@ async function checkForApplicationUpdate(): Promise<void> {
   }
   state.applicationUpdate = {
     phase: "checking",
-    message: "正在连接 GitHub Releases…",
+    message: options.automatic
+      ? "正在启动检查 GitHub Releases…"
+      : "正在连接 GitHub Releases…",
   };
   state.error = undefined;
   render();
@@ -2099,7 +2166,7 @@ async function installApplicationUpdate(): Promise<void> {
         availableVersion: update.version,
         progressPercent: percent,
       };
-      render();
+      updateApplicationUpdateProgressUi();
     });
     await relaunch();
   } catch (error) {
@@ -2134,6 +2201,14 @@ async function applyPendingPlan(): Promise<void> {
   const plan = state.pendingPlan;
   if (!plan || state.applying) return;
   state.applying = true;
+  state.operationPanelMinimized = true;
+  state.progress = {
+    operationId: plan.id,
+    phase: "starting",
+    message: "正在后台启动任务…",
+    receivedBytes: 0,
+    percent: 0,
+  };
   state.error = undefined;
   render();
   try {
@@ -2149,8 +2224,11 @@ async function applyPendingPlan(): Promise<void> {
     }
   } catch (error) {
     state.error = `操作失败：${String(error)}`;
+    state.pendingPlan = undefined;
+    state.progress = undefined;
   } finally {
     state.applying = false;
+    state.operationPanelMinimized = false;
     render();
   }
 }
@@ -2181,6 +2259,34 @@ function render(): void {
   bindEvents(root);
   lastRenderedView = state.view;
   restoreMainScrollPosition(root, preservedScrollTop);
+}
+
+function updateOperationProgressUi(): void {
+  const progress = state.progress;
+  if (!progress) return;
+  document.querySelectorAll<HTMLElement>("[data-operation-message]").forEach((element) => {
+    element.textContent = progress.message;
+  });
+  document
+    .querySelectorAll<HTMLElement>("[data-operation-progress-bar]")
+    .forEach((element) => {
+      element.style.width = `${operationPercent(progress)}%`;
+    });
+  document.querySelectorAll<HTMLElement>("[data-operation-percent]").forEach((element) => {
+    element.textContent = operationPercentLabel(progress);
+  });
+}
+
+function updateApplicationUpdateProgressUi(): void {
+  const status = state.applicationUpdate;
+  if (!status || status.phase !== "downloading") return;
+  const percent = Math.min(100, Math.max(0, status.progressPercent ?? 0));
+  const message = document.querySelector<HTMLElement>("[data-app-update-message]");
+  const bar = document.querySelector<HTMLElement>("[data-app-update-progress-bar]");
+  const label = document.querySelector<HTMLElement>("[data-app-update-percent]");
+  if (message) message.textContent = status.message;
+  if (bar) bar.style.width = `${percent}%`;
+  if (label) label.textContent = `${Math.round(percent)}%`;
 }
 
 async function runScan(): Promise<void> {
@@ -2300,8 +2406,16 @@ export async function startApp(): Promise<void> {
   applyTheme(getStoredTheme());
   try {
     await listen<OperationProgress>("operation-progress", (event) => {
+      if (!state.applying) return;
+      const currentOperationId = state.pendingPlan?.id;
+      if (
+        currentOperationId &&
+        event.payload.operationId !== currentOperationId
+      ) {
+        return;
+      }
       state.progress = event.payload;
-      if (state.applying) render();
+      updateOperationProgressUi();
     });
     await listen<TrayAction>("tray-action", (event) => {
       void handleTrayAction(event.payload);
@@ -2350,6 +2464,7 @@ export async function startApp(): Promise<void> {
       state.selectedToolId = undefined;
     }
     render();
+    void checkForApplicationUpdate({ automatic: true });
     if (appPreferences.startMinimized) {
       await backend.hideToTray();
     }

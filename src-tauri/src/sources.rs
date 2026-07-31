@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 use chrono::Utc;
 use futures_util::{StreamExt, stream};
@@ -16,7 +16,7 @@ pub async fn fetch(
     tool_id: &str,
     kind: VersionSourceKind,
 ) -> AppResult<VersionCatalog> {
-    match kind {
+    let mut catalog = match kind {
         VersionSourceKind::Python => fetch_python(client, tool_id).await,
         VersionSourceKind::Adoptium => fetch_adoptium(client, tool_id).await,
         VersionSourceKind::Go => fetch_go(client, tool_id).await,
@@ -54,7 +54,15 @@ pub async fn fetch(
         VersionSourceKind::DotNet => fetch_dotnet(client, tool_id).await,
         VersionSourceKind::Ruby => fetch_ruby(client, tool_id).await,
         VersionSourceKind::Php => fetch_php(client, tool_id).await,
+    }?;
+    if catalog.versions.is_empty() {
+        return Err(AppError::InvalidSource(format!(
+            "{} 没有返回可安装的 Windows x64 版本",
+            catalog.source_name
+        )));
     }
+    crate::versioning::sort_remote_versions_descending(&mut catalog.versions);
+    Ok(catalog)
 }
 
 fn catalog(
@@ -74,42 +82,78 @@ fn catalog(
 }
 
 async fn checked_text(client: &reqwest::Client, url: &str) -> AppResult<String> {
-    let response = checked_response(client, url).await?;
-    response.text().await.map_err(AppError::from)
+    let mut last_error = String::new();
+    for attempt in 0..3 {
+        match checked_response(client, url, "text/plain, text/html;q=0.9, */*;q=0.8").await {
+            Ok(response) => match response.text().await {
+                Ok(text) if !text.is_empty() => return Ok(text),
+                Ok(_) => last_error = "响应体为空".to_string(),
+                Err(error) => last_error = format!("响应体读取中断：{error}"),
+            },
+            Err(error) => last_error = error.to_string(),
+        }
+        retry_delay(attempt).await;
+    }
+    Err(AppError::Message(format!(
+        "官方版本源响应读取失败（已重试 3 次）：{url}：{last_error}"
+    )))
 }
 
 async fn checked_json<T>(client: &reqwest::Client, url: &str) -> AppResult<T>
 where
     T: serde::de::DeserializeOwned,
 {
-    let response = checked_response(client, url).await?;
-    response.json::<T>().await.map_err(AppError::from)
+    let mut last_error = String::new();
+    for attempt in 0..3 {
+        match checked_response(client, url, "application/json").await {
+            Ok(response) => {
+                let content_type = response
+                    .headers()
+                    .get(reqwest::header::CONTENT_TYPE)
+                    .and_then(|value| value.to_str().ok())
+                    .unwrap_or("未知 Content-Type")
+                    .to_string();
+                match response.bytes().await {
+                    Ok(bytes) if bytes.is_empty() => {
+                        last_error = "响应体为空".to_string();
+                    }
+                    Ok(bytes) => match serde_json::from_slice::<T>(&bytes) {
+                        Ok(value) => return Ok(value),
+                        Err(error) => {
+                            last_error =
+                                format!("JSON 数据不完整或格式已变化（{content_type}）：{error}");
+                        }
+                    },
+                    Err(error) => last_error = format!("响应体读取中断：{error}"),
+                }
+            }
+            Err(error) => last_error = error.to_string(),
+        }
+        retry_delay(attempt).await;
+    }
+    Err(AppError::InvalidSource(format!(
+        "{url}（已重试 3 次）：{last_error}"
+    )))
 }
 
-async fn checked_response(client: &reqwest::Client, url: &str) -> AppResult<reqwest::Response> {
-    for attempt in 0..2 {
-        match client.get(url).send().await {
-            Ok(response) => match response.error_for_status() {
-                Ok(response) => return Ok(response),
-                Err(error)
-                    if attempt == 0
-                        && error.status().is_some_and(|status| {
-                            status.is_server_error() || status.as_u16() == 429
-                        }) =>
-                {
-                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-                }
-                Err(error) => return Err(error.into()),
-            },
-            Err(error) if attempt == 0 && (error.is_timeout() || error.is_connect()) => {
-                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-            }
-            Err(error) => return Err(error.into()),
-        }
+async fn checked_response(
+    client: &reqwest::Client,
+    url: &str,
+    accept: &str,
+) -> AppResult<reqwest::Response> {
+    client
+        .get(url)
+        .header(reqwest::header::ACCEPT, accept)
+        .send()
+        .await?
+        .error_for_status()
+        .map_err(AppError::from)
+}
+
+async fn retry_delay(attempt: usize) {
+    if attempt < 2 {
+        tokio::time::sleep(std::time::Duration::from_millis(350 * (attempt as u64 + 1))).await;
     }
-    Err(AppError::Message(format!(
-        "官方版本源重试后仍不可用：{url}"
-    )))
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -212,13 +256,6 @@ struct AdoptiumVersion {
 async fn fetch_adoptium(client: &reqwest::Client, tool_id: &str) -> AppResult<VersionCatalog> {
     const SOURCE: &str = "https://api.adoptium.net/v3/info/available_releases";
     let info = checked_json::<AdoptiumInfo>(client, SOURCE).await?;
-    // LTS 以官方 available_lts_releases 集合为准（8、11、17、21、25…），
-    // 不能用奇偶数推断。
-    let lts_releases = info
-        .available_lts_releases
-        .iter()
-        .copied()
-        .collect::<HashSet<_>>();
     let mut majors = info.available_lts_releases;
     majors.push(info.most_recent_feature_release);
     majors.sort_unstable_by(|left, right| right.cmp(left));
@@ -229,7 +266,6 @@ async fn fetch_adoptium(client: &reqwest::Client, tool_id: &str) -> AppResult<Ve
     let results = stream::iter(majors)
         .map(move |major| {
             let client = client.clone();
-            let is_lts = lts_releases.contains(&major);
             async move {
                 let url = format!(
                     "https://api.adoptium.net/v3/assets/latest/{major}/hotspot?architecture=x64&image_type=jdk&os=windows&vendor=eclipse"
@@ -240,7 +276,7 @@ async fn fetch_adoptium(client: &reqwest::Client, tool_id: &str) -> AppResult<Ve
                     .next();
                 Ok::<_, AppError>(asset.map(|asset| RemoteVersion {
                     version: asset.version.openjdk_version,
-                    channel: if is_lts {
+                    channel: if major % 2 == 1 {
                         "LTS".to_string()
                     } else {
                         "feature".to_string()
@@ -257,13 +293,11 @@ async fn fetch_adoptium(client: &reqwest::Client, tool_id: &str) -> AppResult<Ve
         .buffer_unordered(4)
         .collect::<Vec<_>>()
         .await;
-    let mut versions = results
+    let versions = results
         .into_iter()
         .filter_map(Result::ok)
         .flatten()
-        .collect::<Vec<_>>();
-    // buffer_unordered 按完成顺序返回，需要重新按版本号降序排列
-    versions.sort_by(|left, right| crate::scanner::compare_versions(&right.version, &left.version));
+        .collect();
     Ok(catalog(tool_id, "Eclipse Adoptium", SOURCE, versions))
 }
 
@@ -366,32 +400,10 @@ struct NodeRelease {
 async fn fetch_node(client: &reqwest::Client, tool_id: &str) -> AppResult<VersionCatalog> {
     const SOURCE: &str = "https://nodejs.org/dist/index.json";
     let releases = checked_json::<Vec<NodeRelease>>(client, SOURCE).await?;
-    // 源按版本严格降序；直接取前 N 条只覆盖最新两三个大版本，
-    // 会漏掉仍在维护期的旧 LTS 线。改为最新 8 个大版本、每线取前 3 个，
-    // 请求量与原上限相当。
-    let mut majors_seen = Vec::<u64>::new();
-    let mut per_major = HashMap::<u64, usize>::new();
     let candidates = releases
         .into_iter()
         .filter(|release| release.files.iter().any(|file| file == "win-x64-zip"))
-        .filter(|release| {
-            let major = release
-                .version
-                .trim_start_matches('v')
-                .split('.')
-                .next()
-                .and_then(|value| value.parse::<u64>().ok())
-                .unwrap_or(0);
-            if !majors_seen.contains(&major) {
-                if majors_seen.len() >= 8 {
-                    return false;
-                }
-                majors_seen.push(major);
-            }
-            let count = per_major.entry(major).or_insert(0);
-            *count += 1;
-            *count <= 3
-        })
+        .take(24)
         .collect::<Vec<_>>();
     let client = client.clone();
     let results = stream::iter(candidates)
@@ -491,16 +503,13 @@ async fn fetch_maven(client: &reqwest::Client, tool_id: &str) -> AppResult<Versi
     let html = checked_text(client, SOURCE).await?;
     let version_pattern = Regex::new(r#"href="([0-9]+\.[0-9]+\.[0-9]+)/""#)
         .map_err(|error| AppError::Message(error.to_string()))?;
-    // 目录页按版本升序排列；先按版本降序再截断，避免只保留最旧的版本
-    let mut candidates = version_pattern
+    let candidates = version_pattern
         .captures_iter(&html)
         .filter_map(|capture| capture.get(1).map(|value| value.as_str().to_string()))
+        .take(12)
         .collect::<Vec<_>>();
-    candidates.sort_by(|left, right| crate::scanner::compare_versions(right, left));
-    candidates.dedup();
-    candidates.truncate(12);
     let client = client.clone();
-    let mut versions = stream::iter(candidates)
+    let versions = stream::iter(candidates)
         .map(move |version| {
             let client = client.clone();
             async move {
@@ -527,8 +536,6 @@ async fn fetch_maven(client: &reqwest::Client, tool_id: &str) -> AppResult<Versi
         .buffer_unordered(4)
         .collect::<Vec<_>>()
         .await;
-    // buffer_unordered 按完成顺序返回，需要重新按版本号降序排列
-    versions.sort_by(|left, right| crate::scanner::compare_versions(&right.version, &left.version));
     Ok(catalog(tool_id, "Apache Maven Downloads", SOURCE, versions))
 }
 
@@ -716,7 +723,7 @@ async fn fetch_php(client: &reqwest::Client, tool_id: &str) -> AppResult<Version
     let file_pattern =
         Regex::new(r#"href="(php-([0-9]+\.[0-9]+\.[0-9]+)-nts-Win32-vs[0-9]+-x64\.zip)""#)
             .map_err(|error| AppError::Message(error.to_string()))?;
-    let mut versions = file_pattern
+    let versions = file_pattern
         .captures_iter(&html)
         .filter_map(|capture| {
             let filename = capture.get(1)?.as_str();
@@ -733,10 +740,8 @@ async fn fetch_php(client: &reqwest::Client, tool_id: &str) -> AppResult<Version
                 notes_url: Some(format!("https://www.php.net/releases/{version}/en.php")),
             })
         })
-        .collect::<Vec<_>>();
-    // 目录页按版本升序排列；统一为新→旧再截断
-    versions.sort_by(|left, right| crate::scanner::compare_versions(&right.version, &left.version));
-    versions.truncate(24);
+        .take(24)
+        .collect();
     Ok(catalog(tool_id, "PHP for Windows", SOURCE, versions))
 }
 
@@ -944,6 +949,47 @@ fn non_empty(value: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{Read, Write};
+
+    #[derive(Debug, Deserialize)]
+    struct RetryFixture {
+        value: String,
+    }
+
+    #[test]
+    fn retries_when_a_json_response_body_is_truncated() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            for body in [r#"{"value":"#, r#"{"value":"complete"}"#] {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+                    .unwrap();
+                let mut request = [0_u8; 2048];
+                let _ = stream.read(&mut request);
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                stream.write_all(response.as_bytes()).unwrap();
+            }
+        });
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(2))
+            .build()
+            .unwrap();
+        let parsed = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(checked_json::<RetryFixture>(
+                &client,
+                &format!("http://{address}/catalog"),
+            ))
+            .unwrap();
+        server.join().unwrap();
+        assert_eq!(parsed.value, "complete");
+    }
 
     #[test]
     fn parses_windows_android_package_and_sha1() {
