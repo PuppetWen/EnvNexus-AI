@@ -310,8 +310,8 @@ code {
 .brand-update-tooltip {
   position: absolute;
   z-index: 70;
-  top: calc(100% + 10px);
-  right: 0;
+  top: 50%;
+  left: calc(100% + 12px);
   display: grid;
   gap: 5px;
   width: 228px;
@@ -325,7 +325,7 @@ code {
   opacity: 0;
   pointer-events: none;
   text-align: left;
-  transform: translateY(-5px);
+  transform: translate(8px, -50%);
   transition:
     opacity 150ms ease,
     transform 150ms ease,
@@ -334,15 +334,15 @@ code {
 
 .brand-update-tooltip::before {
   position: absolute;
-  right: 8px;
-  bottom: 100%;
+  top: 50%;
+  right: 100%;
   width: 8px;
   height: 8px;
-  border-top: 1px solid var(--accent-line);
+  border-bottom: 1px solid var(--accent-line);
   border-left: 1px solid var(--accent-line);
   background: var(--panel-solid);
   content: "";
-  transform: translateY(4px) rotate(45deg);
+  transform: translate(4px, -50%) rotate(45deg);
 }
 
 .brand-update-tooltip strong {
@@ -360,7 +360,7 @@ code {
 .brand-update-indicator:focus-visible .brand-update-tooltip {
   visibility: visible;
   opacity: 1;
-  transform: translateY(0);
+  transform: translate(0, -50%);
 }
 
 .sidebar-spacer {

@@ -73,7 +73,7 @@ shared plan_install/plan_switch/plan_repair/plan_uninstall
 
 ### `EnvironmentScan` 与版本管理器
 
-扫描只由显式 Tauri 命令或 `env-scan` 触发。成功结果原子写入 `<data-root>/cache/last-environment-scan.json`；启动路径只反序列化该快照，不调用扫描器。扫描结果额外记录 pyenv-win、NVM for Windows、fnm、Volta、rustup、Jabba、goenv、rbenv、Uru 的命令、根目录、当前版本和证据，并诊断同一工具的多管理器接管、管理器与外部安装并存、命令遮蔽及缺少默认版本。
+完整扫描只由显式 Tauri 命令或 `env-scan` 触发，遍历所有本地固定磁盘并写入 `tool-executable-discovery.json`。安装、切换、修复、卸载和 `env-refresh` 调用增量扫描：重新读取注册表环境，检查 `tool-version-probes.json` 中的路径、大小、修改时间和伴随元数据，只对新增或变化候选运行版本命令。完整扫描不复用版本探测缓存。成功结果原子写入 `<data-root>/cache/last-environment-scan.json`；启动路径只反序列化快照，不调用扫描器。
 
 环境规则还分析用户/系统 PATH、同名变量跨作用域冲突、Java 默认路径不一致，以及 `RUST1`/`RUST2` 一类“工具标识 + 绝对目录”的自定义别名。自定义别名只报告不自动合并，因为变量名的业务含义无法可靠推断。PATH 诊断修复通过环境变量推导保护路径，避免把版本管理器的 shim 或当前版本链接当作失效目录删除。
 
@@ -179,6 +179,8 @@ MVP 使用编译期 Rust trait 注册表：
       providers/<provider>.json
       secrets/<provider>.dpapi.json
   cache/last-environment-scan.json
+  cache/tool-executable-discovery.json
+  cache/tool-version-probes.json
   cache/version-sources/
   downloads/
   logs/
@@ -243,7 +245,7 @@ API Key 使用 Windows DPAPI 加密，WebView 只获得 `apiKeyConfigured` 布�
 - 环境差异与 PATH 清理使用纯函数测试；实际 HKCU 写入只通过交互式确认路径执行，本次开发未改动现有环境。
 - 扫描快照往返测试确保读取缓存不会调用扫描器；手工冒烟使用全新数据目录验证首次启动无快照、点击后生成快照、重启不改写快照。
 - AI 测试覆盖 OpenAI Compatible/Gemini 模型响应解析、内置厂商合并、非 HTTPS URL 拒绝和 Windows DPAPI 加解密。
-- 命令隔离冒烟覆盖 109 个 CMD 脚本生成、无快照查询不扫描、15 工具定义、`jdk-list.cmd` 映射、`env-repair.cmd` 预览、先生成脚本后修改工具目录仍读取最新配置、显式扫描、快照复用和无 `--yes` 的修复预览。
+- 命令隔离冒烟覆盖 110 个 CMD 脚本生成、无快照查询不扫描、15 工具定义、`jdk-list.cmd` 映射、`env-refresh.cmd` 增量刷新、`env-repair.cmd` 预览、先生成脚本后修改工具目录仍读取最新配置、显式扫描、快照复用和无 `--yes` 的修复预览。
 - 托盘冒烟覆盖初始化期间打开 Python、15 工具动态层级、关闭到托盘、立即隐藏、启动后隐藏、开机自启注册表写入/删除、五种语言和直接退出，以及所有启动路径均不自动扫描。
 - 单实例冒烟覆盖第二个 GUI 进程退出、原进程保持、隐藏窗口恢复、15 工具命令模式不被拦截，以及全过程不扫描。
 - 手动扫描冒烟断言托盘可切换版本、诊断问题和可修复诊断入口数量分别与缓存一致，并通过托盘事件实际打开诊断建议与修复计划；同一脚本还验证黑橙蜂窝游戏 HUD 和重启恢复 Java/JDK 详情页。

@@ -2,16 +2,16 @@
 
 ## 1. 首次启动与扫描
 
-启动后 App 不会自动扫描。若存在 `<data-root>\cache\last-environment-scan.json`，App 只显示上次手动扫描结果；没有快照时显示“尚未扫描”。只有点击“开始扫描”或“重新扫描”才会执行下列只读检查并覆盖快照：
+启动后 App 不会自动遍历磁盘。若存在 `<data-root>\cache\last-environment-scan.json`，App 会显示上次结果；没有快照时显示“尚未扫描”。点击“扫描整台电脑”、执行 `env-scan`，或从托盘手动扫描时会执行下列只读检查并覆盖快照：
 
-- 查询 `where` 命令解析顺序；
+- 遍历所有本地固定磁盘，查找已支持工具的可执行文件和 EnvNexus AI 安装清单；
 - 运行工具自身的版本命令；
-- 读取与开发工具有关的用户级、系统级环境变量；
+- 读取最新用户级、系统级环境变量和 PATH，计算当前默认版本；
 - 检查 pyenv-win、NVM for Windows、fnm、Volta、rustup、Jabba、goenv、rbenv、Uru、JDK 相邻目录和 Android SDK 子目录；
-- 识别 EnvNexus AI 安装清单；
+- 规范化路径、按安装根目录去重，并按数字版本倒序排列；
 - 报告重复、失效、相对或空 PATH 条目，以及变量跨作用域冲突。
 
-扫描不会写环境变量、移动目录或卸载软件。安装、切换、修复、卸载或恢复操作完成后，当前快照会标记为“环境已变更”；App 不会自动重扫，需由用户决定何时更新结果。
+扫描不会写环境变量、移动目录或卸载软件。首次全机扫描会建立磁盘索引和版本指纹缓存；安装、切换、修复、卸载、保存工具根目录或恢复操作完成后，App 使用索引做增量刷新。未变化的工具复用已经验证过的版本，新增或文件指纹变化的工具会重新运行版本命令。手动全机扫描始终绕过版本缓存并重新验证全部候选。
 
 ## 2. 查询与安装
 
@@ -58,6 +58,7 @@ env-tools
 jdk-list
 python-list
 android-sdk-list
+env-refresh
 env-diagnose
 env-repair "PATH_DUPLICATE_用户"
 jdk-versions
@@ -66,9 +67,9 @@ jdk-versions
 - `env-tools` 无需扫描即可列出 15 个内置工具及已保存的安装根目录。
 - `<tool>-list` 只读取上次快照；没有快照时返回“尚未扫描”，不会执行隐式扫描。
 - 工具前缀包括 `python`、`jdk`、`go`、`rust`、`node`、`git`、`maven`、`dotnet`、`ruby`、`php`、`android-sdk`、`android-ndk`、`gradle`、`cmake`、`adb`。
-- 只有显式执行 `env-scan` 才会扫描 PATH、版本管理器、受管清单和当前保存的工具根目录，并覆盖桌面 App 与命令脚本共用的 `<data-root>\cache\last-environment-scan.json`。
+- `env-scan` 遍历所有本地固定磁盘、重建索引并强制验证全部候选；`env-refresh` 读取磁盘索引和文件指纹做快速刷新。两者都会覆盖桌面 App 与命令脚本共用的 `<data-root>\cache\last-environment-scan.json`。
 - CMD 脚本中不保存工具安装目录。即使先生成脚本、之后再选择工具目录，`*-root get` 和 `*-install` 也会读取最新配置。
-- `*-list` 只读取上次扫描快照；修改目录或在目录中手动增删版本后，需显式运行 `env-scan` 才会刷新版本与路径。
+- `*-list` 只读取上次扫描快照。App 自己完成的安装与切换会自动增量刷新；外部程序新增工具后可先执行 `env-refresh`，如果磁盘索引中还没有该路径，则执行 `env-scan`。
 - 所有命令都可追加 `--json`，便于 PowerShell 脚本或其他程序解析。
 
 目录与管理操作：
@@ -77,6 +78,7 @@ jdk-versions
 jdk-root get
 jdk-root set "E:\DevTools\Java"
 env-scan
+env-refresh
 jdk-install 21.0.8
 jdk-use "E:\DevTools\Java\java\21.0.8"
 jdk-repair "E:\DevTools\Java\java\21.0.8"

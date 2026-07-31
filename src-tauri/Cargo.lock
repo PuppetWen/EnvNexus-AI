@@ -960,7 +960,7 @@ dependencies = [
 
 [[package]]
 name = "envnexus-ai"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -991,6 +991,8 @@ dependencies = [
  "url",
  "uuid",
  "walkdir",
+ "webview2-com",
+ "windows-core 0.61.2",
  "windows-sys 0.61.2",
  "winreg",
  "zip 2.4.2",

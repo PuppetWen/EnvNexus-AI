@@ -303,8 +303,8 @@ try {
         throw "Enabling terminal commands did not open the user PATH preview plan."
     }
     $GeneratedCommandCount = @(Get-ChildItem -LiteralPath $CustomCommandDirectory -Filter "*.cmd").Count
-    if ($GeneratedCommandCount -ne 109) {
-        throw "Expected 109 generated command scripts, got $GeneratedCommandCount."
+    if ($GeneratedCommandCount -ne 110) {
+        throw "Expected 110 generated command scripts, got $GeneratedCommandCount."
     }
     Save-WindowCapture -Process $FirstProcess -Path $CommandsScreenshot
     Invoke-CdpExpression -Port $CdpPort -Expression "document.querySelector('#cancel-plan')?.click(); true"

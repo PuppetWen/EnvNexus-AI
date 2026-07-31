@@ -85,6 +85,10 @@ export const backend = {
     return invoke("scan_environment");
   },
 
+  refreshEnvironmentScan(): Promise<EnvironmentScan> {
+    return invoke("refresh_environment_scan");
+  },
+
   cachedEnvironmentScan(): Promise<EnvironmentScan | null> {
     return invoke("cached_environment_scan");
   },

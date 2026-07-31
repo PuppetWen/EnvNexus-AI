@@ -79,8 +79,8 @@ pnpm tauri dev
 
 ```text
 src-tauri/target/release/envnexus-ai.exe
-src-tauri/target/release/bundle/nsis/EnvNexus AI_0.1.3_x64-setup.exe
-src-tauri/target/release/bundle/nsis/EnvNexus AI_0.1.3_x64-setup.exe.sig
+src-tauri/target/release/bundle/nsis/EnvNexus AI_0.1.4_x64-setup.exe
+src-tauri/target/release/bundle/nsis/EnvNexus AI_0.1.4_x64-setup.exe.sig
 ```
 
 `envnexus-ai.exe` 无参数时启动 GUI，有命令参数时作为工具脚本的内部命令引擎。便携交付把主程序和安装包复制到 `release/`，并附 `SHA256SUMS.txt`。
@@ -95,7 +95,7 @@ src-tauri/target/release/bundle/nsis/EnvNexus AI_0.1.3_x64-setup.exe.sig
 .\scripts\Smoke-Cli.ps1
 ```
 
-该脚本使用单独的 `ENVNEXUS_AI_DATA_ROOT`，生成 109 个工具命令脚本并实际执行 `jdk-list.cmd` 与 `env-repair.cmd`，验证无快照只读查询、15 个工具定义、先生成脚本后修改工具目录仍读取最新配置、显式扫描、共享快照和无 `--yes` 的修复预览，不执行真实环境变更。旧的 `ENVPILOT_DATA_ROOT` 仍作为只读兼容入口。桌面冒烟另会输入并保存自定义命令脚本目录，再确认脚本生成在该目录中，并打开本地诊断建议弹窗核对可复制命令。
+该脚本使用单独的 `ENVNEXUS_AI_DATA_ROOT`，生成 110 个工具命令脚本并实际执行 `jdk-list.cmd`、`env-refresh.cmd` 与 `env-repair.cmd`，验证无快照只读查询、15 个工具定义、先生成脚本后修改工具目录仍读取最新配置、完整扫描、增量刷新、共享快照和无 `--yes` 的修复预览，不执行真实环境变更。旧的 `ENVPILOT_DATA_ROOT` 仍作为只读兼容入口。桌面冒烟另会输入并保存自定义命令脚本目录，再确认脚本生成在该目录中，并打开本地诊断建议弹窗核对可复制命令。
 
 窗口与托盘隔离冒烟：
 

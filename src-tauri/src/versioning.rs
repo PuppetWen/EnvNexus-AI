@@ -1,6 +1,16 @@
 use std::cmp::Ordering;
 
-use crate::model::RemoteVersion;
+use crate::model::{InstalledVersion, RemoteVersion};
+
+pub fn sort_installed_versions_descending(versions: &mut [InstalledVersion]) {
+    versions.sort_by(|left, right| {
+        right
+            .is_default
+            .cmp(&left.is_default)
+            .then_with(|| compare_version_strings(&right.version, &left.version))
+            .then_with(|| left.path.cmp(&right.path))
+    });
+}
 
 #[derive(Debug, Clone, Copy)]
 enum VersionToken<'a> {
@@ -146,6 +156,18 @@ mod tests {
             .collect()
     }
 
+    fn installed(version: &str, is_default: bool) -> InstalledVersion {
+        InstalledVersion {
+            version: version.to_string(),
+            path: format!(r"C:\tools\{version}").into(),
+            source: "test".to_string(),
+            is_default,
+            managed: false,
+            health: crate::model::HealthLevel::Healthy,
+            executable: None,
+        }
+    }
+
     #[test]
     fn sorts_numeric_versions_descending_instead_of_by_string_or_date() {
         assert_eq!(
@@ -167,6 +189,23 @@ mod tests {
         assert_eq!(
             sorted(&["21.0.8+9", "21.0.8+10", "21.0.7", "21.0.8-1"]),
             ["21.0.8+10", "21.0.8+9", "21.0.8-1", "21.0.7"]
+        );
+    }
+
+    #[test]
+    fn sorts_installed_versions_numerically_with_default_first() {
+        let mut versions = vec![
+            installed("3.9.5", false),
+            installed("3.12.9", false),
+            installed("3.10.1", true),
+        ];
+        sort_installed_versions_descending(&mut versions);
+        assert_eq!(
+            versions
+                .iter()
+                .map(|version| version.version.as_str())
+                .collect::<Vec<_>>(),
+            ["3.10.1", "3.12.9", "3.9.5"]
         );
     }
 }
