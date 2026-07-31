@@ -114,6 +114,10 @@ code {
   padding: 0 10px 16px;
 }
 
+.brand-copy {
+  min-width: 0;
+}
+
 .brand-mark {
   position: relative;
   width: 38px;
@@ -246,7 +250,37 @@ code {
   font-style: normal;
 }
 
-.nav-update-dot {
+.brand-update-indicator {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  flex: 0 0 auto;
+  margin: 0 0 0 auto;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: var(--radius-xs);
+  color: var(--text);
+  background: transparent;
+  cursor: pointer;
+  transition:
+    border-color 160ms ease,
+    background 160ms ease,
+    box-shadow 160ms ease,
+    transform 160ms ease;
+}
+
+.brand-update-indicator:hover,
+.brand-update-indicator:focus-visible {
+  border-color: var(--accent-line);
+  outline: none;
+  background: var(--accent-soft);
+  box-shadow: var(--pop-shadow);
+  transform: translateY(-1px);
+}
+
+.brand-update-dot {
   width: 9px;
   height: 9px;
   border: 1px solid color-mix(in srgb, var(--success) 75%, white);
@@ -259,11 +293,74 @@ code {
     box-shadow 180ms ease;
 }
 
-.nav-update-dot.available {
+.brand-update-indicator.available .brand-update-dot {
   border-color: color-mix(in srgb, var(--danger-text) 78%, white);
   background: var(--danger-text);
   box-shadow: 0 0 11px color-mix(in srgb, var(--danger-text) 78%, transparent);
   animation: update-dot-pulse 1.8s ease-in-out infinite;
+}
+
+.brand-update-indicator.busy .brand-update-dot {
+  border-color: color-mix(in srgb, var(--accent) 78%, white);
+  background: var(--accent);
+  box-shadow: 0 0 11px color-mix(in srgb, var(--accent) 78%, transparent);
+  animation: update-dot-pulse 1.15s ease-in-out infinite;
+}
+
+.brand-update-tooltip {
+  position: absolute;
+  z-index: 70;
+  top: calc(100% + 10px);
+  right: 0;
+  display: grid;
+  gap: 5px;
+  width: 228px;
+  padding: 12px 13px;
+  visibility: hidden;
+  border: 1px solid var(--accent-line);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  background: var(--panel-solid);
+  box-shadow: var(--pop-shadow);
+  opacity: 0;
+  pointer-events: none;
+  text-align: left;
+  transform: translateY(-5px);
+  transition:
+    opacity 150ms ease,
+    transform 150ms ease,
+    visibility 150ms ease;
+}
+
+.brand-update-tooltip::before {
+  position: absolute;
+  right: 8px;
+  bottom: 100%;
+  width: 8px;
+  height: 8px;
+  border-top: 1px solid var(--accent-line);
+  border-left: 1px solid var(--accent-line);
+  background: var(--panel-solid);
+  content: "";
+  transform: translateY(4px) rotate(45deg);
+}
+
+.brand-update-tooltip strong {
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.brand-update-tooltip span {
+  color: var(--text-muted);
+  font-size: 10.5px;
+  line-height: 1.55;
+}
+
+.brand-update-indicator:hover .brand-update-tooltip,
+.brand-update-indicator:focus-visible .brand-update-tooltip {
+  visibility: visible;
+  opacity: 1;
+  transform: translateY(0);
 }
 
 .sidebar-spacer {
@@ -3252,9 +3349,12 @@ code {
 }
 
 .tool-detail-section .remote-stack {
-  max-height: none;
-  padding-right: 0;
-  overflow: visible;
+  max-height: clamp(320px, 52vh, 560px);
+  padding-right: 6px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
 }
 
 .tool-detail-section .version-item {
@@ -3268,6 +3368,18 @@ code {
 .tool-detail-section .version-actions {
   flex-wrap: wrap;
   justify-content: flex-end;
+}
+
+.catalog-title-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.catalog-version-count {
+  color: var(--text-faint);
+  font-size: 10.5px;
+  white-space: nowrap;
 }
 
 /* --------------------------------------------------------------- drawer */
@@ -3985,6 +4097,25 @@ input.path-input {
   background: var(--accent-soft);
 }
 
+.update-status-preparing,
+.update-status-downloading,
+.update-status-retrying,
+.update-status-verifying,
+.update-status-ready,
+.update-status-restarting {
+  border-color: var(--accent-line);
+  background: var(--accent-soft);
+}
+
+.update-status-preparing > svg,
+.update-status-downloading > svg,
+.update-status-retrying > svg,
+.update-status-verifying > svg,
+.update-status-ready > svg,
+.update-status-restarting > svg {
+  color: var(--accent-text);
+}
+
 .update-notes {
   max-height: 150px;
   padding: 11px 13px;
@@ -4012,6 +4143,15 @@ input.path-input {
   gap: 10px;
 }
 
+.update-progress-block {
+  display: grid;
+  gap: 7px;
+  padding: 11px 13px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--panel-raised);
+}
+
 .update-progress > div {
   height: 6px;
   overflow: hidden;
@@ -4028,12 +4168,35 @@ input.path-input {
   transition: width 160ms ease;
 }
 
+.update-progress.indeterminate i {
+  width: 24% !important;
+  animation: update-progress-indeterminate 1.25s ease-in-out infinite;
+}
+
 .update-progress span {
   min-width: 36px;
   color: var(--accent-text);
   font-family: var(--font-mono);
   font-size: 10px;
   text-align: right;
+}
+
+.update-progress-meta {
+  display: flex;
+  min-height: 16px;
+  align-items: center;
+  gap: 10px;
+  color: var(--text-faint);
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+}
+
+.update-progress-meta span:first-child {
+  color: var(--accent-text);
+}
+
+.update-progress-meta span:nth-child(2) {
+  margin-left: auto;
 }
 
 .update-portable-note {
@@ -4055,6 +4218,20 @@ input.path-input {
   50% {
     opacity: 0.65;
     transform: scale(0.82);
+  }
+}
+
+@keyframes update-progress-indeterminate {
+  0% {
+    transform: translateX(-110%);
+  }
+
+  50% {
+    transform: translateX(160%);
+  }
+
+  100% {
+    transform: translateX(410%);
   }
 }
 

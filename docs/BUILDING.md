@@ -79,15 +79,15 @@ pnpm tauri dev
 
 ```text
 src-tauri/target/release/envnexus-ai.exe
-src-tauri/target/release/bundle/nsis/EnvNexus AI_0.1.2_x64-setup.exe
-src-tauri/target/release/bundle/nsis/EnvNexus AI_0.1.2_x64-setup.exe.sig
+src-tauri/target/release/bundle/nsis/EnvNexus AI_0.1.3_x64-setup.exe
+src-tauri/target/release/bundle/nsis/EnvNexus AI_0.1.3_x64-setup.exe.sig
 ```
 
 `envnexus-ai.exe` 无参数时启动 GUI，有命令参数时作为工具脚本的内部命令引擎。便携交付把主程序和安装包复制到 `release/`，并附 `SHA256SUMS.txt`。
 
 `createUpdaterArtifacts` 已启用，因此 Tauri 打包需要 updater 私钥。开发机默认从未提交的 `.devtools\updater\envnexus-ai.key` 读取；其他机器和 CI 应通过 `TAURI_SIGNING_PRIVATE_KEY` 提供同一长期私钥。私钥一旦遗失，已安装版本将无法验证以后使用其他密钥签名的更新包。不得把私钥、密码或 API key 提交到仓库。
 
-静态 GitHub updater 还需要在 Release 中上传 `latest.json`、安装包和同名 `.sig`。`latest.json` 的 `windows-x86_64.url` 必须指向该 Release 的安装包，`signature` 必须是 `.sig` 文件的完整内容。
+静态 GitHub updater 还需要在 Release 中上传 `latest.json`、安装包、便携包及各自同名 `.sig`。`latest.json` 的 `platforms.windows-x86_64` 描述安装包，`portable.windows-x86_64` 描述便携包；两者都必须包含 Release URL、完整 minisign 签名和 SHA-256。
 
 命令脚本隔离冒烟：
 
@@ -105,7 +105,7 @@ src-tauri/target/release/bundle/nsis/EnvNexus AI_0.1.2_x64-setup.exe.sig
 
 该脚本使用隔离数据目录、真实 Windows 窗口消息和 Tauri 托盘事件，验证初始化期间打开 Python 能直接进入独立管理页、设置持久化、关闭按钮到托盘、立即隐藏、启动后隐藏、直接退出、五种语言切换、15 个工具的托盘层级，以及 Windows 当前用户开机自启项的启用和停用。脚本会备份并在结束时恢复原有 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run\EnvNexus AI` 值；上述启动过程不会创建扫描快照。
 
-NSIS 使用 `currentUser` 安装模式和 Tauri 默认安装器模板，并配置 WebView2 download bootstrapper。默认模板保留安装目录选择页；如果注册表中存在同一应用之前保存的安装目录，安装器会恢复该目录并在原位置覆盖升级。应用内更新使用 `passive` 模式，因此不重复询问目录并沿用现有安装位置。对应行为由 Tauri 默认 NSIS 模板的目录页与 `RestorePreviousInstallLocation` 实现：
+NSIS 使用 `currentUser` 安装模式和 Tauri 默认安装器模板，并配置 WebView2 download bootstrapper。默认模板保留安装目录选择页；如果注册表中存在同一应用之前保存的安装目录，安装器会恢复该目录并在原位置覆盖升级。应用内更新由独立帮助进程以 `/S /UPDATE` 静默运行安装器；便携版则在主程序退出后原路径替换。两种模式都会先保留旧主程序，等待新版本完成启动确认后才清理，失败时自动恢复。安装目录恢复由 Tauri 默认 NSIS 模板的 `RestorePreviousInstallLocation` 实现：
 https://v2.tauri.app/distribute/windows-installer/
 
 Tauri updater 的 minisign 签名只用于更新包完整性与来源校验，不等同于 Windows Authenticode；正式分发前仍建议配置 Windows 代码签名证书。

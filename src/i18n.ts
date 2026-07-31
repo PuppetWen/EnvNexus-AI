@@ -61,7 +61,7 @@ const traditionalChinese: Dictionary = {
   "Windows 托盘 · 正在初始化": "Windows 系統匣 · 正在初始化",
   "双击打开，右键管理工具链、版本和诊断": "雙擊開啟，右鍵管理工具鏈、版本和診斷",
   点击窗口关闭按钮时: "點擊視窗關閉按鈕時",
-  "最小化到系统托盘，继续后台运行": "最小化到系統匣，繼續在背景執行",
+  "关闭窗口后驻留系统托盘（不退出）": "關閉視窗後駐留系統匣（不結束）",
   直接退出程序: "直接結束程式",
   界面与托盘语言: "介面與系統匣語言",
   "登录 Windows 后自动启动": "登入 Windows 後自動啟動",
@@ -170,7 +170,8 @@ const english: Dictionary = {
   "双击打开，右键管理工具链、版本和诊断":
     "Double-click to open; right-click to manage tools, versions, and diagnostics",
   点击窗口关闭按钮时: "When the close button is clicked",
-  "最小化到系统托盘，继续后台运行": "Hide to the system tray and keep running",
+  "关闭窗口后驻留系统托盘（不退出）":
+    "Keep running in the system tray after closing the window",
   直接退出程序: "Exit the application",
   界面与托盘语言: "Interface and tray language",
   "登录 Windows 后自动启动": "Start after Windows sign-in",
@@ -246,7 +247,8 @@ const japanese: Dictionary = {
   "双击打开，右键管理工具链、版本和诊断":
     "ダブルクリックで開き、右クリックでツール、バージョン、診断を管理",
   点击窗口关闭按钮时: "閉じるボタンを押したとき",
-  "最小化到系统托盘，继续后台运行": "システムトレイに隠してバックグラウンド実行",
+  "关闭窗口后驻留系统托盘（不退出）":
+    "ウィンドウを閉じても終了せずシステムトレイに常駐",
   直接退出程序: "アプリを終了",
   界面与托盘语言: "画面とトレイの言語",
   "登录 Windows 后自动启动": "Windows サインイン後に自動起動",
@@ -311,7 +313,8 @@ const korean: Dictionary = {
   "双击打开，右键管理工具链、版本和诊断":
     "두 번 클릭하여 열고, 마우스 오른쪽 버튼으로 도구, 버전 및 진단 관리",
   点击窗口关闭按钮时: "창 닫기 버튼을 클릭할 때",
-  "最小化到系统托盘，继续后台运行": "시스템 트레이에 숨기고 백그라운드에서 실행",
+  "关闭窗口后驻留系统托盘（不退出）":
+    "창을 닫아도 종료하지 않고 시스템 트레이에서 계속 실행",
   直接退出程序: "애플리케이션 종료",
   界面与托盘语言: "인터페이스 및 트레이 언어",
   "登录 Windows 后自动启动": "Windows 로그인 후 자동 시작",

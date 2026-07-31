@@ -1,7 +1,7 @@
 import { createElement, icons } from "lucide";
 import { listen } from "@tauri-apps/api/event";
 import { open, save } from "@tauri-apps/plugin-dialog";
-import { relaunch } from "@tauri-apps/plugin-process";
+import { exit } from "@tauri-apps/plugin-process";
 import { check, type Update } from "@tauri-apps/plugin-updater";
 import {
   readMainScrollPosition,
@@ -25,6 +25,8 @@ import type {
   AiSettings,
   AppLanguage,
   AppPreferences,
+  ApplicationUpdateAsset,
+  ApplicationUpdateProgress,
   BootstrapState,
   DiagnosticGuidance,
   DiagnosticIssue,
@@ -34,6 +36,7 @@ import type {
   OperationLogEntry,
   OperationPlan,
   OperationProgress,
+  PrepareApplicationUpdateRequest,
   ToolDefinition,
   ToolInventory,
   TrayAction,
@@ -47,11 +50,26 @@ type ToolView = Omit<ToolInventory, "scannedAt"> & {
 };
 
 type ApplicationUpdateStatus = {
-  phase: "checking" | "current" | "available" | "downloading" | "error";
+  phase:
+    | "checking"
+    | "current"
+    | "available"
+    | "preparing"
+    | "downloading"
+    | "retrying"
+    | "verifying"
+    | "ready"
+    | "restarting"
+    | "error";
   message: string;
   availableVersion?: string;
   notes?: string;
   progressPercent?: number;
+  receivedBytes?: number;
+  totalBytes?: number;
+  attempt?: number;
+  maxAttempts?: number;
+  operationId?: string;
 };
 
 const navItems: Array<{ id: ViewId; label: string; icon: keyof typeof icons }> = [
@@ -120,6 +138,7 @@ const state: {
 
 let toolContextPromise: Promise<void> | undefined;
 let pendingApplicationUpdate: Update | undefined;
+let pendingApplicationUpdateRequest: PrepareApplicationUpdateRequest | undefined;
 let lastRenderedView: ViewId | undefined;
 
 function ensureToolContext(): Promise<void> {
@@ -230,21 +249,48 @@ function renderShell(): string {
     (scan?.issues.length ?? 0) +
     (scan?.tools.reduce((total, tool) => total + tool.issues.length, 0) ?? 0);
   const updateAvailable = state.applicationUpdate?.phase === "available";
-  const updateIndicatorLabel = updateAvailable
+  const updateBusy = applicationUpdateInProgress(state.applicationUpdate?.phase);
+  const currentAppVersion = state.bootstrap?.appVersion ?? "0.1.3";
+  const updateIndicatorTitle = updateAvailable
     ? `发现新版本 ${state.applicationUpdate?.availableVersion ?? ""}`
-    : state.applicationUpdate?.phase === "error"
-      ? "更新检查失败，请进入设置重试"
-      : "当前未发现新版本";
+    : updateBusy
+      ? state.applicationUpdate?.message ?? "正在准备更新"
+    : state.applicationUpdate?.phase === "checking"
+      ? "正在检查新版本"
+      : state.applicationUpdate?.phase === "error"
+        ? "版本检查失败"
+        : state.applicationUpdate?.phase === "current"
+          ? "当前已是最新版本"
+          : "等待版本检查";
+  const updateIndicatorDetail = updateAvailable
+    ? `当前版本 ${currentAppVersion}，点击进入设置更新。`
+    : updateBusy
+      ? state.applicationUpdate?.progressPercent !== undefined
+        ? `更新进度 ${Math.round(state.applicationUpdate.progressPercent)}%，点击查看详情。`
+        : "更新事务正在后台运行，点击查看详情。"
+    : state.applicationUpdate?.phase === "checking"
+      ? `当前版本 ${currentAppVersion}，正在连接 GitHub Releases。`
+      : state.applicationUpdate?.phase === "error"
+        ? `当前版本 ${currentAppVersion}，点击进入设置重试。`
+        : `EnvNexus AI ${currentAppVersion}`;
+  const updateIndicatorLabel = `${updateIndicatorTitle}。${updateIndicatorDetail}`;
   const score = healthScore(scan);
   return `
     <div class="app-shell">
       <aside class="sidebar">
         <div class="brand">
           <div class="brand-mark"><span></span><span></span><span></span></div>
-          <div>
+          <div class="brand-copy">
             <strong>EnvNexus AI</strong>
             <small>开发环境控制台</small>
           </div>
+          <button class="brand-update-indicator ${updateAvailable ? "available" : updateBusy ? "busy" : "current"}" type="button" data-nav="settings" role="status" aria-label="${escapeHtml(updateIndicatorLabel)}">
+            <i class="brand-update-dot" aria-hidden="true"></i>
+            <span class="brand-update-tooltip" role="tooltip">
+              <strong>${escapeHtml(updateIndicatorTitle)}</strong>
+              <span>${escapeHtml(updateIndicatorDetail)}</span>
+            </span>
+          </button>
         </div>
         <nav class="primary-nav">
           ${navItems
@@ -254,7 +300,6 @@ function renderShell(): string {
                   ${icon(item.icon)}
                   <span>${item.label}</span>
                   ${item.id === "diagnostics" && diagnosticCount ? `<em>${diagnosticCount}</em>` : ""}
-                  ${item.id === "settings" ? `<i class="nav-update-dot ${updateAvailable ? "available" : "current"}" role="status" aria-label="${escapeHtml(updateIndicatorLabel)}" title="${escapeHtml(updateIndicatorLabel)}"></i>` : ""}
                 </button>
               `,
             )
@@ -641,14 +686,16 @@ function renderToolDetail(): string {
         <section class="tool-detail-section panel">
           <div class="drawer-section-title">
             <div><p class="eyebrow">OFFICIAL RELEASES</p><h3>官方可安装版本</h3></div>
-            <button class="text-button" data-fetch-versions="${escapeHtml(tool.id)}" ${fetchingCatalog ? "disabled" : ""}>${fetchingCatalog ? `${icon("LoaderCircle", 14)} 查询中…` : catalog ? "刷新版本" : "查询官方源"}</button>
+            <div class="catalog-title-actions">
+              ${catalog ? `<span class="catalog-version-count">${catalog.versions.length} 个版本</span>` : ""}
+              <button class="text-button" data-fetch-versions="${escapeHtml(tool.id)}" ${fetchingCatalog ? "disabled" : ""}>${fetchingCatalog ? `${icon("LoaderCircle", 14)} 查询中…` : catalog ? "刷新版本" : "查询官方源"}</button>
+            </div>
           </div>
           ${
             catalog
               ? `<div class="source-proof ${catalog.cached ? "cached" : ""}">${icon(catalog.cached ? "CloudOff" : "BadgeCheck", 15)}<span>${escapeHtml(catalog.sourceName)}${catalog.cached ? " · 网络不可用，显示上次成功结果" : ""}</span><time>${new Date(catalog.fetchedAt).toLocaleString(state.appPreferences?.language ?? "zh-CN")}</time></div>
                  <div class="version-stack remote-stack">
                    ${catalog.versions
-                     .slice(0, 30)
                      .map(
                        (version) => `
                          <article class="version-item">
@@ -938,7 +985,7 @@ function renderSettings(): string {
         <label class="behavior-field">
           <span>点击窗口关闭按钮时</span>
           <select id="app-close-behavior">
-            <option value="minimizeToTray" ${preferences.closeBehavior === "minimizeToTray" ? "selected" : ""}>最小化到系统托盘，继续后台运行</option>
+            <option value="minimizeToTray" ${preferences.closeBehavior === "minimizeToTray" ? "selected" : ""}>关闭窗口后驻留系统托盘（不退出）</option>
             <option value="exit" ${preferences.closeBehavior === "exit" ? "selected" : ""}>直接退出程序</option>
           </select>
         </label>
@@ -993,7 +1040,9 @@ function renderSettings(): string {
 
 function renderApplicationUpdate(): string {
   const status = state.applicationUpdate;
-  const currentVersion = state.bootstrap?.appVersion ?? "0.1.2";
+  const currentVersion = state.bootstrap?.appVersion ?? "0.1.3";
+  const installKind = state.bootstrap?.installationKind ?? "portable";
+  const inProgress = applicationUpdateInProgress(status?.phase);
   const statusIcon =
     status?.phase === "error"
       ? "CircleAlert"
@@ -1001,40 +1050,54 @@ function renderApplicationUpdate(): string {
         ? "BadgeCheck"
         : status?.phase === "available"
           ? "PackageOpen"
-          : status?.phase === "downloading"
+          : status?.phase === "downloading" || status?.phase === "retrying"
             ? "Download"
+            : status?.phase === "verifying"
+              ? "ShieldCheck"
+              : status?.phase === "restarting" || status?.phase === "ready"
+                ? "RefreshCw"
             : "RefreshCw";
   const notes = status?.notes
     ? `<div class="update-notes"><strong>发布说明</strong><p>${escapeHtml(status.notes).replaceAll("\n", "<br>")}</p></div>`
     : "";
   const progress =
-    status?.phase === "downloading"
-      ? `<div class="update-progress"><div><i data-app-update-progress-bar style="width:${status.progressPercent ?? 3}%"></i></div><span data-app-update-percent>${Math.round(status.progressPercent ?? 0)}%</span></div>`
+    inProgress
+      ? `<div class="update-progress-block">
+          <div class="update-progress ${status?.progressPercent === undefined ? "indeterminate" : ""}">
+            <div><i data-app-update-progress-bar style="width:${status?.progressPercent ?? 18}%"></i></div>
+            <span data-app-update-percent>${status?.progressPercent === undefined ? "处理中" : `${Math.round(status.progressPercent)}%`}</span>
+          </div>
+          <div class="update-progress-meta">
+            <span data-app-update-stage>${escapeHtml(applicationUpdateStageLabel(status?.phase))}</span>
+            <span data-app-update-bytes>${formatApplicationUpdateBytes(status)}</span>
+            ${status?.attempt && status.attempt > 1 ? `<span data-app-update-attempt>自动重试 ${status.attempt}/${status.maxAttempts ?? 8}</span>` : ""}
+          </div>
+        </div>`
       : "";
   return `
     <section class="settings-section panel update-settings-section">
       <div class="settings-copy">
         <p class="eyebrow">APPLICATION UPDATE</p>
         <h2>应用更新</h2>
-        <p>程序启动时自动连接 GitHub Releases 检查版本；发现更新后显示版本与发布说明，确认后才下载经过签名验证的安装包。</p>
+        <p>程序启动时自动连接 GitHub Releases 检查版本；点击更新后会自动续传下载、校验签名、安全替换并重启，失败时恢复旧版本。</p>
       </div>
       <div class="update-settings-content">
         <div class="update-version-row">
           <span class="update-brand-icon">${icon("GitFork", 20)}</span>
-          <div><small>当前版本</small><strong>EnvNexus AI ${escapeHtml(currentVersion)}</strong><code>PuppetWen/EnvNexus-AI</code></div>
-          <button class="secondary-button" id="check-app-update" ${status?.phase === "checking" || status?.phase === "downloading" ? "disabled" : ""}>${icon("RefreshCw", 16)} ${status?.phase === "checking" ? "正在检查…" : "检查更新"}</button>
+          <div><small>当前版本 · ${installKind === "installed" ? "安装版" : "便携版"}</small><strong>EnvNexus AI ${escapeHtml(currentVersion)}</strong><code>PuppetWen/EnvNexus-AI</code></div>
+          <button class="secondary-button" id="check-app-update" ${status?.phase === "checking" || inProgress ? "disabled" : ""}>${icon("RefreshCw", 16)} ${status?.phase === "checking" ? "正在检查…" : "检查更新"}</button>
         </div>
         ${
           status
             ? `<div class="update-status update-status-${status.phase}">
                 ${icon(statusIcon as keyof typeof icons, 18)}
-                <div><strong ${status.phase === "downloading" ? "data-app-update-message" : ""}>${status.phase === "available" ? `发现 EnvNexus AI ${escapeHtml(status.availableVersion ?? "")}` : escapeHtml(status.message)}</strong>
+                <div><strong ${inProgress ? "data-app-update-message" : ""}>${status.phase === "available" ? `发现 EnvNexus AI ${escapeHtml(status.availableVersion ?? "")}` : escapeHtml(status.message)}</strong>
                 ${status.phase === "available" ? `<span>${escapeHtml(status.message)}</span>` : ""}</div>
-                ${status.phase === "available" ? `<button class="primary-button" id="install-app-update">${icon("Download", 16)} 确认并更新</button>` : ""}
+                ${status.phase === "available" ? `<button class="primary-button" id="install-app-update">${icon("Download", 16)} 自动更新</button>` : ""}
               </div>${notes}${progress}`
             : `<div class="update-idle-note">${icon("ShieldCheck", 16)} 正在等待启动检查；更新元数据来自 GitHub Releases，安装前由内置公钥验证签名。</div>`
         }
-        <p class="update-portable-note">${icon("Info", 14)} Windows 安装版会原地升级；便携版确认更新后会启动当前用户安装程序，原便携文件不会被静默覆盖。</p>
+        <p class="update-portable-note">${icon("Info", 14)} 安装版会静默覆盖原安装目录；便携版会在原路径自替换。更新包校验失败不会安装，启动失败会自动恢复旧主程序。</p>
       </div>
     </section>
   `;
@@ -1416,7 +1479,10 @@ function bindEvents(root: HTMLElement): void {
     };
     try {
       state.appPreferences = await backend.saveAppPreferences(preferences);
-      state.notice = "应用与启动设置已保存，界面和托盘菜单已刷新。";
+      state.notice =
+        closeBehavior === "minimizeToTray"
+          ? "设置已保存：关闭窗口后应用会驻留系统托盘，不会退出。"
+          : "应用与启动设置已保存，界面和托盘菜单已刷新。";
       state.error = undefined;
     } catch (error) {
       state.error = `保存应用行为设置失败：${String(error)}`;
@@ -2076,7 +2142,7 @@ async function checkForApplicationUpdate(
 ): Promise<void> {
   if (
     state.applicationUpdate?.phase === "checking" ||
-    state.applicationUpdate?.phase === "downloading"
+    applicationUpdateInProgress(state.applicationUpdate?.phase)
   ) {
     return;
   }
@@ -2092,6 +2158,7 @@ async function checkForApplicationUpdate(
     if (pendingApplicationUpdate) {
       await pendingApplicationUpdate.close();
       pendingApplicationUpdate = undefined;
+      pendingApplicationUpdateRequest = undefined;
     }
     const update = await check({ timeout: 30_000 });
     if (!update) {
@@ -2102,7 +2169,9 @@ async function checkForApplicationUpdate(
       render();
       return;
     }
+    const request = applicationUpdateRequest(update);
     pendingApplicationUpdate = update;
+    pendingApplicationUpdateRequest = request;
     state.applicationUpdate = {
       phase: "available",
       message: `当前版本 ${update.currentVersion}，可更新到 ${update.version}。`,
@@ -2111,6 +2180,7 @@ async function checkForApplicationUpdate(
     };
   } catch (error) {
     pendingApplicationUpdate = undefined;
+    pendingApplicationUpdateRequest = undefined;
     state.applicationUpdate = {
       phase: "error",
       message: `检查更新失败：${String(error)}`,
@@ -2121,54 +2191,45 @@ async function checkForApplicationUpdate(
 
 async function installApplicationUpdate(): Promise<void> {
   const update = pendingApplicationUpdate;
-  if (!update || state.applicationUpdate?.phase !== "available") return;
+  const request = pendingApplicationUpdateRequest;
+  if (!update || !request || state.applicationUpdate?.phase !== "available") return;
   const notes = update.body?.trim().slice(0, 1_200);
   const confirmed = window.confirm(
     `EnvNexus AI ${update.currentVersion} → ${update.version}\n\n` +
       `${notes ? `发布说明：\n${notes}\n\n` : ""}` +
-      "更新包将从 GitHub 下载并验证签名。Windows 会在开始安装时关闭当前 App，是否继续？",
+      "更新包将自动下载并验证签名，随后关闭当前 App 完成安全替换。更新失败会恢复旧版本，是否继续？",
   );
   if (!confirmed) return;
 
-  let downloaded = 0;
-  let contentLength = 0;
-  let lastRenderedPercent = -1;
   state.applicationUpdate = {
-    phase: "downloading",
-    message: `正在下载并安装 EnvNexus AI ${update.version}…`,
+    phase: "preparing",
+    message: `正在准备 EnvNexus AI ${update.version} 更新事务…`,
     availableVersion: update.version,
-    progressPercent: 0,
   };
   state.error = undefined;
   render();
   try {
-    await update.downloadAndInstall((event) => {
-      if (event.event === "Started") {
-        contentLength = event.data.contentLength ?? 0;
-      } else if (event.event === "Progress") {
-        downloaded += event.data.chunkLength;
-      }
-      const percent =
-        contentLength > 0
-          ? Math.min(100, (downloaded / contentLength) * 100)
-          : event.event === "Finished"
-            ? 100
-            : 3;
-      const rounded = Math.floor(percent);
-      if (rounded === lastRenderedPercent && event.event !== "Finished") return;
-      lastRenderedPercent = rounded;
-      state.applicationUpdate = {
-        phase: "downloading",
-        message:
-          event.event === "Finished"
-            ? "下载完成，正在验证签名并启动安装程序…"
-            : `正在下载并安装 EnvNexus AI ${update.version}…`,
-        availableVersion: update.version,
-        progressPercent: percent,
-      };
-      updateApplicationUpdateProgressUi();
-    });
-    await relaunch();
+    const prepared = await backend.prepareApplicationUpdate(request);
+    state.applicationUpdate = {
+      phase: "ready",
+      message: prepared.message,
+      availableVersion: prepared.version,
+      progressPercent: 100,
+      operationId: prepared.operationId,
+    };
+    render();
+    await backend.launchApplicationUpdate(prepared.operationId);
+    state.applicationUpdate = {
+      ...state.applicationUpdate,
+      phase: "restarting",
+      message:
+        prepared.installKind === "installed"
+          ? "校验完成，正在退出并执行静默覆盖安装…"
+          : "校验完成，正在退出并原路径替换便携版…",
+      progressPercent: 100,
+    };
+    render();
+    await exit(0);
   } catch (error) {
     state.applicationUpdate = {
       phase: "error",
@@ -2177,6 +2238,51 @@ async function installApplicationUpdate(): Promise<void> {
     };
     render();
   }
+}
+
+function applicationUpdateRequest(update: Update): PrepareApplicationUpdateRequest {
+  const platforms = recordValue(update.rawJson.platforms);
+  const portablePlatforms = recordValue(update.rawJson.portable);
+  const installer = applicationUpdateAsset(
+    platforms?.["windows-x86_64"],
+    "安装版",
+  );
+  const portable = applicationUpdateAsset(
+    portablePlatforms?.["windows-x86_64"],
+    "便携版",
+  );
+  return {
+    version: update.version,
+    installer,
+    portable,
+  };
+}
+
+function applicationUpdateAsset(
+  value: unknown,
+  label: string,
+): ApplicationUpdateAsset {
+  const asset = recordValue(value);
+  const url = asset?.url;
+  const signature = asset?.signature;
+  const sha256 = asset?.sha256;
+  if (
+    typeof url !== "string" ||
+    !url.startsWith("https://github.com/PuppetWen/EnvNexus-AI/releases/") ||
+    typeof signature !== "string" ||
+    signature.length < 100 ||
+    typeof sha256 !== "string" ||
+    !/^[a-f0-9]{64}$/i.test(sha256)
+  ) {
+    throw new Error(`${label}更新元数据不完整或不安全`);
+  }
+  return { url, signature, sha256 };
+}
+
+function recordValue(value: unknown): Record<string, unknown> | undefined {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
 }
 
 async function loadBackups(): Promise<void> {
@@ -2279,14 +2385,83 @@ function updateOperationProgressUi(): void {
 
 function updateApplicationUpdateProgressUi(): void {
   const status = state.applicationUpdate;
-  if (!status || status.phase !== "downloading") return;
+  if (!status || !applicationUpdateInProgress(status.phase)) return;
   const percent = Math.min(100, Math.max(0, status.progressPercent ?? 0));
   const message = document.querySelector<HTMLElement>("[data-app-update-message]");
   const bar = document.querySelector<HTMLElement>("[data-app-update-progress-bar]");
   const label = document.querySelector<HTMLElement>("[data-app-update-percent]");
+  const stage = document.querySelector<HTMLElement>("[data-app-update-stage]");
+  const bytes = document.querySelector<HTMLElement>("[data-app-update-bytes]");
+  const attempt = document.querySelector<HTMLElement>("[data-app-update-attempt]");
   if (message) message.textContent = status.message;
-  if (bar) bar.style.width = `${percent}%`;
-  if (label) label.textContent = `${Math.round(percent)}%`;
+  if (bar && status.progressPercent !== undefined) {
+    bar.style.width = `${percent}%`;
+  }
+  if (label) {
+    label.textContent =
+      status.progressPercent === undefined ? "处理中" : `${Math.round(percent)}%`;
+  }
+  if (stage) stage.textContent = applicationUpdateStageLabel(status.phase);
+  if (bytes) bytes.textContent = formatApplicationUpdateBytes(status);
+  if (attempt && status.attempt) {
+    attempt.textContent = `自动重试 ${status.attempt}/${status.maxAttempts ?? 8}`;
+  }
+}
+
+function applicationUpdateInProgress(
+  phase: ApplicationUpdateStatus["phase"] | undefined,
+): boolean {
+  return (
+    phase === "preparing" ||
+    phase === "downloading" ||
+    phase === "retrying" ||
+    phase === "verifying" ||
+    phase === "ready" ||
+    phase === "restarting"
+  );
+}
+
+function applicationUpdateStageLabel(
+  phase: ApplicationUpdateStatus["phase"] | undefined,
+): string {
+  switch (phase) {
+    case "preparing":
+      return "准备事务";
+    case "downloading":
+      return "下载更新包";
+    case "retrying":
+      return "自动续传";
+    case "verifying":
+      return "SHA-256 与签名校验";
+    case "ready":
+      return "安全替换已就绪";
+    case "restarting":
+      return "退出并替换";
+    default:
+      return "等待";
+  }
+}
+
+function formatApplicationUpdateBytes(
+  status: ApplicationUpdateStatus | undefined,
+): string {
+  if (!status?.receivedBytes) return "";
+  const received = formatByteCount(status.receivedBytes);
+  return status.totalBytes
+    ? `${received} / ${formatByteCount(status.totalBytes)}`
+    : received;
+}
+
+function formatByteCount(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  const units = ["KB", "MB", "GB"];
+  let value = bytes / 1024;
+  let unit = units[0];
+  for (let index = 1; index < units.length && value >= 1024; index += 1) {
+    value /= 1024;
+    unit = units[index];
+  }
+  return `${value.toFixed(value >= 100 ? 0 : 1)} ${unit}`;
 }
 
 async function runScan(): Promise<void> {
@@ -2417,6 +2592,35 @@ export async function startApp(): Promise<void> {
       state.progress = event.payload;
       updateOperationProgressUi();
     });
+    await listen<ApplicationUpdateProgress>(
+      "application-update-progress",
+      (event) => {
+        if (
+          !state.applicationUpdate ||
+          (!applicationUpdateInProgress(state.applicationUpdate.phase) &&
+            state.applicationUpdate.phase !== "available")
+        ) {
+          return;
+        }
+        const previousPhase = state.applicationUpdate.phase;
+        state.applicationUpdate = {
+          phase: event.payload.phase,
+          message: event.payload.message,
+          availableVersion: state.applicationUpdate.availableVersion,
+          progressPercent: event.payload.percent,
+          receivedBytes: event.payload.receivedBytes,
+          totalBytes: event.payload.totalBytes,
+          attempt: event.payload.attempt,
+          maxAttempts: event.payload.maxAttempts,
+          operationId: event.payload.operationId,
+        };
+        if (previousPhase !== event.payload.phase) {
+          render();
+        } else {
+          updateApplicationUpdateProgressUi();
+        }
+      },
+    );
     await listen<TrayAction>("tray-action", (event) => {
       void handleTrayAction(event.payload);
     });
@@ -2464,6 +2668,12 @@ export async function startApp(): Promise<void> {
       state.selectedToolId = undefined;
     }
     render();
+    const completedUpdate = await backend.confirmApplicationUpdateStarted();
+    if (completedUpdate) {
+      state.notice =
+        "新版本已成功启动，旧版本备份和更新安装包正在自动清理。";
+      render();
+    }
     void checkForApplicationUpdate({ automatic: true });
     if (appPreferences.startMinimized) {
       await backend.hideToTray();

@@ -18,7 +18,7 @@ describe("background download and installation UI", () => {
       'await listen<OperationProgress>("operation-progress"',
     );
     const listenerEnd = appSource.indexOf(
-      'await listen<TrayAction>("tray-action"',
+      "await listen<ApplicationUpdateProgress>",
       listenerStart,
     );
     const listener = appSource.slice(listenerStart, listenerEnd);
@@ -28,12 +28,20 @@ describe("background download and installation UI", () => {
   });
 
   it("updates application-update progress in place", () => {
-    const callbackStart = appSource.indexOf("await update.downloadAndInstall");
-    const callbackEnd = appSource.indexOf("await relaunch()", callbackStart);
-    const callback = appSource.slice(callbackStart, callbackEnd);
+    const listenerStart = appSource.indexOf(
+      "await listen<ApplicationUpdateProgress>",
+    );
+    const listenerEnd = appSource.indexOf(
+      'await listen<TrayAction>("tray-action"',
+      listenerStart,
+    );
+    const callback = appSource.slice(listenerStart, listenerEnd);
 
     expect(callback).toContain("updateApplicationUpdateProgressUi()");
-    expect(callback).not.toContain("render()");
+    expect(callback).toContain(
+      "if (previousPhase !== event.payload.phase)",
+    );
+    expect(callback).toContain("else {");
   });
 
   it("uses an adaptive dock row that does not cover page content", () => {

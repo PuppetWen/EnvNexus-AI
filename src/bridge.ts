@@ -12,6 +12,8 @@ import type {
   OperationPlan,
   OperationLogEntry,
   OperationResult,
+  PrepareApplicationUpdateRequest,
+  PreparedApplicationUpdate,
   ToolRootPreferences,
   ToolDefinition,
   TerminalCommandStatus,
@@ -161,5 +163,19 @@ export const backend = {
 
   applyPlan(planId: string, confirmationToken: string): Promise<OperationResult> {
     return invoke("apply_plan", { planId, confirmationToken });
+  },
+
+  prepareApplicationUpdate(
+    request: PrepareApplicationUpdateRequest,
+  ): Promise<PreparedApplicationUpdate> {
+    return invoke("prepare_application_update", { request });
+  },
+
+  launchApplicationUpdate(operationId: string): Promise<void> {
+    return invoke("launch_application_update", { operationId });
+  },
+
+  confirmApplicationUpdateStarted(): Promise<boolean> {
+    return invoke("confirm_application_update_started");
   },
 };
