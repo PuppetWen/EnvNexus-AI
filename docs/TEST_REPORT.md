@@ -1,6 +1,6 @@
-# EnvNexus AI 0.1.0 测试报告
+# EnvNexus AI 0.1.4 测试报告
 
-测试日期：2026-07-24  
+测试日期：2026-07-31
 系统：Windows 11 Home China `10.0.26200` x64  
 构建工具链：Rust `1.97.1`、Tauri `2.11.5`、Node.js `25.2.1`、pnpm `11.9.0`
 
@@ -9,21 +9,32 @@
 | 项目 | 命令 | 结果 |
 | --- | --- | --- |
 | TypeScript | `tsc --noEmit` | 通过 |
-| 前端单元测试 | `vitest run` | 19/19 通过（含 updater、旧配置迁移、按钮布局与滚动恢复） |
+| 前端单元测试 | `vitest run` | 41/41 通过（14 个测试文件） |
 | 前端生产构建 | `vite build` | 通过，1792 modules |
 | Rust 格式化 | `cargo fmt` | 通过 |
-| Rust 单元测试 | `cargo test` | 38 通过，3 个显式联网测试默认忽略 |
+| Rust 单元测试 | `cargo test` | 59 通过，4 个发布产物或联网测试按设计忽略 |
 | Rust 静态检查 | `cargo clippy --all-targets -- -D warnings` | 通过 |
 | 15 官方源联网复测 | `Invoke-Rust.ps1 -Task live-sources` | 未通过：`go.dev` 两次连接超时；未伪报通过 |
 | 新增四源联网测试 | `Invoke-Rust.ps1 -Task live-added-sources` | 1/1 通过；Maven 1、.NET 18、Ruby 24、PHP 6 个 Windows 下载 |
 | Python 实际安装事务 | `Invoke-Rust.ps1 -Task live-install` | 通过 |
+
+## 2026-07-31 全机扫描与性能复测
+
+- 完整扫描遍历本机 C、D、E、F 四个固定磁盘，索引覆盖 15 类工具；测试快照包含 161 个已验证安装版本。
+- 同一全机索引首次执行增量探测用时 33.188 秒；生成 `tool-version-probes.json` 后，两次缓存刷新分别用时 2.478 秒和 2.379 秒。
+- 首次与缓存刷新均返回 15 类工具、161 个安装版本，数量一致；缓存刷新仍实时重新验证当前 PATH 默认工具。
+- 指纹包含可执行文件大小、修改时间，以及 Android NDK 的 `source.properties` 元数据；文件发生变化后缓存测试确认会拒绝复用并重新执行版本命令。
+- 空闲界面没有定时扫描或轮询。Windows WebView2 在窗口失焦、隐藏或进入托盘时切换到低内存目标，恢复窗口后切回正常目标；后台 Rust 下载与更新任务不暂停。
+- 在相同的全新隔离数据目录、窗口最小化并失焦 30 秒后，对整个 7 进程树连续采样 8 秒：0.1.3 平均工作集 436.1 MiB，0.1.4 平均工作集 101.6 MiB、峰值 102.8 MiB，物理驻留工作集下降约 76.7%。
+- 同一采样窗口内，两版均未观察到可计量的空闲 CPU 增长。0.1.4 平均私有提交量为 401.2 MiB，与 0.1.3 的 400.1 MiB 基本一致，因此不将此次优化表述为虚拟提交量下降。
+- 最终便携包的 CLI 冒烟通过：全机扫描、增量刷新、15 类工具、110 个脚本、JDK 别名、根目录动态读取和无确认令牌的预览保护均成功。托盘冒烟通过关闭到托盘、页面恢复、启动隐藏、开机启动、语言切换和正常退出。
 
 ## 2026-07-24 EnvNexus AI 改名与更新器复测
 
 - `.\scripts\Verify.ps1 -Release` 完整通过：TypeScript、Rust fmt、38 项 Rust 测试和严格 Clippy 均成功；3 项显式联网测试按设计忽略。随后针对设置页修复新增测试，TypeScript、19 项 Vitest 与 Vite 生产构建再次通过。
 - Tauri 生成 `envnexus-ai.exe` 和 current-user NSIS 安装包；安装包使用项目长期 updater 密钥生成 424 字节 minisign 签名。
 - `latest.json` 已做结构校验，平台键为 `windows-x86_64`，下载 URL 指向 `v0.1.0` GitHub Release，签名字段非空。
-- `scripts\Smoke-Cli.ps1` 对改名后的 Release 主程序通过：15 个工具、109 个脚本、目录持久化、显式扫描、快照复用和无 `--yes` 的预览保护均成功。
+- `scripts\Smoke-Cli.ps1` 对改名后的 Release 主程序通过：15 个工具、110 个脚本、目录持久化、完整扫描、增量刷新、快照复用和无 `--yes` 的预览保护均成功。
 - 用户确认旧窗口来源后，改名后的独立 GUI 复测完成：单实例恢复、托盘层级、关闭到托盘、启动后隐藏、语言切换、手动扫描、上次页面恢复均通过。
 - 设置页真实 WebView 复测确认两个操作按钮使用相同高度和垂直中心；滚动到 AI 厂商区域后点击会触发整页重绘的厂商按钮，重绘前后主内容 `scrollTop` 差值不超过 2 像素，未跳回顶部。
 - 构建仍出现项目内 xwin SDK 缺少静态运行库 PDB 的 `LNK4099` 警告；链接、测试和安装包生成成功，此警告不影响运行，但也未被隐藏。
@@ -52,7 +63,7 @@ Rust 单元测试覆盖：
 - 九种 AI 厂商品牌 SVG 映射和无字母占位图形断言；
 - 各 AI 厂商配置文件独立写入、旧聚合配置迁移、当前厂商显式切换；
 - 多厂商 Windows DPAPI API Key 独立加密/解密及单独删除。
-- 工具命令别名解析、109 个 CMD 脚本生成、自定义命令目录持久化，以及 `--yes` 确认标志只移除自身、不改变其他参数。
+- 工具命令别名解析、110 个 CMD 脚本生成、自定义命令目录持久化，以及 `--yes` 确认标志只移除自身、不改变其他参数。
 - 应用行为默认值、五种语言、开机自启设置和 `<data-root>\config\app-preferences.json` 持久化往返。
 - Windows 当前用户 `Run` 启动命令的引号规则。
 
@@ -92,14 +103,14 @@ Tauri Release 和 NSIS 均已成功：
 
 | 文件 | 大小 | SHA-256 |
 | --- | ---: | --- |
-| `EnvNexus-AI_0.1.0_x64-portable.exe` | 10,643,968 bytes（10.15 MiB） | `1350e103492c651b6117ecb075c14955f8da1b353f1b5725a459bdce98c22b34` |
-| `EnvNexus-AI_0.1.0_x64-setup.exe` | 5,119,135 bytes（4.88 MiB） | `04522c23bfe56202a829348a85058750ebe6cb89e8fbe10e2724919d23ff3ae0` |
+| `EnvNexus-AI_0.1.4_x64-portable.exe` | 10,848,768 bytes（10.35 MiB） | `9884bbcd0c9876799071e1de505eb484d9c2d92b2ad21e2e8b166c3c05da8f32` |
+| `EnvNexus-AI_0.1.4_x64-setup.exe` | 5,181,314 bytes（4.94 MiB） | `3a555abe72cfc46617824048b28a57fd0cad8d7a7fb8ece1abfe26f9cf3a56e7` |
 
 校验文件：`release/SHA256SUMS.txt`。
 
 对最终复制到 `release` 的 portable 文件再次执行单实例与命令模式冒烟：第二个 GUI 进程退出码为 0，原进程保持运行并恢复隐藏窗口；`tools --json` 返回 15 个工具，隔离数据目录中没有生成扫描快照。两份新 Release 文件的重新计算哈希均与 `SHA256SUMS.txt` 匹配。
 
-当前开发机链接时出现 `LNK4099`：项目内 xwin SDK 静态运行库没有调试 PDB。链接仍成功，Release 可启动；该警告已记录，不解释为测试失败。前端构建还提示主 JavaScript chunk 为 515.84 kB，超过默认 500 kB 警告阈值；gzip 后为 132.19 kB，构建成功，后续可通过页面级拆包继续优化。
+当前开发机链接时出现 `LNK4099`：项目内 xwin SDK 静态运行库没有调试 PDB。链接仍成功，Release 可启动；该警告已记录，不解释为测试失败。前端构建还提示主 JavaScript chunk 为 531.77 kB，超过默认 500 kB 警告阈值；gzip 后为 137.11 kB，构建成功，后续可通过页面级拆包继续优化。
 
 ## 运行冒烟
 
@@ -124,7 +135,7 @@ ENVNEXUS_AI_DATA_ROOT=<repo>\artifacts\smoke\manual-scan-4ef45dfc04c846bf841a032
 - 关闭并重新启动 App 后，扫描快照 SHA-256 和 `LastWriteTimeUtc` 均未改变，确认重启只复用上次结果；
 - 点击“本地分析与建议”后成功打开本地诊断弹窗，显示原因证据、本机适配因素、修复建议与 3 条可复制命令；
 - 点击首个可修复诊断后成功打开用户级环境修复计划，显示 HKCU 范围、PATH 差异、版本管理器路径保护、备份与回滚说明；
-- “命令说明”位于“设置”上方，显示 15 个工具命令分组；输入并持久化自定义命令目录后，109 个 CMD 脚本生成在该目录，并打开用户 PATH 差异计划；随后取消，未修改 HKCU；
+- “命令说明”位于“设置”上方，显示 15 个工具命令分组；输入并持久化自定义命令目录后，110 个 CMD 脚本生成在该目录，并打开用户 PATH 差异计划；随后取消，未修改 HKCU；
 - 设置页实际显示九个带品牌图形的 AI 厂商入口、URL、协议、API Key、远程获取模型、模型选择和“设为当前 AI”操作；
 - 使用隔离数据目录和不联网的虚拟值分别保存 OpenAI 与 DeepSeek，确认生成 `providers\openai.json`、`providers\deepseek.json`、`secrets\openai.dpapi.json` 和 `secrets\deepseek.dpapi.json` 四个独立文件；
 - 保存 DeepSeek 后 OpenAI 配置文件字节和已选模型不变；当前厂商必须显式切换，托盘状态只列出两项有效配置，并能从 OpenAI 切换到 DeepSeek；
@@ -180,7 +191,7 @@ artifacts\smoke\cli-c9fc0587c08742c5909d51cab1d856be
 实测结果：
 
 - `tools --json` 返回 15 个内置工具，且未生成扫描快照；
-- 生成 109 个 CMD 脚本，实际执行 `jdk-list.cmd --json` 正确映射到 `java`，且无快照时未触发扫描；
+- 生成 110 个 CMD 脚本，实际执行 `jdk-list.cmd --json` 正确映射到 `java`，且无快照时未触发扫描；
 - `root set python <absolute-path>` 持久化到共享 `tool-roots.json`；
 - 在脚本生成之后修改 Python 根目录，原先生成的 `python-root.cmd get --json` 返回最新目录，确认脚本没有写死工具路径；
 - 显式 `scan` 后生成共享快照，随后 `jdk-list` 复用其中的扫描时间和 Java/JDK 清单；

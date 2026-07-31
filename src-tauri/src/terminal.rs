@@ -76,7 +76,7 @@ pub fn status(registry: &PluginRegistry, data_root: &Path) -> AppResult<Terminal
         directory,
         enabled_in_user_path,
         script_count,
-        expected_script_count: registry.all().len() * OPERATIONS.len() + 4,
+        expected_script_count: registry.all().len() * OPERATIONS.len() + 5,
     })
 }
 
@@ -108,6 +108,7 @@ pub fn prepare(registry: &PluginRegistry, data_root: &Path) -> AppResult<Termina
     for (filename, arguments) in [
         ("env-tools.cmd", "tools %*"),
         ("env-scan.cmd", "scan %*"),
+        ("env-refresh.cmd", "refresh %*"),
         ("env-diagnose.cmd", "diagnose %*"),
         ("env-repair.cmd", "diagnostic-repair %*"),
     ] {
@@ -233,12 +234,13 @@ mod tests {
         let data = tempfile::tempdir().unwrap();
         let registry = PluginRegistry::builtin();
         let status = prepare(&registry, data.path()).unwrap();
-        assert_eq!(status.script_count, registry.all().len() * 7 + 4);
+        assert_eq!(status.script_count, registry.all().len() * 7 + 5);
         assert_eq!(status.script_count, status.expected_script_count);
 
         let java_list = fs::read_to_string(status.directory.join("jdk-list.cmd")).unwrap();
         assert!(java_list.to_ascii_lowercase().contains("envnexus"));
         assert!(java_list.contains(" list \"java\" %*"));
+        assert!(status.directory.join("env-refresh.cmd").is_file());
         assert!(!status.directory.join("envpilot-cli.exe").exists());
     }
 

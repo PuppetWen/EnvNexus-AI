@@ -250,7 +250,7 @@ function renderShell(): string {
     (scan?.tools.reduce((total, tool) => total + tool.issues.length, 0) ?? 0);
   const updateAvailable = state.applicationUpdate?.phase === "available";
   const updateBusy = applicationUpdateInProgress(state.applicationUpdate?.phase);
-  const currentAppVersion = state.bootstrap?.appVersion ?? "0.1.3";
+  const currentAppVersion = state.bootstrap?.appVersion ?? "0.1.4";
   const updateIndicatorTitle = updateAvailable
     ? `发现新版本 ${state.applicationUpdate?.availableVersion ?? ""}`
     : updateBusy
@@ -532,8 +532,8 @@ function renderTools(): string {
   );
   return `
     <div class="page-heading compact">
-      <div><p class="eyebrow">TOOLCHAIN LIBRARY</p><h1>工具链</h1><p>无需扫描即可进入每个工具的独立管理页、填写安装目录和查询官方版本；扫描只负责读取本机状态。</p></div>
-      <button class="secondary-button" id="tools-rescan">${icon("Radar", 17)} ${state.scan ? "重新扫描" : "扫描本机状态"}</button>
+      <div><p class="eyebrow">TOOLCHAIN LIBRARY</p><h1>工具链</h1><p>扫描会遍历所有本地固定磁盘，验证工具版本并归入对应分类；首次扫描建立索引，后续安装和切换会增量刷新。</p></div>
+      <button class="secondary-button" id="tools-rescan" ${state.scanning ? "disabled" : ""}>${icon(state.scanning ? "LoaderCircle" : "Radar", 17)} ${state.scanning ? "正在全机扫描…" : state.scan ? "重新扫描" : "扫描整台电脑"}</button>
     </div>
     <div class="toolbar panel">
       <label class="search-field">${icon("Search", 17)}<input id="tool-search" placeholder="搜索工具…" value="${escapeHtml(state.toolSearchQuery)}" /></label>
@@ -1925,6 +1925,7 @@ function bindEvents(root: HTMLElement): void {
           ? `Android 工具链根目录已同步为 ${path}。`
           : `该工具的默认安装目录已保存为 ${path}。`;
         state.error = undefined;
+        await runScan({ incremental: true });
       } catch (error) {
         state.error = `保存工具安装目录失败：${String(error)}`;
       }
@@ -1964,6 +1965,7 @@ function bindEvents(root: HTMLElement): void {
           ? `Android 工具链根目录已同步为 ${selected}。`
           : `该工具的默认安装目录已保存为 ${selected}。`;
         state.error = undefined;
+        await runScan({ incremental: true });
       } catch (error) {
         state.error = `保存工具安装目录失败：${String(error)}`;
       }
@@ -2322,7 +2324,18 @@ async function applyPendingPlan(): Promise<void> {
     state.notice = result.message;
     state.pendingPlan = undefined;
     state.progress = undefined;
-    state.scanStale = true;
+    try {
+      const [scan, preferences] = await Promise.all([
+        backend.refreshEnvironmentScan(),
+        backend.toolRootPreferences(),
+      ]);
+      state.scan = scan;
+      state.androidRoot = preferences.androidRoot;
+      state.toolRoots = preferences.roots;
+      state.scanStale = false;
+    } catch {
+      state.scanStale = true;
+    }
     try {
       state.terminalCommands = await backend.terminalCommandsStatus();
     } catch {
@@ -2464,13 +2477,17 @@ function formatByteCount(bytes: number): string {
   return `${value.toFixed(value >= 100 ? 0 : 1)} ${unit}`;
 }
 
-async function runScan(): Promise<void> {
+async function runScan(
+  options: { incremental?: boolean } = {},
+): Promise<void> {
   if (state.scanning) return;
   state.scanning = true;
   state.error = undefined;
   render();
   try {
-    state.scan = await backend.scanEnvironment();
+    state.scan = options.incremental
+      ? await backend.refreshEnvironmentScan()
+      : await backend.scanEnvironment();
     state.scanStale = false;
   } catch (error) {
     state.error = `环境扫描失败：${String(error)}`;

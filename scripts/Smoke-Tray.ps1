@@ -188,11 +188,11 @@ try {
             throw "Startup created a scan snapshot without a user action."
         }
 
-        Invoke-Cdp -Port $CdpPort -Expression "document.querySelector('[data-nav=""settings""]')?.click(); true" | Out-Null
+        Invoke-Cdp -Port $CdpPort -Expression "document.querySelector('.primary-nav [data-nav=""settings""]')?.click(); true" | Out-Null
         Start-Sleep -Seconds 1
         $ControlsReady = Invoke-Cdp -Port $CdpPort -Expression "Boolean(document.querySelector('#app-close-behavior') && document.querySelector('#app-start-minimized') && document.querySelector('#app-launch-at-login') && document.querySelector('#app-language') && !document.querySelector('#app-minimize-button-to-tray') && document.querySelector('.tray-capabilities strong'))"
         if ($ControlsReady -ne "true") {
-            $PageState = Invoke-Cdp -Port $CdpPort -Expression "JSON.stringify({title:document.title,text:document.body?.innerText?.slice(0,500),settings:Boolean(document.querySelector('[data-nav=""settings""]')),closeBehavior:Boolean(document.querySelector('#app-close-behavior'))})"
+            $PageState = Invoke-Cdp -Port $CdpPort -Expression "JSON.stringify({title:document.title,text:document.body?.innerText?.slice(0,500),settings:Boolean(document.querySelector('.primary-nav [data-nav=""settings""]')),closeBehavior:Boolean(document.querySelector('#app-close-behavior'))})"
             throw "Application behavior controls or tray readiness status are missing. Page state: $PageState"
         }
 
@@ -220,7 +220,7 @@ try {
         if ($RunValue -ne $ExpectedRunValue) {
             throw "Windows startup entry does not point to the current EnvNexus AI executable."
         }
-        $LocalizedSettings = Invoke-Cdp -Port $CdpPort -Expression "document.documentElement.lang + ':' + document.querySelector('[data-nav=""settings""] span')?.textContent"
+        $LocalizedSettings = Invoke-Cdp -Port $CdpPort -Expression "document.documentElement.lang + ':' + document.querySelector('.primary-nav [data-nav=""settings""] span')?.textContent"
         if ($LocalizedSettings -ne '"en-US:Settings"') {
             throw "English interface language did not apply: $LocalizedSettings"
         }
@@ -232,7 +232,7 @@ try {
             throw "Close-to-tray setting exited the process instead of hiding the window."
         }
         Show-MainWindow -Handle $FirstHandle -Port $CdpPort
-        $SettingsPreservedAfterClose = Invoke-Cdp -Port $CdpPort -Expression "Boolean(document.querySelector('#app-close-behavior') && document.querySelector('[data-nav=""settings""]')?.classList.contains('active'))"
+        $SettingsPreservedAfterClose = Invoke-Cdp -Port $CdpPort -Expression "Boolean(document.querySelector('#app-close-behavior') && document.querySelector('.primary-nav [data-nav=""settings""]')?.classList.contains('active'))"
         if ($SettingsPreservedAfterClose -ne "true") {
             throw "Restoring the window after close-to-tray did not preserve the current settings view."
         }
@@ -240,7 +240,7 @@ try {
         Invoke-Cdp -Port $CdpPort -Expression "document.querySelector('#hide-to-tray')?.click(); true" | Out-Null
         Wait-ForVisibility -Handle $FirstHandle -Visible $false -Stage "hide now button"
         Show-MainWindow -Handle $FirstHandle -Port $CdpPort
-        $SettingsPreservedAfterHide = Invoke-Cdp -Port $CdpPort -Expression "Boolean(document.querySelector('#app-close-behavior') && document.querySelector('[data-nav=""settings""]')?.classList.contains('active'))"
+        $SettingsPreservedAfterHide = Invoke-Cdp -Port $CdpPort -Expression "Boolean(document.querySelector('#app-close-behavior') && document.querySelector('.primary-nav [data-nav=""settings""]')?.classList.contains('active'))"
         if ($SettingsPreservedAfterHide -ne "true") {
             throw "Restoring the window after an explicit hide did not preserve the current settings view."
         }
@@ -288,7 +288,7 @@ try {
         }
 
         Show-MainWindow -Handle $SecondHandle -Port $CdpPort
-        Invoke-Cdp -Port $CdpPort -Expression "document.querySelector('[data-nav=""settings""]')?.click(); true" | Out-Null
+        Invoke-Cdp -Port $CdpPort -Expression "document.querySelector('.primary-nav [data-nav=""settings""]')?.click(); true" | Out-Null
         Start-Sleep -Seconds 1
         Invoke-Cdp -Port $CdpPort -Expression "(()=>{document.querySelector('#app-close-behavior').value='exit'; document.querySelector('#app-start-minimized').checked=false; document.querySelector('#app-launch-at-login').checked=false; document.querySelector('#app-language').value='zh-CN'; document.querySelector('#save-app-preferences').click(); return true;})()" | Out-Null
         Start-Sleep -Seconds 2

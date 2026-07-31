@@ -192,11 +192,14 @@ fn save_app_preferences(
 fn hide_to_tray(window: tauri::WebviewWindow) -> Result<(), String> {
     window
         .hide()
-        .map_err(|error| format!("最小化到托盘失败：{error}"))
+        .map_err(|error| format!("最小化到托盘失败：{error}"))?;
+    set_webview_low_memory_target(window.app_handle(), true);
+    Ok(())
 }
 
 #[tauri::command]
 fn restore_main_window(window: tauri::WebviewWindow) -> Result<(), String> {
+    set_webview_low_memory_target(window.app_handle(), false);
     window
         .unminimize()
         .map_err(|error| format!("恢复 EnvNexus AI 窗口失败：{error}"))?;
@@ -531,16 +534,38 @@ async fn scan_environment(
     app: AppHandle,
     state: State<'_, Arc<AppState>>,
 ) -> Result<EnvironmentScan, String> {
+    perform_environment_scan(&app, state.inner(), true).await
+}
+
+#[tauri::command]
+async fn refresh_environment_scan(
+    app: AppHandle,
+    state: State<'_, Arc<AppState>>,
+) -> Result<EnvironmentScan, String> {
+    perform_environment_scan(&app, state.inner(), false).await
+}
+
+async fn perform_environment_scan(
+    app: &AppHandle,
+    state: &Arc<AppState>,
+    force_disk_discovery: bool,
+) -> Result<EnvironmentScan, String> {
     let registry = state.registry.clone();
     let data_root = state.data_root.clone();
     let scan_root = data_root.clone();
-    let scan = tokio::task::spawn_blocking(move || scanner::scan(&registry, &scan_root))
-        .await
-        .map_err(|error| format!("扫描任务异常结束：{error}"))?
-        .map_err(error::command_error)?;
+    let scan = tokio::task::spawn_blocking(move || {
+        if force_disk_discovery {
+            scanner::scan(&registry, &scan_root)
+        } else {
+            scanner::refresh(&registry, &scan_root)
+        }
+    })
+    .await
+    .map_err(|error| format!("扫描任务异常结束：{error}"))?
+    .map_err(error::command_error)?;
     write_cached_environment_scan(&data_root, &scan)
         .map_err(|error| format!("扫描完成，但保存扫描快照失败：{error}"))?;
-    refresh_tray_menu(&app).map_err(|error| format!("扫描完成，但刷新托盘菜单失败：{error}"))?;
+    refresh_tray_menu(app).map_err(|error| format!("扫描完成，但刷新托盘菜单失败：{error}"))?;
     Ok(scan)
 }
 
@@ -928,6 +953,7 @@ pub fn run() {
             analyze_diagnostic_with_ai,
             diagnostic_guidance,
             scan_environment,
+            refresh_environment_scan,
             cached_environment_scan,
             export_diagnostic_report,
             recent_operation_logs,
@@ -1402,6 +1428,7 @@ fn handle_tray_menu_event<R: Runtime>(app: &AppHandle<R>, id: &str) {
 
 fn restore_existing_main_window<R: Runtime>(app: &AppHandle<R>) {
     if let Some(window) = app.get_webview_window("main") {
+        set_webview_low_memory_target(app, false);
         let _ = window.unminimize();
         let _ = window.show();
         let _ = window.set_focus();
@@ -1410,6 +1437,7 @@ fn restore_existing_main_window<R: Runtime>(app: &AppHandle<R>) {
 
 fn show_main_window<R: Runtime>(app: &AppHandle<R>, action: TrayFrontendAction) {
     if let Some(window) = app.get_webview_window("main") {
+        set_webview_low_memory_target(app, false);
         let _ = window.unminimize();
         let _ = window.show();
         let _ = window.set_focus();
@@ -1624,6 +1652,9 @@ fn ai_menu_asset_icon(provider_id: &str) -> Image<'static> {
 }
 
 fn handle_window_event<R: Runtime>(window: &Window<R>, event: &WindowEvent) {
+    if let WindowEvent::Focused(focused) = event {
+        set_webview_low_memory_target(window.app_handle(), !focused);
+    }
     let preferences = {
         let state = window.app_handle().state::<Arc<AppState>>();
         state
@@ -1637,8 +1668,39 @@ fn handle_window_event<R: Runtime>(window: &Window<R>, event: &WindowEvent) {
     {
         api.prevent_close();
         let _ = window.hide();
+        set_webview_low_memory_target(window.app_handle(), true);
     }
 }
+
+#[cfg(windows)]
+fn set_webview_low_memory_target<R: Runtime>(app: &AppHandle<R>, low_memory: bool) {
+    let Some(window) = app.get_webview_window("main") else {
+        return;
+    };
+    let _ = window.with_webview(move |webview| {
+        use webview2_com::Microsoft::Web::WebView2::Win32::{
+            COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_LOW,
+            COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_NORMAL, ICoreWebView2_19,
+        };
+        use windows_core::Interface;
+
+        let Ok(core_webview) = (unsafe { webview.controller().CoreWebView2() }) else {
+            return;
+        };
+        let Ok(core_webview) = core_webview.cast::<ICoreWebView2_19>() else {
+            return;
+        };
+        let target = if low_memory {
+            COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_LOW
+        } else {
+            COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_NORMAL
+        };
+        let _ = unsafe { core_webview.SetMemoryUsageTargetLevel(target) };
+    });
+}
+
+#[cfg(not(windows))]
+fn set_webview_low_memory_target<R: Runtime>(_app: &AppHandle<R>, _low_memory: bool) {}
 
 fn resolve_data_root() -> PathBuf {
     if let Some(root) =
@@ -1794,9 +1856,27 @@ fn read_cached_environment_scan(root: &Path) -> std::io::Result<Option<Environme
         return Ok(None);
     }
     let bytes = fs::read(path)?;
-    serde_json::from_slice::<EnvironmentScan>(&bytes)
-        .map(Some)
-        .map_err(std::io::Error::other)
+    let mut scan =
+        serde_json::from_slice::<EnvironmentScan>(&bytes).map_err(std::io::Error::other)?;
+    for tool in &mut scan.tools {
+        if let Some(default_version) = &mut tool.default_version {
+            simplify_installed_version_paths(default_version);
+        }
+        for installed_version in &mut tool.installed_versions {
+            simplify_installed_version_paths(installed_version);
+        }
+        versioning::sort_installed_versions_descending(&mut tool.installed_versions);
+    }
+    for manager in &mut scan.version_managers {
+        manager.executable = manager.executable.take().map(paths::simplify);
+        manager.root = manager.root.take().map(paths::simplify);
+    }
+    Ok(Some(scan))
+}
+
+fn simplify_installed_version_paths(version: &mut model::InstalledVersion) {
+    version.path = paths::simplify(std::mem::take(&mut version.path));
+    version.executable = version.executable.take().map(paths::simplify);
 }
 
 fn write_cached_environment_scan(root: &Path, scan: &EnvironmentScan) -> std::io::Result<()> {

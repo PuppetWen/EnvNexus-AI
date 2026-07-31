@@ -24,6 +24,7 @@ const releaseScript = readFileSync(
   join(process.cwd(), "scripts", "Prepare-Release.ps1"),
   "utf8",
 );
+const styles = readFileSync(join(process.cwd(), "src", "styles.css"), "utf8");
 
 describe("signed GitHub application updater", () => {
   it("checks on startup and hands a confirmed update to the transactional backend", () => {
@@ -51,6 +52,12 @@ describe("signed GitHub application updater", () => {
       'updateAvailable ? "available" : updateBusy ? "busy" : "current"',
     );
     expect(appSource).toContain("发现新版本");
+    const tooltipStyles = styles.slice(
+      styles.indexOf(".brand-update-tooltip {"),
+      styles.indexOf(".brand-update-tooltip strong"),
+    );
+    expect(tooltipStyles).toContain("left: calc(100% + 12px)");
+    expect(tooltipStyles).not.toContain("top: calc(100% + 10px)");
   });
 
   it("uses check-only updater permission and preserves the installer directory flow", () => {

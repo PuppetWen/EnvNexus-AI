@@ -25,4 +25,11 @@ describe("close-to-tray behavior", () => {
     expect(backendSource).toContain('"tray_exit" => app.exit(0)');
     expect(backendSource).toContain("TrayIconEvent::DoubleClick");
   });
+
+  it("uses the WebView2 low-memory target only while inactive", () => {
+    expect(backendSource).toContain("WindowEvent::Focused(focused)");
+    expect(backendSource).toContain("COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_LOW");
+    expect(backendSource).toContain("COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_NORMAL");
+    expect(backendSource).toContain("SetMemoryUsageTargetLevel");
+  });
 });

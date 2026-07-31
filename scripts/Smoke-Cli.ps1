@@ -43,16 +43,20 @@ try {
 
     $CommandStatusJson = Invoke-EnvNexusAICli -Arguments @("command-scripts", "prepare", "--json")
     $CommandStatus = $CommandStatusJson | ConvertFrom-Json
-    if ($CommandStatus.scriptCount -ne 109 -or $CommandStatus.expectedScriptCount -ne 109) {
-        throw "Expected 109 generated CMD scripts, got $($CommandStatus.scriptCount)."
+    if ($CommandStatus.scriptCount -ne 110 -or $CommandStatus.expectedScriptCount -ne 110) {
+        throw "Expected 110 generated CMD scripts, got $($CommandStatus.scriptCount)."
     }
     $JdkListScript = Join-Path ([string]$CommandStatus.directory) "jdk-list.cmd"
+    $EnvRefreshScript = Join-Path ([string]$CommandStatus.directory) "env-refresh.cmd"
     $EnvRepairScript = Join-Path ([string]$CommandStatus.directory) "env-repair.cmd"
     if (-not (Test-Path -LiteralPath $JdkListScript -PathType Leaf)) {
         throw "jdk-list.cmd was not generated."
     }
     if (-not (Test-Path -LiteralPath $EnvRepairScript -PathType Leaf)) {
         throw "env-repair.cmd was not generated."
+    }
+    if (-not (Test-Path -LiteralPath $EnvRefreshScript -PathType Leaf)) {
+        throw "env-refresh.cmd was not generated."
     }
 
     $JdkBeforeScanJson = & $JdkListScript "--json" 2>&1
@@ -96,6 +100,14 @@ try {
     Invoke-EnvNexusAICli -Arguments @("scan") | Out-Null
     if (-not (Test-Path -LiteralPath $Snapshot -PathType Leaf)) {
         throw "Explicit scan did not persist the shared snapshot."
+    }
+    $RefreshOutput = & $EnvRefreshScript "--json" 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        throw "env-refresh.cmd failed: $($RefreshOutput -join [Environment]::NewLine)"
+    }
+    $Refresh = ($RefreshOutput -join [Environment]::NewLine) | ConvertFrom-Json
+    if (@($Refresh.tools).Count -ne 15) {
+        throw "env-refresh.cmd returned an incomplete tool inventory."
     }
 
     $JdkAfterScanJson = & $JdkListScript "--json" 2>&1
@@ -150,6 +162,7 @@ try {
         generatedCommandCount = $CommandStatus.scriptCount
         generatedJdkListVerified = $true
         generatedEnvRepairVerified = $true
+        generatedEnvRefreshVerified = $true
         separateCliExecutable = $false
     }
     $Summary | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $ArtifactRoot "summary.json") -Encoding UTF8

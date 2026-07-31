@@ -55,18 +55,12 @@ async fn run(mut args: Vec<String>) -> AppResult<()> {
         "scan" => {
             let scan = scanner::scan(&registry, &data_root)?;
             crate::write_cached_environment_scan(&data_root, &scan)?;
-            if json {
-                print_json(&scan)?;
-            } else {
-                println!(
-                    "扫描完成：{} 个工具，{} 个全局问题，{} 个版本管理器",
-                    scan.tools.len(),
-                    scan.issues.len(),
-                    scan.version_managers.len()
-                );
-                println!("快照：{}", scan_snapshot_path(&data_root).display());
-            }
-            Ok(())
+            print_scan_result(&data_root, &scan, json, "全机扫描完成")
+        }
+        "refresh" => {
+            let scan = scanner::refresh(&registry, &data_root)?;
+            crate::write_cached_environment_scan(&data_root, &scan)?;
+            print_scan_result(&data_root, &scan, json, "增量刷新完成")
         }
         "list" => {
             let tool_id = required_arg(&args, 1, "用法：EnvNexus-AI.exe list <tool> [--json]")?;
@@ -171,6 +165,25 @@ async fn run(mut args: Vec<String>) -> AppResult<()> {
             "未知命令 {command}；运行 EnvNexus-AI.exe help 查看用法"
         ))),
     }
+}
+
+fn print_scan_result(
+    data_root: &Path,
+    scan: &crate::model::EnvironmentScan,
+    json: bool,
+    label: &str,
+) -> AppResult<()> {
+    if json {
+        return print_json(scan);
+    }
+    println!(
+        "{label}：{} 个工具，{} 个全局问题，{} 个版本管理器",
+        scan.tools.len(),
+        scan.issues.len(),
+        scan.version_managers.len()
+    );
+    println!("快照：{}", scan_snapshot_path(data_root).display());
+    Ok(())
 }
 
 fn command_scripts(
@@ -534,6 +547,11 @@ async fn apply_or_preview(
             installation_path: None,
         },
     };
+    if result.status == "committed"
+        && let Ok(scan) = scanner::refresh(registry, data_root)
+    {
+        let _ = crate::write_cached_environment_scan(data_root, &scan);
+    }
     if json {
         print_json(&result)
     } else {
@@ -628,6 +646,7 @@ list/diagnose 默认读取桌面 App 保存的上次快照。
 
   env-tools [--json]
   env-scan [--json]
+  env-refresh [--json]
   EnvNexus-AI.exe command-scripts prepare [--json]
   jdk-list [--json]
   jdk-versions [--json]
