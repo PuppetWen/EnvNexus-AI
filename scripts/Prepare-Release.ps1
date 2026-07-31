@@ -1,11 +1,14 @@
 param(
-    [string]$ReleaseNotes = "EnvNexus AI 0.1.0 initial public release."
+    [string]$ReleaseNotes
 )
 
 $ErrorActionPreference = "Stop"
 $ProjectRoot = Split-Path -Parent $PSScriptRoot
 $Configuration = Get-Content -LiteralPath (Join-Path $ProjectRoot "src-tauri\tauri.conf.json") -Raw -Encoding UTF8 | ConvertFrom-Json
 $Version = [string]$Configuration.version
+if (-not $ReleaseNotes) {
+    $ReleaseNotes = "EnvNexus AI $Version release."
+}
 $Tag = "v$Version"
 $ReleaseDirectory = Join-Path $ProjectRoot "release"
 $ExecutableSource = Join-Path $ProjectRoot "src-tauri\target\release\envnexus-ai.exe"

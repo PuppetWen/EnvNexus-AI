@@ -50,7 +50,7 @@ pub fn command_directory(data_root: &Path) -> AppResult<PathBuf> {
             "命令脚本目录配置无效，请重新选择保存目录".to_string(),
         ));
     }
-    Ok(preferences.directory)
+    Ok(crate::paths::simplify(preferences.directory))
 }
 
 pub fn status(registry: &PluginRegistry, data_root: &Path) -> AppResult<TerminalCommandStatus> {
@@ -93,10 +93,8 @@ pub fn prepare(registry: &PluginRegistry, data_root: &Path) -> AppResult<Termina
         for (command_name, operation) in OPERATIONS {
             let filename = format!("{prefix}-{command_name}.cmd");
             let body = if operation == "root" {
-                // cmd 中 shift 不影响 %*，不能用 %* 传剩余参数；
-                // 逐个展开 %2..%9，缺省参数会展开为空。
                 format!(
-                    "@echo off\r\n@\"{executable}\" root \"%~1\" \"{tool_id}\" %2 %3 %4 %5 %6 %7 %8 %9\r\n@exit /b %errorlevel%\r\n"
+                    "@echo off\r\nset \"_envnexus_action=%~1\"\r\nshift\r\n@\"{executable}\" root \"%_envnexus_action%\" \"{tool_id}\" %*\r\n@exit /b %errorlevel%\r\n"
                 )
             } else {
                 format!(

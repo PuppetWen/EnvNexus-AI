@@ -72,12 +72,9 @@ fn scan_tool(
     let mut issues = Vec::new();
     let mut active_paths = where_paths(descriptor.executable);
     if descriptor.id == "python" {
-        // `where python`（不带扩展名）会按 PATHEXT 返回 .bat/.cmd shim，
-        // 顺序与真实命令解析一致；必须排在 `where python.exe` 结果之前，
-        // 否则 pyenv-win 等 shim 在前的机器会把靠后的 python.exe 误判为默认。
-        let mut paths = where_paths("python")
+        active_paths.extend(where_paths("python"));
+        let mut paths = active_paths
             .into_iter()
-            .chain(active_paths)
             .map(|path| (path, "PATH".to_string()))
             .collect::<Vec<_>>();
         deduplicate_candidates(&mut paths);
@@ -135,7 +132,7 @@ fn scan_tool(
         right
             .is_default
             .cmp(&left.is_default)
-            .then_with(|| compare_versions(&right.version, &left.version))
+            .then_with(|| right.version.cmp(&left.version))
             .then_with(|| left.path.cmp(&right.path))
     });
     let default_version = installed.iter().find(|version| version.is_default).cloned();
@@ -324,7 +321,11 @@ fn detect_version_managers(
             }
             let current_version = executable.as_ref().and_then(|path| {
                 let output = run_capture(path, spec.current_args, Duration::from_secs(4)).ok()?;
-                parse_manager_current_version(spec.id, &output_text(&output))
+                output_text(&output)
+                    .lines()
+                    .map(str::trim)
+                    .find(|line| !line.is_empty())
+                    .map(|line| line.trim_end_matches(" (default)").to_string())
             });
             let evidence = match (&executable, &root) {
                 (Some(executable), Some(root)) => {
@@ -390,19 +391,11 @@ fn inspect_candidate(
         .captures(&text)
         .and_then(|captures| captures.get(1))
         .map(|capture| capture.as_str().trim().to_string())?;
-    let path = installation_root(executable, descriptor.path_depth);
-    // ndk-build --version 输出的是内置 GNU Make 的版本号；
-    // NDK 自身版本以根目录 source.properties 的 Pkg.Revision 为准。
-    let version = if descriptor.id == "android-ndk" {
-        package_revision(&path).unwrap_or(version)
-    } else {
-        version
-    };
     let executable_canonical = canonical(executable);
     let is_default = executable_canonical.is_some() && executable_canonical == *default_executable;
     Some(InstalledVersion {
         version,
-        path,
+        path: installation_root(executable, descriptor.path_depth),
         source: source.to_string(),
         is_default,
         managed: false,
@@ -415,88 +408,9 @@ fn inspect_candidate(
     })
 }
 
-/// 读取 Android 组件根目录下 source.properties 的 Pkg.Revision。
-fn package_revision(root: &Path) -> Option<String> {
-    let properties = fs::read_to_string(root.join("source.properties")).ok()?;
-    properties.lines().find_map(|line| {
-        let (key, value) = line.split_once('=')?;
-        (key.trim().eq_ignore_ascii_case("Pkg.Revision") && !value.trim().is_empty())
-            .then(|| value.trim().to_string())
-    })
-}
-
-fn parse_manager_current_version(manager_id: &str, output: &str) -> Option<String> {
-    let line = if manager_id == "uru" {
-        // uru ls 用 => 标记当前激活的 Ruby；没有标记时退回第一行
-        output
-            .lines()
-            .find(|line| line.trim_start().starts_with("=>"))
-            .map(|line| line.trim_start().trim_start_matches("=>").trim())
-            .or_else(|| output.lines().map(str::trim).find(|line| !line.is_empty()))?
-    } else {
-        output.lines().map(str::trim).find(|line| !line.is_empty())?
-    };
-    // volta which node 输出的是可执行文件路径；取 node 目录后面的版本段
-    if manager_id == "volta" {
-        let components = Path::new(line)
-            .components()
-            .map(|component| component.as_os_str().to_string_lossy().into_owned())
-            .collect::<Vec<_>>();
-        let from_path = components.iter().enumerate().find_map(|(index, component)| {
-            (component.eq_ignore_ascii_case("node")
-                && components.get(index + 1).is_some_and(|next| {
-                    next.starts_with(|character: char| character.is_ascii_digit())
-                }))
-            .then(|| components[index + 1].clone())
-        });
-        return Some(from_path.unwrap_or_else(|| line.to_string()));
-    }
-    // rustup ≥1.28 输出 "stable-…-msvc (active, default)" 之类的尾部注记，一并去掉
-    let line = if line.ends_with(')') {
-        line.rfind(" (")
-            .map(|index| line[..index].trim_end())
-            .unwrap_or(line)
-    } else {
-        line
-    };
-    Some(line.to_string())
-}
-
-/// 按数字感知方式比较版本号，避免字符串比较把 "9.0.1" 排在 "10.0.2" 之后。
-pub(crate) fn compare_versions(left: &str, right: &str) -> std::cmp::Ordering {
-    let split = |value: &str| {
-        value
-            .split(|character: char| matches!(character, '.' | '-' | '_' | '+' | ' '))
-            .filter(|segment| !segment.is_empty())
-            .map(str::to_string)
-            .collect::<Vec<_>>()
-    };
-    let left_segments = split(left);
-    let right_segments = split(right);
-    for (left_segment, right_segment) in left_segments.iter().zip(right_segments.iter()) {
-        let ordering = match (left_segment.parse::<u64>(), right_segment.parse::<u64>()) {
-            (Ok(left_number), Ok(right_number)) => left_number.cmp(&right_number),
-            (Ok(_), Err(_)) => std::cmp::Ordering::Greater,
-            (Err(_), Ok(_)) => std::cmp::Ordering::Less,
-            (Err(_), Err(_)) => left_segment.cmp(right_segment),
-        };
-        if ordering != std::cmp::Ordering::Equal {
-            return ordering;
-        }
-    }
-    left_segments
-        .len()
-        .cmp(&right_segments.len())
-        .then_with(|| left.cmp(right))
-}
-
 fn where_paths(executable: &str) -> Vec<PathBuf> {
-    // Windows 目录不一定在 C:\Windows；优先用 %SystemRoot% 定位 where.exe。
-    let where_exe = std::env::var_os("SystemRoot")
-        .map(|root| PathBuf::from(root).join("System32").join("where.exe"))
-        .filter(|path| path.is_file())
-        .unwrap_or_else(|| PathBuf::from(r"C:\Windows\System32\where.exe"));
-    let Ok(output) = run_capture(&where_exe, &[executable], Duration::from_secs(3)) else {
+    let where_exe = Path::new(r"C:\Windows\System32\where.exe");
+    let Ok(output) = run_capture(where_exe, &[executable], Duration::from_secs(3)) else {
         return Vec::new();
     };
     if !output.status.success() {
@@ -525,7 +439,6 @@ fn add_environment_candidates(
 
     for (scope, map) in [("用户 PATH", user), ("系统 PATH", system)] {
         for entry in split_path(get_case_insensitive(map, "PATH")) {
-            let entry = entry.trim_matches('"');
             if entry.is_empty() || entry.contains('%') {
                 continue;
             }
@@ -735,25 +648,8 @@ fn add_version_directories(
 }
 
 fn add_python_launcher_candidates(candidates: &mut Vec<(PathBuf, String)>) {
-    // 全局安装的 py.exe 在 %SystemRoot%，仅当前用户安装的在 %LocalAppData% 下。
-    let mut launchers = Vec::new();
-    if let Some(system_root) = std::env::var_os("SystemRoot") {
-        launchers.push(PathBuf::from(system_root).join("py.exe"));
-    }
-    if let Some(local_app_data) = std::env::var_os("LocalAppData") {
-        launchers.push(
-            PathBuf::from(local_app_data)
-                .join("Programs")
-                .join("Python")
-                .join("Launcher")
-                .join("py.exe"),
-        );
-    }
-    launchers.push(PathBuf::from(r"C:\Windows\py.exe"));
-    let Some(launcher) = launchers.into_iter().find(|path| path.is_file()) else {
-        return;
-    };
-    let Ok(output) = run_capture(&launcher, &["-0p"], Duration::from_secs(4)) else {
+    let launcher = Path::new(r"C:\Windows\py.exe");
+    let Ok(output) = run_capture(launcher, &["-0p"], Duration::from_secs(4)) else {
         return;
     };
     for line in output_text(&output).lines() {
@@ -1015,30 +911,6 @@ mod tests {
     fn walks_up_from_executable_to_installation_root() {
         let java = Path::new(r"E:\Java\jdk-21\bin\java.exe");
         assert_eq!(installation_root(java, 1), PathBuf::from(r"E:\Java\jdk-21"));
-    }
-
-    #[test]
-    fn package_revision_reads_pkg_revision_from_source_properties() {
-        let root = tempfile::tempdir().unwrap();
-        fs::write(
-            root.path().join("source.properties"),
-            "Pkg.Desc = Android NDK\nPkg.Revision = 30.0.15729638\n",
-        )
-        .unwrap();
-        assert_eq!(
-            package_revision(root.path()),
-            Some("30.0.15729638".to_string())
-        );
-        assert_eq!(package_revision(Path::new(r"E:\does-not-exist")), None);
-    }
-
-    #[test]
-    fn compare_versions_orders_numerically_not_lexicographically() {
-        use std::cmp::Ordering;
-        assert_eq!(compare_versions("10.0.2", "9.0.1"), Ordering::Greater);
-        assert_eq!(compare_versions("3.11.9", "3.9.13"), Ordering::Greater);
-        assert_eq!(compare_versions("1.8.0_492", "11.0.31"), Ordering::Less);
-        assert_eq!(compare_versions("8.5.8", "8.5.8"), Ordering::Equal);
     }
 
     #[test]

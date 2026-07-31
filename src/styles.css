@@ -56,6 +56,24 @@ code {
   font-family: var(--font-mono);
 }
 
+.path-text,
+.path-input,
+.path-context {
+  /*
+   * Some Japanese-capable fonts localize U+005C as a yen glyph. Paths retain
+   * their original bytes; disabling `locl` fixes only their presentation.
+   */
+  font-feature-settings: "locl" 0;
+  font-variant-ligatures: none;
+}
+
+.path-text,
+.path-input {
+  direction: ltr;
+  font-family: var(--font-path);
+  unicode-bidi: plaintext;
+}
+
 ::selection {
   color: var(--button-text);
   background: var(--accent);
@@ -228,6 +246,26 @@ code {
   font-style: normal;
 }
 
+.nav-update-dot {
+  width: 9px;
+  height: 9px;
+  border: 1px solid color-mix(in srgb, var(--success) 75%, white);
+  border-radius: 50%;
+  background: var(--success);
+  box-shadow: 0 0 9px color-mix(in srgb, var(--success) 72%, transparent);
+  transition:
+    border-color 180ms ease,
+    background 180ms ease,
+    box-shadow 180ms ease;
+}
+
+.nav-update-dot.available {
+  border-color: color-mix(in srgb, var(--danger-text) 78%, white);
+  background: var(--danger-text);
+  box-shadow: 0 0 11px color-mix(in srgb, var(--danger-text) 78%, transparent);
+  animation: update-dot-pulse 1.8s ease-in-out infinite;
+}
+
 .sidebar-spacer {
   flex: 1;
   min-height: 28px;
@@ -294,6 +332,10 @@ code {
   min-height: 0;
   height: 100%;
   overflow: hidden;
+}
+
+.main.has-background-operation {
+  grid-template-rows: 68px minmax(0, 1fr) auto;
 }
 
 .topbar {
@@ -491,6 +533,15 @@ code {
   color: var(--accent);
 }
 
+.text-button:disabled {
+  cursor: wait;
+  opacity: 0.7;
+}
+
+.text-button:disabled svg {
+  animation: spin 1s linear infinite;
+}
+
 .text-button.danger {
   color: var(--danger-text);
 }
@@ -633,6 +684,11 @@ code {
   font-size: 10px;
   font-weight: 650;
   letter-spacing: 0.18em;
+}
+
+:root:lang(zh-CN) .eyebrow,
+:root:lang(zh-TW) .eyebrow {
+  display: none;
 }
 
 .page-heading h1 {
@@ -3376,6 +3432,12 @@ code {
   color: var(--text-faint);
 }
 
+.source-proof.cached {
+  border-color: var(--warning-line);
+  color: var(--warning);
+  background: var(--warning-soft);
+}
+
 .remote-stack {
   max-height: 490px;
   padding-right: 3px;
@@ -3686,6 +3748,104 @@ code {
   font-size: 10px;
 }
 
+.background-operation {
+  position: relative;
+  z-index: 12;
+  right: auto;
+  bottom: auto;
+  display: grid;
+  grid-template-columns: auto minmax(220px, 360px) auto;
+  grid-row: 3;
+  align-items: center;
+  justify-self: end;
+  gap: 12px;
+  width: min(560px, calc(100% - 48px));
+  min-width: 0;
+  max-width: none;
+  margin: 0 24px 20px;
+  padding: 13px 14px;
+  border-color: var(--accent-line);
+  box-shadow: var(--pop-shadow);
+}
+
+.background-operation-icon {
+  display: grid;
+  width: 36px;
+  height: 36px;
+  place-items: center;
+  border-radius: 50%;
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.background-operation-icon svg {
+  animation: spin 1s linear infinite;
+}
+
+.background-operation-copy {
+  min-width: 0;
+}
+
+.background-operation-copy small,
+.background-operation-copy strong {
+  display: block;
+}
+
+.background-operation-copy small {
+  margin-bottom: 4px;
+  color: var(--accent-text);
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+}
+
+.background-operation-copy strong {
+  overflow: hidden;
+  font-size: 11.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.background-operation-progress {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 38px;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.background-operation-progress > span:first-child {
+  height: 4px;
+  overflow: hidden;
+  border-radius: 3px;
+  background: var(--track);
+}
+
+.background-operation-progress i {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--accent);
+  transition: width 160ms ease;
+}
+
+.background-operation-progress > span:last-child {
+  color: var(--text-faint);
+  font-family: var(--font-mono);
+  font-size: 9px;
+  text-align: right;
+}
+
+.background-operation .secondary-button {
+  min-height: 34px;
+  padding: 0 11px;
+  white-space: nowrap;
+}
+
+input.path-input {
+  font-family: var(--font-path);
+}
+
 /* --------------------------------------------------------------- update */
 
 .path-setting {
@@ -3891,6 +4051,13 @@ code {
   }
 }
 
+@keyframes update-dot-pulse {
+  50% {
+    opacity: 0.65;
+    transform: scale(0.82);
+  }
+}
+
 @keyframes pulse {
   50% {
     opacity: 0.55;
@@ -3970,6 +4137,12 @@ code {
   .content {
     padding-right: 22px;
     padding-left: 22px;
+  }
+
+  .background-operation {
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    width: calc(100% - 32px);
+    margin: 0 16px 14px;
   }
 
   .dashboard-grid {

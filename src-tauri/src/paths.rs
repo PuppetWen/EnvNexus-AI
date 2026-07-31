@@ -3,9 +3,9 @@ use std::{
     path::{Path, PathBuf},
 };
 
-/// `fs::canonicalize` 在 Windows 上返回 `\\?\C:\...` 或 `\\?\UNC\server\share` 形式的
-/// verbatim 路径；写入 PATH、JAVA_HOME 或配置文件后会破坏 cmd、Gradle 等消费方。
-/// 该函数在保持规范化结果的同时去掉 verbatim 前缀。
+/// Windows `fs::canonicalize` returns verbatim paths such as `\\?\C:\...`
+/// and `\\?\UNC\server\share`. They are useful internally but should never be
+/// persisted, displayed, or written to user environment variables.
 pub fn simplify(path: PathBuf) -> PathBuf {
     let text = path.to_string_lossy();
     if let Some(stripped) = text.strip_prefix(r"\\?\UNC\") {
@@ -17,8 +17,6 @@ pub fn simplify(path: PathBuf) -> PathBuf {
     }
 }
 
-/// `fs::canonicalize` 后立即去掉 verbatim 前缀；所有会被持久化或写入
-/// 用户环境的路径都应经过这里，而不是直接使用 `fs::canonicalize`。
 pub fn canonicalize_simplified(path: &Path) -> io::Result<PathBuf> {
     fs::canonicalize(path).map(simplify)
 }
@@ -30,8 +28,8 @@ mod tests {
     #[test]
     fn strips_verbatim_disk_prefix() {
         assert_eq!(
-            simplify(PathBuf::from(r"\\?\C:\tools\java")),
-            PathBuf::from(r"C:\tools\java")
+            simplify(PathBuf::from(r"\\?\C:\tools\python")),
+            PathBuf::from(r"C:\tools\python")
         );
     }
 
@@ -53,8 +51,7 @@ mod tests {
 
     #[test]
     fn canonicalize_simplified_returns_plain_form() {
-        let temp = std::env::temp_dir();
-        let canonical = canonicalize_simplified(&temp).unwrap();
+        let canonical = canonicalize_simplified(&std::env::temp_dir()).unwrap();
         assert!(!canonical.to_string_lossy().starts_with(r"\\?\"));
     }
 }

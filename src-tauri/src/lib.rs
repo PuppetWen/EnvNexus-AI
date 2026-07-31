@@ -13,6 +13,7 @@ mod process;
 mod scanner;
 mod sources;
 mod terminal;
+mod versioning;
 
 use std::{
     collections::HashMap,
@@ -54,7 +55,7 @@ enum TrayCommand {
 }
 
 #[derive(Debug, Clone, Serialize)]
-#[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase")]
+#[serde(tag = "kind", rename_all = "camelCase")]
 enum TrayFrontendAction {
     Navigate {
         view: String,
@@ -259,8 +260,8 @@ fn configure_data_root(path: PathBuf) -> Result<PathBuf, String> {
         return Err("数据目录必须是绝对路径，且不能是磁盘根目录".to_string());
     }
     fs::create_dir_all(&path).map_err(|error| format!("无法创建数据目录：{error}"))?;
-    let path =
-        paths::canonicalize_simplified(&path).map_err(|error| format!("无法解析数据目录：{error}"))?;
+    let path = paths::canonicalize_simplified(&path)
+        .map_err(|error| format!("无法解析数据目录：{error}"))?;
     ensure_data_layout(&path).map_err(|error| format!("无法初始化数据目录：{error}"))?;
     let pointer_path =
         data_root_pointer_path().ok_or_else(|| "无法定位 EnvNexus AI 安装目录".to_string())?;
@@ -596,10 +597,27 @@ async fn fetch_versions(
     state: State<'_, Arc<AppState>>,
 ) -> Result<VersionCatalog, String> {
     let plugin = state.registry.get(&tool_id).map_err(error::command_error)?;
-    plugin
-        .fetch_available_versions(&state.client)
-        .await
-        .map_err(error::command_error)
+    let fetched = tokio::time::timeout(
+        std::time::Duration::from_secs(45),
+        plugin.fetch_available_versions(&state.client),
+    )
+    .await;
+    let failure = match fetched {
+        Ok(Ok(mut catalog)) if !catalog.versions.is_empty() => {
+            versioning::sort_remote_versions_descending(&mut catalog.versions);
+            let _ = write_version_catalog_cache(&state.data_root, &catalog);
+            return Ok(catalog);
+        }
+        Ok(Ok(_)) => "官方源没有返回可安装的 Windows x64 版本".to_string(),
+        Ok(Err(error)) => error.to_string(),
+        Err(_) => "查询超过 45 秒，已停止等待".to_string(),
+    };
+    if let Ok(Some(catalog)) = read_version_catalog_cache(&state.data_root, &tool_id) {
+        return Ok(catalog);
+    }
+    Err(format!(
+        "官方版本源暂时不可用：{failure}。请检查网络或代理设置后重试"
+    ))
 }
 
 #[tauri::command]
@@ -810,12 +828,16 @@ pub fn run() {
     let client = reqwest::Client::builder()
         .user_agent(format!("EnvNexus-AI/{}", env!("CARGO_PKG_VERSION")))
         .https_only(true)
-        // 总时限只适用于目录等小请求；安装器下载会按请求覆盖总时限，
-        // 由 read_timeout 检测传输中途卡死。
         .timeout(std::time::Duration::from_secs(30))
-        .read_timeout(std::time::Duration::from_secs(60))
         .build()
         .expect("无法创建 HTTP 客户端");
+    let download_client = reqwest::Client::builder()
+        .user_agent(format!("EnvNexus-AI/{}", env!("CARGO_PKG_VERSION")))
+        .https_only(true)
+        .connect_timeout(std::time::Duration::from_secs(20))
+        .read_timeout(std::time::Duration::from_secs(60))
+        .build()
+        .expect("无法创建下载 HTTP 客户端");
     let ai_client = reqwest::Client::builder()
         .user_agent(format!("EnvNexus-AI/{}", env!("CARGO_PKG_VERSION")))
         .https_only(true)
@@ -824,14 +846,10 @@ pub fn run() {
         .build()
         .expect("无法创建 AI HTTP 客户端");
     let preferences = app_preferences::read(&data_root).unwrap_or_default();
-    // WebView2 的浏览器数据（缓存、配置文件）默认写入 C 盘的
-    // %LOCALAPPDATA%\<identifier>；改为跟随应用数据根目录，
-    // 保证所有数据都留在用户选择的位置。
-    let webview_data_directory = data_root.join("webview");
     let state = Arc::new(AppState {
         registry: PluginRegistry::builtin(),
         plans: PlanService::new(data_root.clone()),
-        installer: Installer::new(client.clone(), data_root.clone()),
+        installer: Installer::new(download_client, data_root.clone()),
         client,
         ai_client,
         data_root,
@@ -847,16 +865,7 @@ pub fn run() {
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(state)
-        .setup(move |app| {
-            fs::create_dir_all(&webview_data_directory)?;
-            tauri::WebviewWindowBuilder::new(app, "main", tauri::WebviewUrl::default())
-                .title("EnvNexus AI")
-                .inner_size(1400.0, 900.0)
-                .min_inner_size(980.0, 700.0)
-                .center()
-                .resizable(true)
-                .data_directory(webview_data_directory.clone())
-                .build()?;
+        .setup(|app| {
             setup_tray(app)?;
             Ok(())
         })
@@ -1601,7 +1610,7 @@ fn resolve_data_root() -> PathBuf {
     if let Some(root) =
         std::env::var_os("ENVNEXUS_AI_DATA_ROOT").or_else(|| std::env::var_os("ENVPILOT_DATA_ROOT"))
     {
-        return PathBuf::from(root);
+        return paths::simplify(PathBuf::from(root));
     }
     for pointer_path in data_root_pointer_paths() {
         if let Ok(bytes) = fs::read(pointer_path)
@@ -1609,7 +1618,7 @@ fn resolve_data_root() -> PathBuf {
             && pointer.schema_version == 1
             && pointer.data_root.is_absolute()
         {
-            return pointer.data_root;
+            return paths::simplify(pointer.data_root);
         }
     }
     if cfg!(debug_assertions) {
@@ -1705,8 +1714,8 @@ fn normalize_install_root(path: PathBuf) -> Result<PathBuf, String> {
         return Err("安装目录必须是绝对路径，且不能是磁盘根目录".to_string());
     }
     fs::create_dir_all(&path).map_err(|error| format!("无法创建安装目录：{error}"))?;
-    let canonical =
-        paths::canonicalize_simplified(&path).map_err(|error| format!("无法解析安装目录：{error}"))?;
+    let canonical = paths::canonicalize_simplified(&path)
+        .map_err(|error| format!("无法解析安装目录：{error}"))?;
     if canonical.parent().is_none() {
         return Err("不能把磁盘根目录作为工具安装目录".to_string());
     }
@@ -1719,13 +1728,19 @@ fn read_tool_root_preferences(root: &Path) -> std::io::Result<ToolRootPreference
         return Ok(ToolRootPreferences::default());
     }
     let bytes = fs::read(path)?;
-    let preferences =
+    let mut preferences =
         serde_json::from_slice::<ToolRootPreferences>(&bytes).map_err(std::io::Error::other)?;
     if preferences.schema_version != 1 {
         return Err(std::io::Error::other(format!(
             "unsupported tool root schema {}",
             preferences.schema_version
         )));
+    }
+    for configured_root in preferences.roots.values_mut() {
+        *configured_root = paths::simplify(std::mem::take(configured_root));
+    }
+    if let Some(android_root) = preferences.android_root.take() {
+        preferences.android_root = Some(paths::simplify(android_root));
     }
     Ok(preferences)
 }
@@ -1754,6 +1769,37 @@ fn write_cached_environment_scan(root: &Path, scan: &EnvironmentScan) -> std::io
     let path = root.join("cache").join("last-environment-scan.json");
     let bytes = serde_json::to_vec_pretty(scan).map_err(std::io::Error::other)?;
     write_bytes_atomic(&path, &bytes)
+}
+
+fn version_catalog_cache_path(root: &Path, tool_id: &str) -> PathBuf {
+    root.join("cache")
+        .join("version-sources")
+        .join(format!("{tool_id}.json"))
+}
+
+fn write_version_catalog_cache(root: &Path, catalog: &VersionCatalog) -> std::io::Result<()> {
+    let path = version_catalog_cache_path(root, &catalog.tool_id);
+    let bytes = serde_json::to_vec_pretty(catalog).map_err(std::io::Error::other)?;
+    write_bytes_atomic(&path, &bytes)
+}
+
+fn read_version_catalog_cache(
+    root: &Path,
+    tool_id: &str,
+) -> std::io::Result<Option<VersionCatalog>> {
+    let path = version_catalog_cache_path(root, tool_id);
+    if !path.is_file() {
+        return Ok(None);
+    }
+    let bytes = fs::read(path)?;
+    let mut catalog =
+        serde_json::from_slice::<VersionCatalog>(&bytes).map_err(std::io::Error::other)?;
+    if catalog.tool_id != tool_id || catalog.versions.is_empty() {
+        return Ok(None);
+    }
+    versioning::sort_remote_versions_descending(&mut catalog.versions);
+    catalog.cached = true;
+    Ok(Some(catalog))
 }
 
 fn ensure_data_layout(root: &Path) -> std::io::Result<()> {
@@ -1801,6 +1847,37 @@ mod tests {
             restored.roots.keys().all(|tool_id| tool_id == "python"
                 || ANDROID_WORKSPACE_TOOL_IDS.contains(&tool_id.as_str()))
         );
+    }
+
+    #[test]
+    fn cached_version_catalog_is_returned_as_cached() {
+        let temporary = tempfile::tempdir().unwrap();
+        ensure_data_layout(temporary.path()).unwrap();
+        let catalog = VersionCatalog {
+            tool_id: "python".to_string(),
+            source_name: "Python.org".to_string(),
+            source_url: "https://www.python.org/".to_string(),
+            fetched_at: chrono::Utc::now(),
+            cached: false,
+            versions: vec![crate::model::RemoteVersion {
+                version: "3.13.14".to_string(),
+                channel: "stable".to_string(),
+                published_at: None,
+                architecture: "x86_64".to_string(),
+                download_url: Some("https://www.python.org/ftp/python/example.zip".to_string()),
+                checksum_algorithm: Some("sha256".to_string()),
+                checksum: Some("abc123".to_string()),
+                notes_url: None,
+            }],
+        };
+
+        write_version_catalog_cache(temporary.path(), &catalog).unwrap();
+        let restored = read_version_catalog_cache(temporary.path(), "python")
+            .unwrap()
+            .unwrap();
+
+        assert!(restored.cached);
+        assert_eq!(restored.versions[0].version, "3.13.14");
     }
 
     #[test]

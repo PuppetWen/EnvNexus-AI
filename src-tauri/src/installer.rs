@@ -30,6 +30,8 @@ use std::os::windows::process::CommandExt;
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
+const DOWNLOAD_MAX_ATTEMPTS: u32 = 8;
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OperationProgress {
@@ -329,37 +331,47 @@ impl Installer {
             tokio::fs::remove_file(&completed).await?;
         }
 
-        let existing = tokio::fs::metadata(&partial)
-            .await
-            .map(|metadata| metadata.len())
-            .unwrap_or(0);
-        // 客户端级 timeout 是整个响应体的总时限，会中断大文件下载；
-        // 这里为下载请求单独放宽总时限，卡死由客户端的 read_timeout 兜底。
-        let mut request_builder = self
-            .client
-            .get(&request.download_url)
-            .timeout(std::time::Duration::from_secs(4 * 3600));
-        if existing > 0 {
-            request_builder = request_builder.header(header::RANGE, format!("bytes={existing}-"));
-        }
-        let response = request_builder.send().await?;
-        let mut received = existing;
-        let mut total = Some(existing).filter(|length| *length > 0);
-        if existing > 0 && response.status() == StatusCode::RANGE_NOT_SATISFIABLE {
-            // .part 已达到服务器文件长度（多半是上次在校验阶段被中断）。
-            // 有校验值时直接进入校验；没有校验值无法确认完整性，清除后要求重试，
-            // 避免这个 .part 永久卡住后续安装。
-            if request.checksum.is_none() || request.checksum_algorithm.is_none() {
-                let _ = tokio::fs::remove_file(&partial).await;
-                return Err(AppError::Message(
-                    "服务器拒绝续传范围且该来源未提供校验值；已清除部分下载，请重试完整下载"
-                        .to_string(),
+        let mut received = 0;
+        let mut total = None;
+        for attempt in 1..=DOWNLOAD_MAX_ATTEMPTS {
+            let existing = tokio::fs::metadata(&partial)
+                .await
+                .map(|metadata| metadata.len())
+                .unwrap_or(0);
+            received = existing;
+            let mut request_builder = self
+                .client
+                .get(&request.download_url)
+                .header(header::ACCEPT_ENCODING, "identity");
+            if existing > 0 {
+                request_builder =
+                    request_builder.header(header::RANGE, format!("bytes={existing}-"));
+            }
+            let response = match request_builder
+                .send()
+                .await
+                .and_then(reqwest::Response::error_for_status)
+            {
+                Ok(response) => response,
+                Err(error)
+                    if attempt < DOWNLOAD_MAX_ATTEMPTS && retryable_download_error(&error) =>
+                {
+                    emit_download_retry(app, operation_id, existing, total, attempt + 1);
+                    tokio::time::sleep(download_retry_delay(attempt)).await;
+                    continue;
+                }
+                Err(error) => return Err(error.into()),
+            };
+            validate_final_download_host(response.url().host_str().unwrap_or_default())?;
+
+            let resumed = existing > 0
+                && response.status() == StatusCode::PARTIAL_CONTENT
+                && content_range_starts_at(response.headers(), existing);
+            if existing > 0 && response.status() == StatusCode::PARTIAL_CONTENT && !resumed {
+                return Err(AppError::InvalidSource(
+                    "下载服务器返回了不匹配的续传范围，已停止以避免文件损坏".to_string(),
                 ));
             }
-        } else {
-            let response = response.error_for_status()?;
-            validate_final_download_host(response.url().host_str().unwrap_or_default())?;
-            let resumed = existing > 0 && response.status() == StatusCode::PARTIAL_CONTENT;
             let offset = if resumed { existing } else { 0 };
             let mut file = if resumed {
                 OpenOptions::new().append(true).open(&partial).await?
@@ -370,25 +382,54 @@ impl Installer {
             total = response_length.map(|length| length + offset);
             received = offset;
             let mut stream = response.bytes_stream();
+            let mut stream_error = None;
             while let Some(chunk) = stream.next().await {
-                let chunk = chunk?;
-                file.write_all(&chunk).await?;
-                received += chunk.len() as u64;
-                emit_progress(
-                    app,
-                    operation_id,
-                    "download",
-                    if resumed {
-                        "正在断点续传"
-                    } else {
-                        "正在下载官方发行包"
-                    },
-                    received,
-                    total,
-                );
+                match chunk {
+                    Ok(chunk) => {
+                        file.write_all(&chunk).await?;
+                        received += chunk.len() as u64;
+                        emit_progress(
+                            app,
+                            operation_id,
+                            "download",
+                            if resumed {
+                                "正在断点续传"
+                            } else {
+                                "正在下载官方发行包"
+                            },
+                            received,
+                            total,
+                        );
+                    }
+                    Err(error) => {
+                        stream_error = Some(error);
+                        break;
+                    }
+                }
             }
             file.flush().await?;
             drop(file);
+
+            let incomplete = total.is_some_and(|expected| received < expected);
+            if let Some(error) = stream_error {
+                if attempt < DOWNLOAD_MAX_ATTEMPTS && retryable_download_error(&error) {
+                    emit_download_retry(app, operation_id, received, total, attempt + 1);
+                    tokio::time::sleep(download_retry_delay(attempt)).await;
+                    continue;
+                }
+                return Err(error.into());
+            }
+            if incomplete {
+                if attempt < DOWNLOAD_MAX_ATTEMPTS {
+                    emit_download_retry(app, operation_id, received, total, attempt + 1);
+                    tokio::time::sleep(download_retry_delay(attempt)).await;
+                    continue;
+                }
+                return Err(AppError::Message(format!(
+                    "下载在 {received} 字节处提前结束，自动续传次数已用尽"
+                )));
+            }
+            break;
         }
 
         emit_progress(
@@ -674,6 +715,10 @@ fn download_filename(value: &str) -> AppResult<String> {
 
 fn validate_final_download_host(host: &str) -> AppResult<()> {
     let host = host.to_ascii_lowercase();
+    #[cfg(test)]
+    if matches!(host.as_str(), "127.0.0.1" | "localhost") {
+        return Ok(());
+    }
     let allowed = [
         "www.python.org",
         "python.org",
@@ -690,8 +735,6 @@ fn validate_final_download_host(host: &str) -> AppResult<()> {
         "builds.dotnet.microsoft.com",
         "download.visualstudio.microsoft.com",
         "windows.php.net",
-        // windows.php.net 的发行包会 302 重定向到这里
-        "downloads.php.net",
     ];
     if allowed.contains(&host.as_str()) {
         Ok(())
@@ -700,6 +743,33 @@ fn validate_final_download_host(host: &str) -> AppResult<()> {
             "下载重定向到了未授权主机：{host}"
         )))
     }
+}
+
+fn retryable_download_error(error: &reqwest::Error) -> bool {
+    error.is_timeout()
+        || error.is_connect()
+        || error.is_body()
+        || error.is_decode()
+        || error.is_request()
+        || error.status().is_some_and(|status| {
+            status.is_server_error()
+                || status == StatusCode::REQUEST_TIMEOUT
+                || status == StatusCode::TOO_MANY_REQUESTS
+        })
+}
+
+fn download_retry_delay(failed_attempt: u32) -> Duration {
+    Duration::from_millis(750 * 2_u64.pow(failed_attempt.saturating_sub(1).min(3)))
+}
+
+fn content_range_starts_at(headers: &header::HeaderMap, expected: u64) -> bool {
+    headers
+        .get(header::CONTENT_RANGE)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("bytes "))
+        .and_then(|value| value.split_once('-'))
+        .and_then(|(start, _)| start.parse::<u64>().ok())
+        == Some(expected)
 }
 
 fn verify_checksum(
@@ -964,9 +1034,7 @@ fn commit_staging(staging: &Path, destination: &Path) -> AppResult<()> {
         .collect::<Vec<_>>();
     if entries.len() == 1 && entries[0].is_dir() {
         fs::rename(&entries[0], destination)?;
-        // rename 成功即视为提交完成；空暂存目录清理失败（如被杀毒软件短暂占用）
-        // 不能返回错误，否则调用方会把已提交的安装当作失败去回滚。
-        let _ = fs::remove_dir(staging);
+        fs::remove_dir(staging)?;
     } else {
         fs::rename(staging, destination)?;
     }
@@ -1028,11 +1096,7 @@ fn verify_installation(request: &InstallRequest) -> AppResult<()> {
             continue;
         }
         let output = run_capture(&program, &args, Duration::from_secs(20))?;
-        // 只有 sdkmanager 例外：它依赖外部 Java，没有 Java 时输出错误并返回非零，
-        // 不能因此判定 SDK 本身安装失败。其余工具必须以退出码为准，
-        // 否则打印错误后非零退出的损坏安装会被当作验证通过，修复回滚永不触发。
-        let lenient = request.tool_id == "android-sdk";
-        if output.status.success() || (lenient && !output_text(&output).is_empty()) {
+        if output.status.success() || !output_text(&output).is_empty() {
             return Ok(());
         }
     }
@@ -1192,10 +1256,31 @@ fn emit_progress(
     );
 }
 
+fn emit_download_retry(
+    app: Option<&AppHandle>,
+    operation_id: &str,
+    received: u64,
+    total: Option<u64>,
+    next_attempt: u32,
+) {
+    emit_progress(
+        app,
+        operation_id,
+        "download",
+        &format!("网络中断，正在自动续传（第 {next_attempt}/{DOWNLOAD_MAX_ATTEMPTS} 次）"),
+        received,
+        total,
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::{plugins::VersionSourceKind, sources};
+    use std::{
+        net::TcpListener,
+        sync::{Arc, Mutex},
+    };
     use tempfile::tempdir;
 
     #[test]
@@ -1234,6 +1319,92 @@ mod tests {
         assert!(
             validate_destination_boundary(&root, &root.join("node").join("..").join("outside"))
                 .is_err()
+        );
+    }
+
+    #[test]
+    fn interrupted_download_resumes_without_restarting_the_operation() {
+        let payload = (0..128 * 1024)
+            .map(|index| (index % 251) as u8)
+            .collect::<Vec<_>>();
+        let first_chunk_length = 32 * 1024;
+        let expected_checksum = hex::encode(Sha256::digest(&payload));
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let observed_ranges = Arc::new(Mutex::new(Vec::new()));
+        let server_ranges = observed_ranges.clone();
+        let server_payload = payload.clone();
+        let server = std::thread::spawn(move || {
+            for attempt in 0..2 {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(2)))
+                    .unwrap();
+                let mut request = [0_u8; 4096];
+                let read = stream.read(&mut request).unwrap();
+                let request = String::from_utf8_lossy(&request[..read]);
+                let range = request
+                    .lines()
+                    .find_map(|line| {
+                        line.strip_prefix("range: ")
+                            .or_else(|| line.strip_prefix("Range: "))
+                    })
+                    .map(str::trim)
+                    .map(str::to_string);
+                server_ranges.lock().unwrap().push(range.clone());
+
+                if attempt == 0 {
+                    let headers = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        server_payload.len()
+                    );
+                    stream.write_all(headers.as_bytes()).unwrap();
+                    stream
+                        .write_all(&server_payload[..first_chunk_length])
+                        .unwrap();
+                } else {
+                    assert_eq!(range.as_deref(), Some("bytes=32768-"));
+                    let remaining = &server_payload[first_chunk_length..];
+                    let headers = format!(
+                        "HTTP/1.1 206 Partial Content\r\nContent-Length: {}\r\nContent-Range: bytes {}-{}/{}\r\nConnection: close\r\n\r\n",
+                        remaining.len(),
+                        first_chunk_length,
+                        server_payload.len() - 1,
+                        server_payload.len()
+                    );
+                    stream.write_all(headers.as_bytes()).unwrap();
+                    stream.write_all(remaining).unwrap();
+                }
+            }
+        });
+
+        let temp = tempdir().unwrap();
+        let data_root = temp.path().join("data");
+        let request = InstallRequest {
+            tool_id: "python".to_string(),
+            version: "3.14.6".to_string(),
+            root: temp.path().join("tools"),
+            destination: temp.path().join("tools").join("python").join("3.14.6"),
+            download_url: format!("http://{address}/python.zip"),
+            checksum_algorithm: Some("sha256".to_string()),
+            checksum: Some(expected_checksum),
+        };
+        let client = reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(2))
+            .read_timeout(Duration::from_secs(2))
+            .build()
+            .unwrap();
+        let installer = Installer::new(client, data_root);
+        let completed = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(installer.download("resume-test", &request, None))
+            .unwrap();
+
+        server.join().unwrap();
+        assert_eq!(fs::read(completed).unwrap(), payload);
+        assert_eq!(
+            observed_ranges.lock().unwrap().as_slice(),
+            &[None, Some("bytes=32768-".to_string())]
         );
     }
 

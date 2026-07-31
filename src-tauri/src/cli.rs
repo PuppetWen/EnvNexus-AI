@@ -577,10 +577,7 @@ fn http_client() -> AppResult<reqwest::Client> {
             env!("CARGO_PKG_VERSION")
         ))
         .https_only(true)
-        // 总时限只适用于目录等小请求；安装器下载会按请求覆盖总时限，
-        // 由 read_timeout 检测传输中途卡死。
         .timeout(std::time::Duration::from_secs(60))
-        .read_timeout(std::time::Duration::from_secs(60))
         .build()
         .map_err(AppError::from)
 }
