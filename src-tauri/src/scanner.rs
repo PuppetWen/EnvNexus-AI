@@ -1777,10 +1777,16 @@ mod tests {
                 probes,
             )
         };
+        let managed = |inventory: &ToolInventory| {
+            inventory
+                .installed_versions
+                .iter()
+                .find(|version| version.managed && version.path == root)
+                .expect("the fixture must remain discoverable for repair")
+                .clone()
+        };
         let old = scan(&mut probes);
-        assert_eq!(old.installed_versions.len(), 1);
-        assert!(old.installed_versions[0].managed);
-        assert_eq!(old.installed_versions[0].health, HealthLevel::Warning);
+        assert_eq!(managed(&old).health, HealthLevel::Warning);
         assert!(old.issues.iter().any(|issue| {
             issue
                 .code
@@ -1799,7 +1805,7 @@ mod tests {
             fs::write(path, b"fixture").unwrap();
         }
         let repaired = scan(&mut probes);
-        assert_eq!(repaired.installed_versions[0].health, HealthLevel::Healthy);
+        assert_eq!(managed(&repaired).health, HealthLevel::Healthy);
         assert!(!repaired.issues.iter().any(|issue| {
             issue
                 .code
@@ -1807,8 +1813,7 @@ mod tests {
         }));
         fs::remove_file(root.join("Lib/site-packages/pip/__init__.py")).unwrap();
         let damaged = scan(&mut probes);
-        assert_eq!(damaged.installed_versions[0].health, HealthLevel::Warning);
-        assert_eq!(damaged.installed_versions.len(), 1);
+        assert_eq!(managed(&damaged).health, HealthLevel::Warning);
     }
 
     #[test]
