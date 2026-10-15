@@ -19,6 +19,9 @@ jobs:
   verify:
     runs-on: windows-latest
     timeout-minutes: 40
+    permissions:
+      # GitHub hides draft releases from tokens without push access. No step publishes them.
+      contents: write
     env:
       CARGO_TERM_COLOR: always
       CARGO_HOME: ${{ github.workspace }}/.devtools/cargo
@@ -27,6 +30,8 @@ jobs:
       RELEASE_TAG: ${{ inputs.tag }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Keep build dependencies and temporary files in the workspace
         shell: pwsh
