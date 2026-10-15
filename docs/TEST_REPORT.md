@@ -20,7 +20,13 @@
 | Python 实际安装事务 | CI6、CI7 均通过；官方嵌入式 ZIP 下载、SHA-256 校验、安全解压、暂存提交、安装清单和版本探测成功 |
 | Release 与 NSIS | CI7 生成 `EnvNexus-AI_0.1.5_x64-portable.exe` 和 `EnvNexus-AI_0.1.5_x64-setup.exe`；隔离静默安装后，主程序 SHA-256 与便携包一致，安装后的 `tools --json` 返回 15 类工具 |
 
-以上 CI 构建没有使用云端私钥。新安装包和便携包已在本机使用原有长期密钥签名；本机 Node 验证器通过旧版两个包和本版两个包的签名校验，并确认篡改内容会被拒绝。两个包、签名侧文件、`latest.json` 和 `SHA256SUMS.txt` 仍需由独立 `verify-signed-release.yml` 读取发行资产，使用应用内公钥完成 Rust 验证；本节尚未将该独立发布验证记为完成。
+以上 CI 构建没有使用云端私钥。新安装包和便携包已在本机使用原有长期密钥签名；本机 Node 验证器通过旧版两个包和本版两个包的签名校验，并确认篡改内容会被拒绝。
+
+独立 `verify-signed-release.yml` 已通过，提交 `7e89837`，运行记录为 [38693512678](https://github.com/PuppetWen/EnvNexus-AI/actions/runs/38693512678)，最终结论 `success`。该作业实际下载六项发行资产：两个包、两个签名侧文件、`latest.json` 和 `SHA256SUMS.txt`；确认 PE 版本、下载 URL、签名侧文件及严格五项 SHA-256 清单一致，并通过应用更新器的 Rust 测试 `built_release_assets_match_signed_metadata`，使用应用内公钥验证两个包的签名和元数据。
+
+首轮使用只读令牌读取草稿发行版时返回 `release not found`，未进入签名校验；将该验证作业的仓库内容权限改为 `contents: write`、同时禁用 checkout 凭据持久化后重跑成功。私钥始终留在本机，没有上传 CI。
+
+正式发布后，未携带 GitHub 凭据访问公开自动更新入口 `releases/latest/download/latest.json`，返回版本 `0.1.5`，内容 SHA-256 与已验证元数据相同。安装版、便携版、两个签名侧文件和校验清单的公开链接均重新下载成功，逐文件哈希一致，下载后的两个包再次通过签名校验。
 
 ### 15 类工具实际安装
 
