@@ -31,6 +31,7 @@ EnvNexus AI 是一款使用 Rust + Tauri 2 开发的 Windows 桌面 App。它把
 ### 主要功能
 
 - 管理 Python、Java/JDK、Go、Rust、Node.js、Git、Maven、.NET SDK、Ruby、PHP，以及 Android SDK、NDK、JDK、Gradle、CMake、ADB。
+- Python 使用官方 PythonCore 完整运行时 ZIP 和 SHA-256，提供 pip、venv、Tk/IDLE；仅列出完整包和校验值齐全的稳定版本，当前可用历史从 3.11 起。
 - 每个工具都有独立页面和独立安装根目录；Android 组件集中使用同一个用户指定根目录。
 - 显示当前默认版本、本机全部版本、官方可安装版本、安装位置和环境状态。
 - 官方版本列表优先显示已有缓存，过期内容在后台刷新；合并重复查询，安装前获取选中版本所需的校验信息。
@@ -57,9 +58,11 @@ AI 不会绕过本地安全边界：它不能直接修改环境。任何一键�
 
 从 [GitHub Releases](https://github.com/PuppetWen/EnvNexus-AI/releases/latest) 下载：
 
-- `EnvNexus-AI_0.1.5_x64-setup.exe`：当前用户安装版，可选择安装目录；检测到已有安装时会复用原路径并原地升级。
-- `EnvNexus-AI_0.1.5_x64-portable.exe`：便携主程序；App 内更新会在原路径安全自替换。
+- `EnvNexus-AI_0.1.6_x64-setup.exe`：当前用户安装版，可选择安装目录；检测到已有安装时会复用原路径并原地升级。
+- `EnvNexus-AI_0.1.6_x64-portable.exe`：便携主程序；App 内更新会在原路径安全自替换。
 - `SHA256SUMS.txt`：下载文件校验值。
+
+0.1.5 安装的受管 Python 可能使用不含 pip/venv 的嵌入式包。升级后，对仍有对应官方完整发行包的版本，在 Python 版本卡片点击“修复”，可在原路径迁移到完整运行时；修复完成后再确认单独的 PATH/默认版本计划。旧版本清单缓存会自动失效；没有官方完整 ZIP 或 SHA-256 的旧版本不会改用嵌入式包代替。
 
 首次打开不会扫描电脑。可先进入“工具链”为各工具设置目录，再按需扫描或查询官方版本。
 
@@ -113,6 +116,7 @@ EnvNexus AI is a Windows desktop application built with Rust and Tauri 2. It pro
 ### Highlights
 
 - Manages Python, Java/JDK, Go, Rust, Node.js, Git, Maven, .NET SDK, Ruby, PHP, and the Android SDK/NDK/JDK/Gradle/CMake/ADB toolchain.
+- Python uses official PythonCore full runtime ZIPs with SHA-256 verification, including pip, venv, Tk, and IDLE. Only stable releases with full archives and checksums are listed; currently available history starts at 3.11.
 - Gives every tool its own management page and selectable installation root. Android components share one user-selected root.
 - Shows the current default, every locally installed version, official releases, locations, and environment health.
 - Shows cached official catalogs first, refreshes stale results in the background, and merges duplicate queries. Installation fetches the selected version's required checksum metadata.
@@ -138,9 +142,11 @@ AI cannot bypass local safety controls or directly change the environment. One-c
 
 Download the latest build from [GitHub Releases](https://github.com/PuppetWen/EnvNexus-AI/releases/latest):
 
-- `EnvNexus-AI_0.1.5_x64-setup.exe`: per-user installer with a selectable install directory. Existing installations are upgraded in their previous location.
-- `EnvNexus-AI_0.1.5_x64-portable.exe`: portable executable. In-app updates safely replace it in its original location.
+- `EnvNexus-AI_0.1.6_x64-setup.exe`: per-user installer with a selectable install directory. Existing installations are upgraded in their previous location.
+- `EnvNexus-AI_0.1.6_x64-portable.exe`: portable executable. In-app updates safely replace it in its original location.
 - `SHA256SUMS.txt`: release checksums.
+
+Managed Python installations created by 0.1.5 may use the embedded package without pip or venv. After upgrading, choose “Repair” on the installed version card to migrate it in place when a matching official full archive is available, then confirm the separate PATH/default version plan. Old catalog caches are invalidated. Releases without a full official ZIP and SHA-256 are not replaced with embedded packages.
 
 The first launch does not scan the machine. You can configure each tool's installation root before running a scan or querying official releases.
 

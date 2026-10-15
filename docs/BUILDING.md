@@ -79,7 +79,9 @@ pnpm icons:generate
 .\scripts\Invoke-Rust.ps1 -Task live-install
 ```
 
-`live-added-sources` 单独验证 Maven、.NET SDK、Ruby、PHP，便于区分新增解析器与其他上游网络波动。`live-install` 会在仓库的 `artifacts/integration` 下创建临时目录，真实下载 Python 官方嵌入包并完整验证安装事务；结束后删除临时目录，不修改 PATH。
+`live-added-sources` 单独验证 Maven、.NET SDK、Ruby、PHP，便于区分新增解析器与其他上游网络波动。`live-install` 会在仓库的 `artifacts/integration` 下创建临时目录，真实下载并校验 Python 官方完整 PythonCore ZIP，验证安装事务与完整开发运行时；结束后删除临时目录，不修改 PATH。Python 源只接受官方完整 ZIP 和 SHA-256 齐全的稳定版本，当前可用历史从 3.11 起；旧 NuGet 包及嵌入式包不作为完整运行时备用源。
+
+`Smoke-Python.ps1` 用于在 CI 中检查完整 Python 的 pip 命令入口、venv 和旧嵌入式安装的原路径修复；测试、缓存和临时目录限制在仓库下。具体通过结果以当次工作流和 `TEST_REPORT.md` 为准。
 
 ## 开发运行
 
@@ -102,8 +104,8 @@ pnpm tauri dev
 
 ```text
 src-tauri/target/release/envnexus-ai.exe
-src-tauri/target/release/bundle/nsis/EnvNexus AI_0.1.5_x64-setup.exe
-src-tauri/target/release/bundle/nsis/EnvNexus AI_0.1.5_x64-setup.exe.sig
+src-tauri/target/release/bundle/nsis/EnvNexus AI_0.1.6_x64-setup.exe
+src-tauri/target/release/bundle/nsis/EnvNexus AI_0.1.6_x64-setup.exe.sig
 ```
 
 `envnexus-ai.exe` 无参数时启动 GUI，有命令参数时作为工具脚本的内部命令引擎。便携交付把主程序和安装包复制到 `release/`，并附 `SHA256SUMS.txt`。
@@ -132,10 +134,10 @@ src-tauri/target/release/bundle/nsis/EnvNexus AI_0.1.5_x64-setup.exe.sig
 签名资产应先上传到对应版本的 draft Release，再运行 `verify-signed-release.yml`：
 
 ```powershell
-gh workflow run verify-signed-release.yml --ref main -f tag=v0.1.5
+gh workflow run verify-signed-release.yml --ref main -f tag=v0.1.6
 ```
 
-所选源码版本必须与 tag 一致。该工作流仅需 `contents:read`，使用仓库令牌下载六份公开发行资产，不接触私钥；它检查 PE 版本、发布 URL、签名旁文件、完整 SHA-256 清单，并运行应用自身的 Rust 签名验证测试。验证报告随运行上传，发布完成应以实际验证结果为依据。首次启用手动触发前，该工作流文件需要存在于默认分支。
+所选源码版本必须与 tag 一致。该工作流的 `verify` 作业使用 `contents: write` 权限访问 draft Release：GitHub 不向仅有读取权限的令牌开放草稿。作业只下载对应草稿或已发布发行版的六项资产（安装包、便携包、各自签名、`latest.json`、`SHA256SUMS.txt`）并验证，不发布或修改发行版，也不接触私钥；checkout 禁用凭据持久化。它检查 PE 版本、发布 URL、签名旁文件、完整 SHA-256 清单，并运行应用自身的 Rust 签名验证测试。验证报告随运行上传，发布完成应以实际验证结果为依据。首次启用手动触发前，该工作流文件需要存在于默认分支。
 
 命令脚本隔离冒烟：
 

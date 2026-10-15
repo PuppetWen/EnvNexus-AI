@@ -246,6 +246,10 @@ impl Installer {
             safe_remove_directory(&staging, &request.root);
             return Err(error);
         }
+        if let Err(error) = initialize_and_verify_installation(operation_id, request, app).await {
+            safe_remove_directory(&request.destination, &request.root);
+            return Err(error);
+        }
 
         let manifest = InstallManifest {
             schema_version: 1,
@@ -273,12 +277,6 @@ impl Installer {
             safe_remove_directory(&request.destination, &request.root);
             return Err(error);
         }
-        if let Err(error) = verify_installation(request) {
-            let _ = fs::remove_file(&central_manifest);
-            safe_remove_directory(&request.destination, &request.root);
-            return Err(error);
-        }
-
         journal.state = "committed".to_string();
         journal.updated_at = Utc::now();
         self.write_journal(journal)?;
@@ -738,12 +736,17 @@ impl Installer {
             safe_remove_directory(&staging, &request.root);
             return Err(error);
         }
-        if let Err(error) = verify_installation(request) {
+        if let Err(error) = initialize_and_verify_installation(operation_id, request, app).await {
             safe_remove_directory(&request.destination, &request.root);
-            let _ = fs::rename(&backup, &request.destination);
-            return Err(AppError::Message(format!(
-                "修复版本验证失败，已恢复旧目录：{error}"
-            )));
+            return match fs::rename(&backup, &request.destination) {
+                Ok(()) => Err(AppError::Message(format!(
+                    "修复版本初始化或验证失败，已恢复旧目录：{error}"
+                ))),
+                Err(restore_error) => Err(AppError::Message(format!(
+                    "修复版本初始化或验证失败且旧目录恢复失败：{error}；恢复错误：{restore_error}；备份仍位于 {}",
+                    backup.display()
+                ))),
+            };
         }
         let manifest = InstallManifest {
             schema_version: 1,
@@ -1473,6 +1476,374 @@ fn commit_staging(staging: &Path, destination: &Path) -> AppResult<()> {
     Ok(())
 }
 
+async fn initialize_and_verify_installation(
+    operation_id: &str,
+    request: &InstallRequest,
+    app: Option<&AppHandle>,
+) -> AppResult<()> {
+    emit_progress(
+        app,
+        operation_id,
+        "verify",
+        if request.tool_id == "python" {
+            "正在最终目录离线配置 pip 并验证 Python、venv 与开发组件"
+        } else {
+            "正在验证安装后的版本命令"
+        },
+        0,
+        None,
+    );
+    let request = request.clone();
+    tokio::task::spawn_blocking(move || {
+        if request.tool_id == "python" {
+            initialize_python_runtime(&request)
+        } else {
+            verify_installation(&request)
+        }
+    })
+    .await
+    .map_err(|error| AppError::Message(format!("安装初始化或验证任务异常结束：{error}")))?
+}
+
+struct PythonSetupWorkspace {
+    directory: PathBuf,
+    managed_root: PathBuf,
+}
+
+impl PythonSetupWorkspace {
+    fn create(request: &InstallRequest) -> AppResult<Self> {
+        validate_destination_boundary(&request.root, &request.destination)?;
+        let parent = request
+            .destination
+            .parent()
+            .ok_or_else(|| AppError::UnsafePath(request.destination.clone()))?;
+        let directory = parent.join(format!(".envpilot-python-{}", uuid::Uuid::new_v4()));
+        validate_destination_boundary(&request.root, &directory)?;
+        fs::create_dir(&directory)?;
+        let workspace = Self {
+            directory,
+            managed_root: request.root.clone(),
+        };
+        for name in ["temp", "pip-cache", "pip-build-tracker", "user-base"] {
+            fs::create_dir(workspace.directory.join(name))?;
+        }
+        Ok(workspace)
+    }
+
+    fn cleanup(&self) -> AppResult<()> {
+        if !self.directory.exists() {
+            return Ok(());
+        }
+        if fs::symlink_metadata(&self.directory)?
+            .file_type()
+            .is_symlink()
+        {
+            return Err(AppError::UnsafePath(self.directory.clone()));
+        }
+        validate_destination_boundary(&self.managed_root, &self.directory)?;
+        fs::remove_dir_all(&self.directory)?;
+        Ok(())
+    }
+}
+
+impl Drop for PythonSetupWorkspace {
+    fn drop(&mut self) {
+        let _ = self.cleanup();
+    }
+}
+
+fn python_bundled_pip_wheel(root: &Path) -> AppResult<PathBuf> {
+    // An embedded distribution remains unsuitable even if someone added pip to it.
+    for entry in fs::read_dir(root)? {
+        let entry = entry?;
+        let name = entry.file_name().to_string_lossy().to_ascii_lowercase();
+        if name.starts_with("python") && name.ends_with("._pth") {
+            return Err(AppError::InvalidSource(
+                "Python 嵌入式发行包不支持普通开发安装，请重新获取官方完整运行时".to_string(),
+            ));
+        }
+    }
+    for relative in [
+        "python.exe",
+        "Lib/ensurepip/__init__.py",
+        "Lib/venv/__init__.py",
+        "Lib/tkinter/__init__.py",
+        "Lib/idlelib/__init__.py",
+        "include/Python.h",
+    ] {
+        if !root.join(relative).is_file() {
+            return Err(AppError::InvalidSource(format!(
+                "Python 完整开发运行时缺少必要文件：{relative}"
+            )));
+        }
+    }
+    let mut wheels = fs::read_dir(root.join("Lib/ensurepip/_bundled"))?
+        .map(|entry| {
+            let entry = entry?;
+            let name = entry.file_name().to_string_lossy().to_ascii_lowercase();
+            Ok((entry.path(), entry.file_type()?, name))
+        })
+        .collect::<std::io::Result<Vec<_>>>()?
+        .into_iter()
+        .filter(|(_, kind, name)| {
+            kind.is_file() && name.starts_with("pip-") && name.ends_with(".whl")
+        })
+        .map(|(path, _, _)| path);
+    let wheel = wheels.next().ok_or_else(|| {
+        AppError::InvalidSource("Python 完整运行时缺少内置 pip wheel，已拒绝联网补装".to_string())
+    })?;
+    if wheels.next().is_some() {
+        return Err(AppError::InvalidSource(
+            "Python 完整运行时包含多个 pip wheel，无法唯一确认离线安装来源".to_string(),
+        ));
+    }
+    Ok(wheel)
+}
+
+fn python_setup_environment(
+    request: &InstallRequest,
+    workspace: &Path,
+    current: EnvironmentMap,
+) -> Vec<(String, OsString)> {
+    let mut environment = installation_process_environment(request, current);
+    let overrides = [
+        ("TEMP", workspace.join("temp").into_os_string()),
+        ("TMP", workspace.join("temp").into_os_string()),
+        ("TMPDIR", workspace.join("temp").into_os_string()),
+        (
+            "PIP_CACHE_DIR",
+            workspace.join("pip-cache").into_os_string(),
+        ),
+        (
+            "PIP_BUILD_TRACKER",
+            workspace.join("pip-build-tracker").into_os_string(),
+        ),
+        (
+            "PYTHONUSERBASE",
+            workspace.join("user-base").into_os_string(),
+        ),
+        ("PYTHONHOME", OsString::new()),
+        ("PYTHONPATH", OsString::new()),
+        ("PYTHONPYCACHEPREFIX", OsString::new()),
+        ("PYTHONNOUSERSITE", OsString::from("1")),
+        ("PYTHONSAFEPATH", OsString::from("1")),
+        ("PIP_NO_INPUT", OsString::from("1")),
+        ("PIP_DISABLE_PIP_VERSION_CHECK", OsString::from("1")),
+        (
+            "PIP_CONFIG_FILE",
+            OsString::from(if cfg!(windows) { "nul" } else { "/dev/null" }),
+        ),
+    ];
+    for (name, value) in overrides {
+        environment.retain(|(existing, _)| !existing.eq_ignore_ascii_case(name));
+        environment.push((name.to_string(), value));
+    }
+    environment
+}
+
+fn run_python_setup_command(
+    program: &Path,
+    args: &[&str],
+    environment: &[(&str, &std::ffi::OsStr)],
+    timeout: Duration,
+) -> AppResult<()> {
+    if !program.is_file() {
+        return Err(AppError::Message(format!(
+            "Python 开发环境缺少命令：{}",
+            program.display()
+        )));
+    }
+    let output = run_capture_with_env(program, args, timeout, environment)?;
+    verify_probe_output(program, &output)
+}
+
+fn run_python_setup_module(
+    python: &Path,
+    module: &str,
+    args: &[&str],
+    environment: &[(&str, &std::ffi::OsStr)],
+    timeout: Duration,
+) -> AppResult<()> {
+    // Merely setting ENSUREPIP_OPTIONS to an empty value still suppresses pip.exe.
+    // Remove it inside this child, including before venv starts its own ensurepip.
+    let mut command = vec![
+        "-I",
+        "-c",
+        "import os,runpy,sys; os.environ.pop('ENSUREPIP_OPTIONS',None); module=sys.argv.pop(1); runpy.run_module(module,run_name='__main__',alter_sys=True)",
+        module,
+    ];
+    command.extend_from_slice(args);
+    run_python_setup_command(python, &command, environment, timeout)
+}
+
+fn verify_python_pip_launcher(
+    program: &Path,
+    root: &Path,
+    environment: &[(&str, &std::ffi::OsStr)],
+    timeout: Duration,
+) -> AppResult<()> {
+    if !program.is_file() {
+        return Err(AppError::Message(format!(
+            "Python 开发环境缺少 pip 启动器：{}",
+            program.display()
+        )));
+    }
+    let output = run_capture_with_env(
+        program,
+        &[
+            "--isolated",
+            "--disable-pip-version-check",
+            "--no-cache-dir",
+            "--version",
+        ],
+        timeout,
+        environment,
+    )?;
+    verify_probe_output(program, &output)?;
+    let expected = format!(
+        "{}\\",
+        root.to_string_lossy()
+            .replace('/', "\\")
+            .trim_end_matches('\\')
+            .to_lowercase()
+    );
+    if !output_text(&output)
+        .replace('/', "\\")
+        .to_lowercase()
+        .contains(&expected)
+    {
+        return Err(AppError::Message(format!(
+            "pip 启动器没有使用本次安装目录：{}",
+            program.display()
+        )));
+    }
+    Ok(())
+}
+
+fn initialize_python_runtime(request: &InstallRequest) -> AppResult<()> {
+    // Console launchers and pyvenv.cfg contain absolute interpreter paths. Only
+    // initialize them after commit_staging has moved Python to its final path.
+    let wheel = python_bundled_pip_wheel(&request.destination)?;
+    let workspace = PythonSetupWorkspace::create(request)?;
+    let result = (|| {
+        let environment = python_setup_environment(
+            request,
+            &workspace.directory,
+            current_process_environment()?,
+        );
+        let environment = environment
+            .iter()
+            .map(|(name, value)| (name.as_str(), value.as_os_str()))
+            .collect::<Vec<_>>();
+        let python = request.destination.join("python.exe");
+        let pip = request.destination.join("Scripts/pip.exe");
+        let wheel_text = wheel.to_string_lossy();
+        let root_text = request.destination.to_string_lossy();
+        let timeout = Duration::from_secs(120);
+        run_python_setup_command(&python, &["-I", "--version"], &environment, timeout)?;
+        run_python_setup_module(
+            &python,
+            "ensurepip",
+            &["--upgrade", "--default-pip"],
+            &environment,
+            timeout,
+        )?;
+        // Official full ZIPs can already contain pip's module without launchers;
+        // ensurepip may then report "already satisfied" and create no pip.exe.
+        run_python_setup_module(
+            &python,
+            "pip",
+            &[
+                "--isolated",
+                "--disable-pip-version-check",
+                "--no-input",
+                "install",
+                "--no-index",
+                "--no-cache-dir",
+                "--force-reinstall",
+                "--no-deps",
+                "--no-compile",
+                &wheel_text,
+            ],
+            &environment,
+            timeout,
+        )?;
+        run_python_setup_command(
+            &python,
+            &[
+                "-I",
+                "-c",
+                "import pathlib,pip,sys,venv,ensurepip,tkinter,idlelib; root=pathlib.Path(sys.argv[1]).resolve(); assert pathlib.Path(sys.prefix).resolve()==root; assert root in pathlib.Path(pip.__file__).resolve().parents; assert '.'.join(map(str,sys.version_info[:3]))==sys.argv[2]",
+                &root_text,
+                &request.version,
+            ],
+            &environment,
+            timeout,
+        )?;
+        verify_python_pip_launcher(&pip, &request.destination, &environment, timeout)?;
+        run_python_setup_module(
+            &python,
+            "pip",
+            &[
+                "--isolated",
+                "--disable-pip-version-check",
+                "--no-cache-dir",
+                "list",
+                "--format=json",
+            ],
+            &environment,
+            timeout,
+        )?;
+        let venv = workspace.directory.join("venv");
+        let venv_text = venv.to_string_lossy();
+        run_python_setup_module(
+            &python,
+            "venv",
+            &["--copies", &venv_text],
+            &environment,
+            timeout,
+        )?;
+        run_python_setup_command(
+            &venv.join("Scripts/python.exe"),
+            &[
+                "-I",
+                "-c",
+                "import pathlib,pip,sys; env=pathlib.Path(sys.argv[1]).resolve(); root=pathlib.Path(sys.argv[2]).resolve(); assert pathlib.Path(sys.prefix).resolve()==env; assert pathlib.Path(sys.base_prefix).resolve()==root; assert sys.prefix!=sys.base_prefix; assert env in pathlib.Path(pip.__file__).resolve().parents",
+                &venv_text,
+                &root_text,
+            ],
+            &environment,
+            timeout,
+        )?;
+        verify_python_pip_launcher(&venv.join("Scripts/pip.exe"), &venv, &environment, timeout)?;
+        run_python_setup_module(
+            &venv.join("Scripts/python.exe"),
+            "pip",
+            &[
+                "--isolated",
+                "--disable-pip-version-check",
+                "--no-cache-dir",
+                "list",
+                "--format=json",
+            ],
+            &environment,
+            timeout,
+        )
+    })();
+    match (result, workspace.cleanup()) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(error), Ok(())) => Err(error),
+        (Ok(()), Err(error)) => Err(AppError::Message(format!(
+            "Python 开发环境已验证，但本次临时目录清理失败：{error}；目录 {}",
+            workspace.directory.display()
+        ))),
+        (Err(error), Err(cleanup_error)) => Err(AppError::Message(format!(
+            "Python 初始化或验证失败：{error}；本次临时目录清理也失败：{cleanup_error}；目录 {}",
+            workspace.directory.display()
+        ))),
+    }
+}
+
 fn verify_installation(request: &InstallRequest) -> AppResult<()> {
     let candidates = match request.tool_id.as_str() {
         "python" => vec![(request.destination.join("python.exe"), vec!["--version"])],
@@ -1901,6 +2272,216 @@ mod tests {
             validate_destination_boundary(&root, &root.join("node").join("..").join("outside"))
                 .is_err()
         );
+    }
+
+    const PYTHON_DEVELOPMENT_FIXTURE_FILES: &[&str] = &[
+        "python.exe",
+        "Lib/ensurepip/__init__.py",
+        "Lib/venv/__init__.py",
+        "Lib/tkinter/__init__.py",
+        "Lib/idlelib/__init__.py",
+        "include/Python.h",
+        "Lib/ensurepip/_bundled/pip-26.2-py3-none-any.whl",
+    ];
+
+    fn python_development_fixture(root: &Path) {
+        for name in PYTHON_DEVELOPMENT_FIXTURE_FILES {
+            let path = root.join(name);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, b"fixture").unwrap();
+        }
+    }
+
+    #[test]
+    fn python_development_runtime_requires_one_bundled_pip_wheel() {
+        let root = tempdir().unwrap();
+        python_development_fixture(root.path());
+        let expected = root
+            .path()
+            .join("Lib/ensurepip/_bundled/pip-26.2-py3-none-any.whl");
+        assert_eq!(python_bundled_pip_wheel(root.path()).unwrap(), expected);
+        fs::remove_file(&expected).unwrap();
+        assert!(python_bundled_pip_wheel(root.path()).is_err());
+        fs::write(&expected, b"fixture").unwrap();
+        fs::write(
+            root.path()
+                .join("Lib/ensurepip/_bundled/pip-26.1-py3-none-any.whl"),
+            b"fixture",
+        )
+        .unwrap();
+        assert!(python_bundled_pip_wheel(root.path()).is_err());
+    }
+
+    #[test]
+    fn python_development_runtime_rejects_embedded_path_configuration() {
+        let root = tempdir().unwrap();
+        python_development_fixture(root.path());
+        fs::write(root.path().join("python315._pth"), b"python315.zip\n.").unwrap();
+        assert!(
+            python_bundled_pip_wheel(root.path())
+                .unwrap_err()
+                .to_string()
+                .contains("嵌入式")
+        );
+    }
+
+    #[test]
+    fn python_setup_redirects_child_caches_and_ignores_foreign_python_homes() {
+        let root = tempdir().unwrap();
+        let request = InstallRequest {
+            tool_id: "python".into(),
+            version: "3.15.0".into(),
+            root: root.path().into(),
+            destination: root.path().join("python/3.15.0"),
+            download_url: String::new(),
+            checksum_algorithm: None,
+            checksum: None,
+        };
+        let workspace = root.path().join("private-workspace");
+        let environment = python_setup_environment(
+            &request,
+            &workspace,
+            EnvironmentMap::from([
+                ("pythonhome".into(), r"C:\other-python".into()),
+                ("PYTHONPATH".into(), r"C:\foreign-modules".into()),
+                ("Temp".into(), r"C:\foreign-temp".into()),
+                ("PIP_CACHE_DIR".into(), r"C:\foreign-cache".into()),
+                ("PATH".into(), "unchanged".into()),
+            ]),
+        );
+        for (name, expected) in [
+            ("TEMP", workspace.join("temp").into_os_string()),
+            ("TMP", workspace.join("temp").into_os_string()),
+            ("TMPDIR", workspace.join("temp").into_os_string()),
+            (
+                "PIP_CACHE_DIR",
+                workspace.join("pip-cache").into_os_string(),
+            ),
+            (
+                "PIP_BUILD_TRACKER",
+                workspace.join("pip-build-tracker").into_os_string(),
+            ),
+            ("PYTHONHOME", OsString::new()),
+            ("PYTHONPATH", OsString::new()),
+            ("PYTHONNOUSERSITE", OsString::from("1")),
+            ("PATH", OsString::from("unchanged")),
+        ] {
+            let matches = environment
+                .iter()
+                .filter(|(key, _)| key.eq_ignore_ascii_case(name))
+                .collect::<Vec<_>>();
+            assert_eq!(matches.len(), 1);
+            assert_eq!(matches[0].1, expected);
+        }
+    }
+
+    fn cached_invalid_python_package(root: &Path, data_root: &Path) -> InstallRequest {
+        fs::create_dir_all(root).unwrap();
+        let download_directory = data_root.join("downloads/python");
+        fs::create_dir_all(&download_directory).unwrap();
+        let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        for name in PYTHON_DEVELOPMENT_FIXTURE_FILES {
+            zip.start_file(*name, zip::write::SimpleFileOptions::default())
+                .unwrap();
+            // The layout passes the full-package preflight, but the malformed
+            // executable must fail after creating the private setup workspace.
+            zip.write_all(b"invalid runtime fixture").unwrap();
+        }
+        let archive = zip.finish().unwrap().into_inner();
+        fs::write(download_directory.join("python-runtime.zip"), &archive).unwrap();
+        InstallRequest {
+            tool_id: "python".into(),
+            version: "3.15.0".into(),
+            root: root.into(),
+            destination: root.join("python/3.15.0"),
+            download_url: "https://www.python.org/ftp/python/3.15.0/python-runtime.zip".into(),
+            checksum_algorithm: Some("sha256".into()),
+            checksum: Some(hex::encode(Sha256::digest(&archive))),
+        }
+    }
+
+    #[test]
+    fn failed_python_initialization_install_is_not_committed_or_indexed() {
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            let temp = tempdir().unwrap();
+            let data_root = temp.path().join("data");
+            let request = cached_invalid_python_package(&temp.path().join("tools"), &data_root);
+            let installer = Installer::new(reqwest::Client::new(), data_root.clone());
+            assert!(
+                installer
+                    .install("invalid-python", &request, None)
+                    .await
+                    .is_err()
+            );
+            assert!(!request.destination.exists());
+            assert!(
+                !data_root
+                    .join("config/installations/invalid-python.json")
+                    .exists()
+            );
+        });
+    }
+
+    #[test]
+    fn failed_python_repair_restores_the_legacy_runtime_manifest_and_index() {
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            let temp = tempdir().unwrap();
+            let data_root = temp.path().join("data");
+            let request = cached_invalid_python_package(&temp.path().join("tools"), &data_root);
+            fs::create_dir_all(&request.destination).unwrap();
+            fs::write(
+                request.destination.join("python.exe"),
+                b"old embedded runtime",
+            )
+            .unwrap();
+            fs::write(
+                request.destination.join("python315._pth"),
+                b"python315.zip\n.",
+            )
+            .unwrap();
+            let old_manifest = InstallManifest {
+                schema_version: 1,
+                operation_id: "legacy-python".into(),
+                tool_id: request.tool_id.clone(),
+                version: request.version.clone(),
+                installed_at: Utc::now(),
+                managed_root: request.root.clone(),
+                installation_path: request.destination.clone(),
+                source_url:
+                    "https://www.python.org/ftp/python/3.15.0/python-3.15.0-embed-amd64.zip".into(),
+                checksum_algorithm: None,
+                checksum: None,
+            };
+            let local = request.destination.join(".envpilot-install.json");
+            let central = data_root.join("config/installations/legacy-python.json");
+            write_json_atomic(&local, &old_manifest).unwrap();
+            write_json_atomic(&central, &old_manifest).unwrap();
+            let original = fs::read(&local).unwrap();
+            let installer = Installer::new(reqwest::Client::new(), data_root.clone());
+            let error = installer
+                .repair("failed-python-repair", &request, None)
+                .await
+                .unwrap_err();
+            assert!(error.to_string().contains("已恢复旧目录"));
+            assert_eq!(fs::read(&local).unwrap(), original);
+            assert_eq!(fs::read(&central).unwrap(), original);
+            assert_eq!(
+                fs::read(request.destination.join("python.exe")).unwrap(),
+                b"old embedded runtime"
+            );
+            assert!(request.destination.join("python315._pth").is_file());
+            assert!(
+                !data_root
+                    .join("config/installations/failed-python-repair.json")
+                    .exists()
+            );
+            assert_eq!(
+                fs::read_dir(request.destination.parent().unwrap())
+                    .unwrap()
+                    .count(),
+                1
+            );
+        });
     }
 
     #[test]
@@ -2449,9 +3030,59 @@ mod tests {
                 .unwrap();
             assert_eq!(result.status, "committed");
             assert!(destination.join("python.exe").is_file());
-            let manifest = read_manifest(&destination).unwrap();
+            assert!(destination.join("Scripts/pip.exe").is_file());
+            assert!(destination.join("Lib/venv/__init__.py").is_file());
+            let mut manifest = read_manifest(&destination).unwrap();
             assert_eq!(manifest.version, request.version);
-            verify_installation(&request).unwrap();
+            assert!(!manifest.source_url.contains("embed"));
+            // Model an existing same-version embedded installation without
+            // downloading a second artifact. Repair must not rely on the old
+            // runtime being executable or on its package flavor matching.
+            manifest.source_url = format!(
+                "https://www.python.org/ftp/python/{}/python-{}-embed-amd64.zip",
+                request.version, request.version
+            );
+            write_json_atomic(&destination.join(".envpilot-install.json"), &manifest).unwrap();
+            write_json_atomic(
+                &installer
+                    .data_root
+                    .join("config/installations/live-python-e2e.json"),
+                &manifest,
+            )
+            .unwrap();
+            let legacy_pth = format!(
+                "python{}._pth",
+                request.version.split('.').take(2).collect::<String>()
+            );
+            fs::write(destination.join(&legacy_pth), b"python.zip\n.").unwrap();
+            fs::remove_file(destination.join("Scripts/pip.exe")).unwrap();
+            let repaired = installer
+                .repair("live-python-repair-e2e", &request, None)
+                .await
+                .unwrap();
+            assert_eq!(repaired.status, "committed");
+            assert!(!destination.join(&legacy_pth).exists());
+            assert!(destination.join("Scripts/pip.exe").is_file());
+            let repaired_manifest = read_manifest(&destination).unwrap();
+            assert_eq!(repaired_manifest.version, request.version);
+            assert_eq!(repaired_manifest.source_url, request.download_url);
+            assert_eq!(repaired_manifest.operation_id, "live-python-repair-e2e");
+            assert!(
+                !installer
+                    .data_root
+                    .join("config/installations/live-python-e2e.json")
+                    .exists()
+            );
+            assert!(
+                installer
+                    .data_root
+                    .join("config/installations/live-python-repair-e2e.json")
+                    .is_file()
+            );
+            assert_eq!(
+                fs::read_dir(destination.parent().unwrap()).unwrap().count(),
+                1
+            );
         });
     }
 }

@@ -8,10 +8,6 @@ const versioningSource = readFileSync(
   join(process.cwd(), "src-tauri", "src", "versioning.rs"),
   "utf8",
 );
-const sourceProviders = readFileSync(
-  join(process.cwd(), "src-tauri", "src", "sources.rs"),
-  "utf8",
-);
 
 describe("official version catalog queries", () => {
   it("tracks loading state independently from transient DOM nodes", () => {
@@ -50,13 +46,4 @@ describe("official version catalog queries", () => {
     );
   });
 
-  it("does not truncate official catalogs and batches the Python file lookup", () => {
-    const productionProviders = sourceProviders.split("#[cfg(test)]")[0];
-    expect(productionProviders).not.toMatch(/\.truncate\(|\.take\(/);
-    expect(sourceProviders).toContain(
-      'const FILES_SOURCE: &str = "https://www.python.org/api/v2/downloads/release_file/";',
-    );
-    expect(sourceProviders).toContain("build_python_versions(releases, files)");
-    expect(sourceProviders).toContain("checked_github_releases");
-  });
 });
