@@ -70,14 +70,6 @@ jobs:
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Format Rust sources and retain the exact formatting patch
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Path artifacts/ci-logs -Force | Out-Null
-          cargo fmt --manifest-path src-tauri/Cargo.toml --all
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          git diff --output=artifacts/ci-logs/rustfmt.patch -- src-tauri
-
       - name: Check types, frontend tests, Rust format, tests, and clippy
         shell: pwsh
         run: |
