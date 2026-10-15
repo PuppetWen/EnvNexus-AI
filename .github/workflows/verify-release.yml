@@ -23,6 +23,7 @@ concurrency:
 
 jobs:
   windows:
+    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     runs-on: windows-latest
     timeout-minutes: 60
     env:
@@ -38,7 +39,7 @@ jobs:
         shell: pwsh
         run: |
           & ./scripts/Use-ProjectCache.ps1 -Report
-          'CARGO_HOME','RUSTUP_HOME','CARGO_TARGET_DIR','TEMP','TMP','npm_config_cache','PNPM_HOME','COREPACK_HOME','PIP_CACHE_DIR','UV_CACHE_DIR','XDG_CACHE_HOME' | ForEach-Object {
+          'CARGO_HOME','RUSTUP_HOME','CARGO_TARGET_DIR','TEMP','TMP','npm_config_cache','npm_config_store_dir','npm_config_cache_dir','npm_config_state_dir','pnpm_config_store_dir','pnpm_config_cache_dir','pnpm_config_state_dir','PNPM_HOME','COREPACK_HOME','PIP_CACHE_DIR','UV_CACHE_DIR','XDG_CACHE_HOME' | ForEach-Object {
             "$_=$([Environment]::GetEnvironmentVariable($_, 'Process'))" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           }
 
@@ -49,7 +50,7 @@ jobs:
       - uses: pnpm/action-setup@v4
         with:
           run_install: false
-          dest: ${{ github.workspace }}/.devtools/pnpm-action
+          dest: ${{ github.workspace }}/../envnexus-pnpm-cli
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -67,8 +68,10 @@ jobs:
             .devtools/cargo/git/db
             .devtools/rustup
             src-tauri/target
-          key: windows-rust-${{ hashFiles('src-tauri/Cargo.lock') }}
-          restore-keys: windows-rust-
+          key: windows-rust-${{ hashFiles('src-tauri/Cargo.lock') }}-${{ github.sha }}
+          restore-keys: |
+            windows-rust-${{ hashFiles('src-tauri/Cargo.lock') }}-
+            windows-rust-
 
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
@@ -189,4 +192,4 @@ jobs:
             .devtools/cargo/git/db
             .devtools/rustup
             src-tauri/target
-          key: windows-rust-${{ hashFiles('src-tauri/Cargo.lock') }}
+          key: windows-rust-${{ hashFiles('src-tauri/Cargo.lock') }}-${{ github.sha }}

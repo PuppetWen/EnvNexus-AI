@@ -1,0 +1,120 @@
+name: Verify signed release assets
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing draft or published release tag to verify, such as v0.1.5
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: signed-release-${{ inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    runs-on: windows-latest
+    timeout-minutes: 40
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_HOME: ${{ github.workspace }}/.devtools/cargo
+      RUSTUP_HOME: ${{ github.workspace }}/.devtools/rustup
+      GH_CACHE_DIR: ${{ github.workspace }}/.devtools/gh-cache
+      RELEASE_TAG: ${{ inputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Keep build dependencies and temporary files in the workspace
+        shell: pwsh
+        run: |
+          & ./scripts/Use-ProjectCache.ps1 -Report
+          'CARGO_HOME','RUSTUP_HOME','CARGO_TARGET_DIR','TEMP','TMP','XDG_CACHE_HOME' | ForEach-Object {
+            "$_=$([Environment]::GetEnvironmentVariable($_, 'Process'))" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          }
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            .devtools/cargo/registry
+            .devtools/cargo/git/db
+            .devtools/rustup
+            src-tauri/target
+          key: windows-rust-${{ hashFiles('src-tauri/Cargo.lock') }}-${{ github.sha }}
+          restore-keys: |
+            windows-rust-${{ hashFiles('src-tauri/Cargo.lock') }}-
+            windows-rust-
+
+      - name: Download existing signed release assets without a private key
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_PROMPT_DISABLED: '1'
+        run: |
+          if ($env:RELEASE_TAG -notmatch '^v\d+\.\d+\.\d+$') { throw 'Expected a stable release tag such as v0.1.5.' }
+          $version = [string](Get-Content src-tauri/tauri.conf.json -Raw | ConvertFrom-Json).version
+          if ($env:RELEASE_TAG -cne "v$version") { throw 'The selected source revision and release tag have different versions.' }
+          New-Item -ItemType Directory -Path artifacts/ci-logs,release -Force | Out-Null
+          $installer = "EnvNexus-AI_${version}_x64-setup.exe"
+          $portable = "EnvNexus-AI_${version}_x64-portable.exe"
+          $arguments = @('release','download',$env:RELEASE_TAG,'--repo',$env:GITHUB_REPOSITORY,'--dir','release','--clobber')
+          foreach ($pattern in @($installer,"$installer.sig",$portable,"$portable.sig",'latest.json','SHA256SUMS.txt')) {
+            $arguments += @('--pattern',$pattern)
+          }
+          & gh @arguments
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          foreach ($filename in @($installer,$portable)) {
+            $actual = [version](Get-Item -LiteralPath (Join-Path release $filename)).VersionInfo.FileVersion
+            $expected = [version]$version
+            if ($actual.Major -ne $expected.Major -or $actual.Minor -ne $expected.Minor -or $actual.Build -ne $expected.Build -or $actual.Revision -notin @(-1,0)) {
+              throw "Executable version mismatch: $filename ($actual)"
+            }
+          }
+          $manifest = Get-Content release/latest.json -Raw | ConvertFrom-Json
+          $locations = @($manifest.platforms.'windows-x86_64',$manifest.portable.'windows-x86_64')
+          $filenames = @($installer,$portable)
+          for ($index=0; $index -lt 2; $index++) {
+            $filename = $filenames[$index]
+            $expectedUrl = "https://github.com/$env:GITHUB_REPOSITORY/releases/download/$env:RELEASE_TAG/$filename"
+            if ($locations[$index].url -cne $expectedUrl) { throw "Release URL mismatch: $filename" }
+            $sidecar = (Get-Content -LiteralPath (Join-Path release "$filename.sig") -Raw).Trim()
+            if ($locations[$index].signature -cne $sidecar) { throw "Signature sidecar mismatch: $filename" }
+          }
+          $expectedNames = @($installer,"$installer.sig",$portable,"$portable.sig",'latest.json')
+          $checksumLines = @(Get-Content release/SHA256SUMS.txt | Where-Object { $_.Trim() })
+          if ($checksumLines.Count -ne $expectedNames.Count) { throw 'Unexpected number of release checksums.' }
+          $checkedNames = @{}
+          foreach ($line in $checksumLines) {
+            if ($line -notmatch '^([a-f0-9]{64})  (.+)$') { throw 'Invalid release checksum line.' }
+            $expectedHash = $Matches[1]
+            $filename = $Matches[2]
+            if ($filename -cnotin $expectedNames -or $checkedNames.ContainsKey($filename)) { throw 'Unexpected or duplicate checksum filename.' }
+            $actualHash = (Get-FileHash -LiteralPath (Join-Path release $filename) -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($actualHash -cne $expectedHash) { throw "Checksum mismatch: $filename" }
+            $checkedNames[$filename] = $true
+          }
+          "Validated six release assets for $env:RELEASE_TAG." | Set-Content artifacts/ci-logs/asset-integrity.log
+
+      - name: Verify signatures using the application's Rust updater
+        shell: pwsh
+        run: |
+          & ./scripts/Invoke-Rust.ps1 -Task release-assets *>&1 | Tee-Object -FilePath artifacts/ci-logs/signature-verification.log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Upload verification reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: signed-release-reports-${{ github.run_id }}
+          path: artifacts/ci-logs/
+          if-no-files-found: warn
+          retention-days: 14

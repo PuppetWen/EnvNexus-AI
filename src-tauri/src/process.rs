@@ -252,6 +252,8 @@ mod tests {
     ];
 
     #[test]
+    // The parent regression owns and terminates this fixture's reported child.
+    #[allow(clippy::zombie_processes)]
     fn capture_tool_fixture() {
         match std::env::var(CAPTURE_FIXTURE_ENV).as_deref() {
             Ok("large") => {

@@ -1,6 +1,10 @@
 packages:
   - "."
 
+storeDir: .devtools/pnpm-store
+cacheDir: .devtools/pnpm-cache
+stateDir: .devtools/pnpm-state
+
 allowBuilds:
   esbuild: true
 
