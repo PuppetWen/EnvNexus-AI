@@ -8,6 +8,7 @@ mod environment;
 mod error;
 mod installer;
 mod model;
+mod network_proxy;
 mod paths;
 mod plans;
 mod plugins;

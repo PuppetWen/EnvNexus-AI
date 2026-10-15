@@ -72,6 +72,43 @@ function Assert-RunChildPath([string]$Candidate) {
 function Remove-RunDirectory([string]$Candidate) {
     $taskAbsolute = Assert-RunChildPath $Candidate
     if (-not (Test-Path -LiteralPath $taskAbsolute)) { return }
+    # Do not follow directory links. Rustup creates file symbolic links for its
+    # command proxies; unlink only those leaves after checking their real parent.
+    $taskReparseChildren = @(Get-ChildItem -LiteralPath $taskAbsolute -Force -Recurse -ErrorAction Stop |
+        Where-Object { ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 })
+    foreach ($taskReparseChild in $taskReparseChildren) {
+        if ($taskReparseChild.PSIsContainer -or
+            ($taskReparseChild.Attributes -band [IO.FileAttributes]::Directory) -ne 0 -or
+            $taskReparseChild.LinkType -cne 'SymbolicLink') {
+            throw "Refusing recursive cleanup containing an unsupported reparse point: $($taskReparseChild.FullName)"
+        }
+    }
+    foreach ($taskReparseChild in $taskReparseChildren) {
+        $taskLinkPath = Get-NormalizedAbsolutePath $taskReparseChild.FullName
+        if (-not $taskLinkPath.StartsWith($taskAbsolute + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) {
+            throw "Refusing a symbolic link outside the cleanup directory: $taskLinkPath"
+        }
+        $taskLinkParent = Assert-RunChildPath ([IO.Path]::GetDirectoryName($taskLinkPath))
+        $taskParentItem = Get-Item -LiteralPath $taskLinkParent -Force -ErrorAction Stop
+        if (-not $taskParentItem.PSIsContainer) { throw "Symbolic link parent is not a directory: $taskLinkParent" }
+        $taskResolvedParent = Get-NormalizedAbsolutePath (Resolve-Path -LiteralPath $taskLinkParent).ProviderPath
+        if (-not $taskResolvedParent.StartsWith($taskRunPrefix, [StringComparison]::OrdinalIgnoreCase) -or
+            -not $taskResolvedParent.Equals($taskLinkParent, [StringComparison]::OrdinalIgnoreCase)) {
+            throw "Symbolic link parent escapes the isolated run: $taskLinkParent"
+        }
+        # Re-read the leaf to reject a changed link type. Never resolve its
+        # destination: Remove-Item without -Recurse removes the file link itself.
+        $taskLinkItem = Get-Item -LiteralPath $taskLinkPath -Force -ErrorAction Stop
+        if ($taskLinkItem.PSIsContainer -or
+            ($taskLinkItem.Attributes -band [IO.FileAttributes]::Directory) -ne 0 -or
+            ($taskLinkItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -eq 0 -or
+            $taskLinkItem.LinkType -cne 'SymbolicLink') {
+            throw "Symbolic link changed before cleanup: $taskLinkPath"
+        }
+        $null = Assert-RunChildPath $taskLinkParent
+        Remove-Item -LiteralPath $taskLinkPath -Force -ErrorAction Stop
+    }
+    # Every reparse point must be gone before recursive directory removal.
     $taskUnsafeChild = Get-ChildItem -LiteralPath $taskAbsolute -Force -Recurse -ErrorAction Stop |
         Where-Object { ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 } |
         Select-Object -First 1

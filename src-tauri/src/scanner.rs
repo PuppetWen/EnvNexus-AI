@@ -225,8 +225,16 @@ fn write_tool_probe_cache(data_root: &Path, cache: &ToolProbeCache) {
 }
 
 fn disk_discovery(registry: &PluginRegistry, data_root: &Path, force: bool) -> DiskDiscoveryIndex {
-    if !force && let Some(index) = read_disk_discovery_index(registry, data_root) {
-        return index;
+    if !force {
+        // Saving roots and completing operations only refresh known locations.
+        // An absent or invalid index must not silently initiate a full disk scan,
+        // nor be persisted as though the user had requested and completed one.
+        return read_disk_discovery_index(registry, data_root).unwrap_or_else(|| DiskDiscoveryIndex {
+            schema_version: DISCOVERY_INDEX_SCHEMA,
+            scanned_at: Utc::now(),
+            executables: HashMap::new(),
+            manifests: Vec::new(),
+        });
     }
     let index = discover_disk_index_in_roots(registry, &fixed_drive_roots());
     if let Ok(bytes) = serde_json::to_vec_pretty(&index) {
@@ -1640,6 +1648,64 @@ fn drive_key(path: &Path) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn refresh_without_discovery_index_does_not_create_a_full_disk_index() {
+        let directory = tempfile::tempdir().unwrap();
+        let registry = PluginRegistry::builtin();
+        let index = disk_discovery(&registry, directory.path(), false);
+
+        assert!(index.executables.is_empty());
+        assert!(index.manifests.is_empty());
+        assert!(!disk_discovery_index_path(directory.path()).exists());
+    }
+
+    #[test]
+    fn refresh_with_invalid_discovery_index_does_not_scan_or_overwrite_it() {
+        let unsupported = DiskDiscoveryIndex {
+            schema_version: DISCOVERY_INDEX_SCHEMA + 1,
+            scanned_at: Utc::now(),
+            executables: HashMap::new(),
+            manifests: Vec::new(),
+        };
+        for bytes in [b"{invalid JSON".to_vec(), serde_json::to_vec(&unsupported).unwrap()] {
+            let directory = tempfile::tempdir().unwrap();
+            let registry = PluginRegistry::builtin();
+            let path = disk_discovery_index_path(directory.path());
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(&path, &bytes).unwrap();
+
+            let index = disk_discovery(&registry, directory.path(), false);
+
+            assert!(index.executables.is_empty());
+            assert!(index.manifests.is_empty());
+            assert_eq!(fs::read(path).unwrap(), bytes);
+        }
+    }
+
+    #[test]
+    fn refresh_reuses_a_valid_discovery_index_without_rewriting_it() {
+        let directory = tempfile::tempdir().unwrap();
+        let registry = PluginRegistry::builtin();
+        let executable = crate::paths::simplify(directory.path().join("python.exe"));
+        fs::write(&executable, b"cached executable; must not be launched").unwrap();
+        let cached = DiskDiscoveryIndex {
+            schema_version: DISCOVERY_INDEX_SCHEMA,
+            scanned_at: chrono::DateTime::from_timestamp(1, 0).unwrap(),
+            executables: HashMap::from([("python".to_string(), vec![executable])]),
+            manifests: Vec::new(),
+        };
+        let bytes = serde_json::to_vec(&cached).unwrap();
+        let path = disk_discovery_index_path(directory.path());
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, &bytes).unwrap();
+
+        let index = disk_discovery(&registry, directory.path(), false);
+
+        assert_eq!(index.scanned_at, cached.scanned_at);
+        assert_eq!(index.executables, cached.executables);
+        assert_eq!(fs::read(path).unwrap(), bytes);
+    }
 
     #[test]
     fn managed_rust_probe_uses_its_sibling_homes_and_preserves_fresh_java() {

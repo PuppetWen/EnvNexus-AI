@@ -3,7 +3,6 @@ use std::{
     fs::{self, File, OpenOptions as SyncOpenOptions},
     io::{BufReader, Read, Write},
     path::{Component, Path, PathBuf},
-    process::Stdio,
     sync::{
         Mutex,
         atomic::{AtomicU64, Ordering},
@@ -30,12 +29,6 @@ use crate::{
     model::{InstallRequest, PlannedAction},
     process::{output_text, run_capture, run_capture_with_env},
 };
-
-#[cfg(windows)]
-use std::os::windows::process::CommandExt;
-
-#[cfg(windows)]
-const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 const DOWNLOAD_MAX_ATTEMPTS: u32 = 8;
 const DOWNLOAD_BUFFER_BYTES: usize = 256 * 1024;
@@ -379,7 +372,9 @@ impl Installer {
             };
             validate_final_download_host(response.url().host_str().unwrap_or_default())?;
 
-            if existing == 0 && allow_parallel && attempt < DOWNLOAD_MAX_ATTEMPTS
+            if existing == 0
+                && allow_parallel
+                && attempt < DOWNLOAD_MAX_ATTEMPTS
                 && let Some(metadata) = parallel_download_metadata(&response, request)
             {
                 allow_parallel = false;
@@ -976,6 +971,7 @@ fn validate_final_download_host(host: &str) -> AppResult<()> {
         "builds.dotnet.microsoft.com",
         "download.visualstudio.microsoft.com",
         "windows.php.net",
+        "downloads.php.net",
     ];
     if allowed.contains(&host.as_str()) {
         Ok(())
@@ -1305,25 +1301,25 @@ fn install_rust(_tool_id: &str, version: &str, installer: &Path, staging: &Path)
     let cargo_home = staging.join("cargo");
     let rustup_home = staging.join("rustup");
     let toolchain = format!("{version}-x86_64-pc-windows-msvc");
-    let mut command = std::process::Command::new(installer);
-    command
-        .args([
+    let mut environment = crate::network_proxy::child_download_environment(current_process_environment()?);
+    environment.insert("CARGO_HOME".to_string(), cargo_home.to_string_lossy().into_owned());
+    environment.insert("RUSTUP_HOME".to_string(), rustup_home.to_string_lossy().into_owned());
+    let environment = environment.iter()
+        .map(|(key, value)| (key.as_str(), std::ffi::OsStr::new(value)))
+        .collect::<Vec<_>>();
+    let output = run_capture_with_env(
+        installer,
+        &[
             "-y",
             "--no-modify-path",
             "--profile",
             "minimal",
             "--default-toolchain",
             &toolchain,
-        ])
-        .envs(current_process_environment()?)
-        .env("CARGO_HOME", &cargo_home)
-        .env("RUSTUP_HOME", &rustup_home)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    #[cfg(windows)]
-    command.creation_flags(CREATE_NO_WINDOW);
-    let output = command.output()?;
+        ],
+        Duration::from_secs(30 * 60),
+        &environment,
+    )?;
     if output.status.success() {
         Ok(())
     } else {
@@ -1786,6 +1782,94 @@ mod tests {
     #[test]
     fn rejects_unsafe_download_filename() {
         assert!(download_filename("https://example.com/").is_err());
+    }
+
+    #[test]
+    fn php_download_hosts_are_exact_official_hosts() {
+        for host in ["windows.php.net", "downloads.php.net", "DOWNLOADS.PHP.NET"] {
+            assert!(validate_final_download_host(host).is_ok(), "{host}");
+        }
+        for host in [
+            "downloads.php.net.evil.invalid",
+            "evil-downloads.php.net",
+            "uploads.php.net",
+        ] {
+            assert!(validate_final_download_host(host).is_err(), "{host}");
+        }
+    }
+
+    #[test]
+    fn php_redirect_to_official_distribution_host_downloads_and_checks_checksum() {
+        let temp = tempdir().unwrap();
+        let payload = b"official PHP Windows package fixture";
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            for redirected in [false, true] {
+                let mut stream = loop {
+                    match listener.accept() {
+                        Ok((stream, _)) => break stream,
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            assert!(Instant::now() < deadline, "missing PHP download request");
+                            std::thread::sleep(Duration::from_millis(5));
+                        }
+                        Err(error) => panic!("test HTTP server failed: {error}"),
+                    }
+                };
+                stream.set_nonblocking(false).unwrap();
+                stream.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+                stream.set_write_timeout(Some(Duration::from_secs(2))).unwrap();
+                let mut request = Vec::new();
+                let mut buffer = [0_u8; 1024];
+                while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    let count = stream.read(&mut buffer).unwrap();
+                    assert!(count > 0 && request.len() + count <= 16 * 1024);
+                    request.extend_from_slice(&buffer[..count]);
+                }
+                let request = String::from_utf8(request).unwrap().to_ascii_lowercase();
+                if redirected {
+                    assert!(request.starts_with("get /~windows/releases/php.zip http/1.1\r\n"));
+                    assert!(request.contains(&format!("\r\nhost: downloads.php.net:{}\r\n", address.port())));
+                    write!(
+                        stream,
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        payload.len()
+                    ).unwrap();
+                    stream.write_all(payload).unwrap();
+                } else {
+                    assert!(request.starts_with("get /php.zip http/1.1\r\n"));
+                    write!(
+                        stream,
+                        "HTTP/1.1 302 Found\r\nLocation: http://downloads.php.net:{}/~windows/releases/php.zip\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                        address.port()
+                    ).unwrap();
+                }
+            }
+        });
+        let request = InstallRequest {
+            tool_id: "php".to_string(),
+            version: "8.5.11".to_string(),
+            root: temp.path().join("tools"),
+            destination: temp.path().join("tools/php/8.5.11"),
+            download_url: format!("http://{address}/php.zip"),
+            checksum_algorithm: Some("sha256".to_string()),
+            checksum: Some(hex::encode(Sha256::digest(payload))),
+        };
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .resolve("downloads.php.net", address)
+            .connect_timeout(Duration::from_secs(2))
+            .read_timeout(Duration::from_secs(2))
+            .build()
+            .unwrap();
+        let installer = Installer::new(client, temp.path().join("data"));
+        let result = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(installer.download("php-redirect-test", &request, None));
+        server.join().unwrap();
+        assert_eq!(fs::read(result.unwrap()).unwrap(), payload);
     }
 
     #[test]

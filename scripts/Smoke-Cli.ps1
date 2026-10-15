@@ -24,7 +24,11 @@ $env:ENVNEXUS_AI_DATA_ROOT = $DataRoot
 function Invoke-EnvNexusAICli {
     param([string[]]$Arguments)
 
+    $CommandWatch = [Diagnostics.Stopwatch]::StartNew()
+    Write-Host "[$([DateTime]::UtcNow.ToString('o'))] CLI start: $($Arguments -join ' ')"
     $Output = & $Executable @Arguments 2>&1
+    $CommandWatch.Stop()
+    Write-Host "[$([DateTime]::UtcNow.ToString('o'))] CLI finished in $([Math]::Round($CommandWatch.Elapsed.TotalSeconds, 2)) seconds: $($Arguments -join ' ')"
     if ($LASTEXITCODE -ne 0) {
         throw "EnvNexus AI command engine failed ($($Arguments -join ' ')):`n$($Output -join [Environment]::NewLine)"
     }
