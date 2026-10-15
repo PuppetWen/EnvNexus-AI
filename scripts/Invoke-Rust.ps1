@@ -9,6 +9,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 $ProjectRoot = Split-Path -Parent $PSScriptRoot
+& (Join-Path $PSScriptRoot 'Use-ProjectCache.ps1')
 $ManifestPath = Join-Path $ProjectRoot "src-tauri\Cargo.toml"
 $ProjectRustup = Join-Path $ProjectRoot ".devtools\rustup"
 $ProjectCargo = Join-Path $ProjectRoot ".devtools\cargo"

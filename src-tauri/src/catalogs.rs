@@ -66,6 +66,10 @@ impl CatalogService {
                 return Err(AppError::InvalidSource("官方清单为空或工具 ID 不匹配".to_string()));
             }
             crate::versioning::sort_remote_versions_descending(&mut catalog.versions);
+            if crate::sources::is_partial_catalog(&catalog)
+                && let Ok(Some(previous)) = crate::read_version_catalog_cache(root, tool_id) {
+                merge_partial_history(&mut catalog, &previous);
+            }
             catalog.cached = false;
             let _ = crate::write_version_catalog_cache(root, &catalog);
             Ok(catalog)
@@ -107,6 +111,13 @@ impl CatalogService {
     }
 }
 
+fn merge_partial_history(current: &mut VersionCatalog, previous: &VersionCatalog) {
+    if current.tool_id != previous.tool_id { return; }
+    let mut seen = current.versions.iter().map(|version| version.version.clone()).collect::<std::collections::HashSet<_>>();
+    current.versions.extend(previous.versions.iter().filter(|version| seen.insert(version.version.clone())).cloned());
+    crate::versioning::sort_remote_versions_descending(&mut current.versions);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -114,6 +125,15 @@ mod tests {
 
     fn fixture(age: i64) -> VersionCatalog {
         VersionCatalog { tool_id: "node".into(), source_name: "Node.js".into(), source_url: "https://nodejs.org/dist/index.json".into(), fetched_at: Utc::now() - chrono::Duration::seconds(age), cached: false, versions: vec![RemoteVersion { version: "24.0.0".into(), channel: "LTS".into(), published_at: None, architecture: "x86_64".into(), download_url: Some("https://nodejs.org/dist/v24.0.0/node-v24.0.0-win-x64.zip".into()), checksum_algorithm: None, checksum: None, notes_url: None }] }
+    }
+
+    #[test]
+    fn partial_official_results_preserve_old_installable_versions() {
+        let previous = fixture(3600);
+        let mut current = fixture(0);
+        current.versions[0].version = "25.0.0".into();
+        merge_partial_history(&mut current, &previous);
+        assert_eq!(current.versions.iter().map(|version| version.version.as_str()).collect::<Vec<_>>(), ["25.0.0", "24.0.0"]);
     }
 
     #[test]

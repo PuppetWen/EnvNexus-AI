@@ -81,6 +81,27 @@ fn catalog(
     }
 }
 
+const PARTIAL_CATALOG_SUFFIX: &str = "（官方源部分结果）";
+
+pub(crate) fn is_partial_catalog(catalog: &VersionCatalog) -> bool {
+    catalog.source_name.ends_with(PARTIAL_CATALOG_SUFFIX)
+}
+
+fn github_catalog(
+    tool_id: &str,
+    source_name: &str,
+    source_url: &str,
+    partial: bool,
+    versions: Vec<RemoteVersion>,
+) -> VersionCatalog {
+    let source_name = if partial {
+        format!("{source_name}{PARTIAL_CATALOG_SUFFIX}")
+    } else {
+        source_name.to_string()
+    };
+    catalog(tool_id, &source_name, source_url, versions)
+}
+
 async fn checked_text(client: &reqwest::Client, url: &str) -> AppResult<String> {
     for attempt in 0..3 {
         let (error, retryable) = match checked_response(client, url, "text/plain, text/html;q=0.9, */*;q=0.8").await {
@@ -730,8 +751,8 @@ async fn fetch_dotnet(client: &reqwest::Client, tool_id: &str) -> AppResult<Vers
 
 async fn fetch_ruby(client: &reqwest::Client, tool_id: &str) -> AppResult<VersionCatalog> {
     const SOURCE: &str = "https://api.github.com/repos/oneclick/rubyinstaller2/releases";
-    let releases = checked_github_releases(client, SOURCE).await?;
-    let versions = releases
+    let fetched = checked_github_releases(client, SOURCE).await?;
+    let versions = fetched.releases
         .into_iter()
         .filter(|release| !release.draft)
         .filter_map(|release| {
@@ -769,10 +790,11 @@ async fn fetch_ruby(client: &reqwest::Client, tool_id: &str) -> AppResult<Versio
             })
         })
         .collect();
-    Ok(catalog(
+    Ok(github_catalog(
         tool_id,
         "RubyInstaller for Windows",
-        SOURCE,
+        fetched.web_source.as_deref().unwrap_or(SOURCE),
+        fetched.partial,
         versions,
     ))
 }
@@ -837,6 +859,12 @@ struct GithubAsset {
 
 type AssetSelector = fn(&[GithubAsset]) -> Option<&GithubAsset>;
 
+struct GithubReleases {
+    releases: Vec<GithubRelease>,
+    partial: bool,
+    web_source: Option<String>,
+}
+
 async fn fetch_github_release(
     client: &reqwest::Client,
     tool_id: &str,
@@ -844,8 +872,8 @@ async fn fetch_github_release(
     source_url: &str,
     selector: AssetSelector,
 ) -> AppResult<VersionCatalog> {
-    let releases = checked_github_releases(client, source_url).await?;
-    let versions = releases
+    let fetched = checked_github_releases(client, source_url).await?;
+    let versions = fetched.releases
         .into_iter()
         .filter(|release| !release.draft)
         .filter_map(|release| {
@@ -878,13 +906,13 @@ async fn fetch_github_release(
             })
         })
         .collect();
-    Ok(catalog(tool_id, source_name, source_url, versions))
+    Ok(github_catalog(tool_id, source_name, fetched.web_source.as_deref().unwrap_or(source_url), fetched.partial, versions))
 }
 
 async fn checked_github_releases(
     client: &reqwest::Client,
     source_url: &str,
-) -> AppResult<Vec<GithubRelease>> {
+) -> AppResult<GithubReleases> {
     let separator = if source_url.contains('?') { '&' } else { '?' };
     let mut releases = Vec::new();
     let mut page = 1_u32;
@@ -895,13 +923,17 @@ async fn checked_github_releases(
             Err(error) if github_api_access_limited(&error) => {
                 // Keep already fetched history if the shared API quota runs out midway.
                 if !releases.is_empty() {
-                    return Ok(releases);
+                    return Ok(GithubReleases { releases, partial: true, web_source: None });
                 }
                 let Some(repository) = official_github_repository(source_url) else {
                     return Err(error);
                 };
                 return match fetch_github_web_latest(client, repository).await {
-                    Ok(release) => Ok(vec![release]),
+                    Ok(release) => Ok(GithubReleases {
+                        releases: vec![release],
+                        partial: true,
+                        web_source: Some(format!("https://github.com/{repository}/releases/latest")),
+                    }),
                     Err(fallback_error) => Err(AppError::Message(format!(
                         "{error}；官方发布页备用查询也失败：{fallback_error}"
                     ))),
@@ -916,7 +948,7 @@ async fn checked_github_releases(
         }
         page += 1;
     }
-    Ok(releases)
+    Ok(GithubReleases { releases, partial: false, web_source: None })
 }
 
 fn github_api_access_limited(error: &AppError) -> bool {
@@ -973,8 +1005,8 @@ fn parse_github_web_release(repository: &str, tag: &str, release_url: &str, html
     let base = url::Url::parse("https://github.com/")
         .map_err(|error| AppError::Message(error.to_string()))?;
     let prefix = format!("/{repository}/releases/download/{tag}/");
-    let mut assets = Vec::new();
-    let mut seen = HashSet::new();
+    let mut assets: Vec<GithubAsset> = Vec::new();
+    let mut asset_indices: HashMap<String, usize> = HashMap::new();
     for row in rows.captures_iter(html) {
         let body = row.get(1).map(|capture| capture.as_str()).unwrap_or_default();
         for link in links.captures_iter(body) {
@@ -991,7 +1023,7 @@ fn parse_github_web_release(repository: &str, tag: &str, release_url: &str, html
                 continue;
             }
             let Some(name) = download_url.path().strip_prefix(&prefix) else { continue; };
-            if name.is_empty() || name.contains('/') || name.contains('%') || !seen.insert(name.to_string()) {
+            if name.is_empty() || name.contains('/') || name.contains('%') {
                 continue;
             }
             let hashes = digests.captures_iter(body)
@@ -1000,10 +1032,23 @@ fn parse_github_web_release(repository: &str, tag: &str, release_url: &str, html
             if hashes.len() > 1 || (body.to_ascii_lowercase().contains("sha256:") && hashes.is_empty()) {
                 return Err(AppError::InvalidSource(format!("GitHub 官方发布页中 {name} 的 SHA-256 不明确或无效")));
             }
+            let digest = hashes.into_iter().next().map(|hash| format!("sha256:{hash}"));
+            if let Some(index) = asset_indices.get(download_url.as_str()) {
+                let existing = &mut assets[*index];
+                match (&existing.digest, &digest) {
+                    (Some(previous), Some(current)) if previous != current => {
+                        return Err(AppError::InvalidSource(format!("GitHub 官方发布页中 {name} 的重复下载链接提供了冲突的 SHA-256")));
+                    }
+                    (None, Some(_)) => existing.digest = digest,
+                    _ => {}
+                }
+                continue;
+            }
+            asset_indices.insert(download_url.to_string(), assets.len());
             assets.push(GithubAsset {
                 name: name.to_string(),
                 browser_download_url: download_url.to_string(),
-                digest: hashes.into_iter().next().map(|hash| format!("sha256:{hash}")),
+                digest,
             });
         }
     }
@@ -1299,7 +1344,12 @@ mod tests {
         let page = serde_json::to_string(&vec![release; 100]).unwrap();
         let source = MockSource::new(vec![http_response("200 OK", "Content-Type: application/json\r\n", &page), http_response("403 Forbidden", "X-RateLimit-Remaining: 0\r\n", "limited")]);
         let releases = tokio::runtime::Runtime::new().unwrap().block_on(checked_github_releases(&local_client(), &source.url)).unwrap();
-        assert_eq!(releases.len(), 100);
+        assert_eq!(releases.releases.len(), 100);
+        assert!(releases.partial);
+        let partial = github_catalog("git", "Git for Windows", &source.url, releases.partial, Vec::new());
+        assert!(is_partial_catalog(&partial));
+        let complete = github_catalog("git", "Git for Windows", &source.url, false, Vec::new());
+        assert!(!is_partial_catalog(&complete));
         assert_eq!(source.request_count(), 2);
         let requests = source.requests.lock().unwrap();
         assert!(requests[0].contains("per_page=100&page=1"));
@@ -1369,6 +1419,24 @@ mod tests {
     fn github_web_fallback_rejects_conflicting_digests() {
         let fixture = format!(r#"<li><a href="/git-for-windows/git/releases/download/v2.50.1/PortableGit-2.50.1-64-bit.7z.exe">download</a>sha256:{} sha256:{}</li>"#, "a".repeat(64), "b".repeat(64));
         assert!(parse_github_web_release("git-for-windows/git", "v2.50.1", "https://github.com/git-for-windows/git/releases/tag/v2.50.1", &fixture).is_err());
+    }
+
+    #[test]
+    fn github_web_duplicate_asset_merges_a_later_digest() {
+        let path = "/git-for-windows/git/releases/download/v2.50.1/PortableGit-2.50.1-64-bit.7z.exe";
+        let checksum = "a".repeat(64);
+        let fixture = format!(r#"<li><a href="{path}">download</a></li><li><a href="https://github.com{path}">download</a><clipboard-copy value="sha256:{checksum}"></clipboard-copy></li>"#);
+        let release = parse_github_web_release("git-for-windows/git", "v2.50.1", "https://github.com/git-for-windows/git/releases/tag/v2.50.1", &fixture).unwrap();
+        assert_eq!(release.assets.len(), 1);
+        assert_eq!(release.assets[0].digest.as_deref(), Some(format!("sha256:{checksum}").as_str()));
+    }
+
+    #[test]
+    fn github_web_duplicate_asset_rejects_conflicting_digests_across_rows() {
+        let path = "/git-for-windows/git/releases/download/v2.50.1/PortableGit-2.50.1-64-bit.7z.exe";
+        let fixture = format!(r#"<li><a href="{path}">download</a>sha256:{}</li><li><a href="{path}">download</a>sha256:{}</li>"#, "a".repeat(64), "b".repeat(64));
+        let error = parse_github_web_release("git-for-windows/git", "v2.50.1", "https://github.com/git-for-windows/git/releases/tag/v2.50.1", &fixture).unwrap_err();
+        assert!(error.to_string().contains("冲突的 SHA-256"));
     }
 
     #[test]

@@ -27,9 +27,20 @@ jobs:
     timeout-minutes: 60
     env:
       CARGO_TERM_COLOR: always
+      CARGO_HOME: ${{ github.workspace }}/.devtools/cargo
+      RUSTUP_HOME: ${{ github.workspace }}/.devtools/rustup
+      RUST_TEST_THREADS: '1'
       HAS_SIGNING_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY != '' }}
     steps:
       - uses: actions/checkout@v4
+
+      - name: Keep build dependencies and temporary caches in the workspace
+        shell: pwsh
+        run: |
+          & ./scripts/Use-ProjectCache.ps1 -Report
+          'CARGO_HOME','RUSTUP_HOME','CARGO_TARGET_DIR','TEMP','TMP','npm_config_cache','PNPM_HOME','COREPACK_HOME','PIP_CACHE_DIR','UV_CACHE_DIR','XDG_CACHE_HOME' | ForEach-Object {
+            "$_=$([Environment]::GetEnvironmentVariable($_, 'Process'))" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          }
 
       - uses: actions/setup-node@v4
         with:
@@ -38,6 +49,7 @@ jobs:
       - uses: pnpm/action-setup@v4
         with:
           run_install: false
+          dest: ${{ github.workspace }}/.devtools/pnpm-action
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -48,10 +60,12 @@ jobs:
           arch: x64
 
       - uses: actions/cache@v4
+        id: rust-cache
         with:
           path: |
-            ~/.cargo/registry
-            ~/.cargo/git/db
+            .devtools/cargo/registry
+            .devtools/cargo/git/db
+            .devtools/rustup
             src-tauri/target
           key: windows-rust-${{ hashFiles('src-tauri/Cargo.lock') }}
           restore-keys: windows-rust-
@@ -75,7 +89,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Check live official sources and isolated installation
-        if: github.event_name == 'workflow_dispatch' && inputs.live_sources
+        if: github.event_name != 'pull_request'
         shell: pwsh
         run: |
           & ./scripts/Invoke-Rust.ps1 -Task live-sources *>&1 | Tee-Object -FilePath artifacts/ci-logs/live-sources.log
@@ -121,6 +135,27 @@ jobs:
           & ./scripts/Smoke-Cli.ps1 *>&1 | Tee-Object -FilePath artifacts/ci-logs/cli-smoke.log
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+      - name: Install official Node and Git packages and preview activation
+        if: github.event_name != 'pull_request'
+        shell: pwsh
+        run: |
+          & ./scripts/Smoke-Installability.ps1 *>&1 | Tee-Object -FilePath artifacts/ci-logs/installability.log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Validate the NSIS installer in an isolated directory
+        shell: pwsh
+        run: |
+          $version = (Get-Content src-tauri/tauri.conf.json -Raw | ConvertFrom-Json).version
+          $installRoot = Join-Path $env:GITHUB_WORKSPACE 'artifacts/installed-app'
+          $installer = Join-Path $env:GITHUB_WORKSPACE "release/EnvNexus-AI_${version}_x64-setup.exe"
+          $process = Start-Process -FilePath $installer -ArgumentList @('/S', "/D=$installRoot") -WindowStyle Hidden -Wait -PassThru
+          if ($process.ExitCode -ne 0) { throw "NSIS installation failed: $($process.ExitCode)" }
+          $installed = Join-Path $installRoot 'envnexus-ai.exe'
+          if ((Get-FileHash $installed).Hash -ne (Get-FileHash 'src-tauri/target/release/envnexus-ai.exe').Hash) { throw 'Installed executable differs from the verified portable build' }
+          $env:ENVNEXUS_AI_DATA_ROOT = Join-Path $env:GITHUB_WORKSPACE 'artifacts/installed-app-data'
+          $tools = & $installed tools --json | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or @($tools).Count -ne 15) { throw 'Installed application command mode failed' }
+
       - name: Upload portable and NSIS packages
         uses: actions/upload-artifact@v4
         with:
@@ -141,5 +176,17 @@ jobs:
           path: |
             artifacts/ci-logs/
             artifacts/smoke/**/summary.json
+            artifacts/installability-*/summary.json
           if-no-files-found: warn
           retention-days: 14
+
+      - name: Retain compiled dependencies after test failures
+        if: always() && steps.rust-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            .devtools/cargo/registry
+            .devtools/cargo/git/db
+            .devtools/rustup
+            src-tauri/target
+          key: windows-rust-${{ hashFiles('src-tauri/Cargo.lock') }}

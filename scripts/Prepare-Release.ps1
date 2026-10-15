@@ -6,6 +6,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 $ProjectRoot = Split-Path -Parent $PSScriptRoot
+& (Join-Path $PSScriptRoot 'Use-ProjectCache.ps1')
 $Configuration = Get-Content -LiteralPath (Join-Path $ProjectRoot "src-tauri\tauri.conf.json") -Raw -Encoding UTF8 | ConvertFrom-Json
 $Version = [string]$Configuration.version
 if ($ReleaseNotesFile) {

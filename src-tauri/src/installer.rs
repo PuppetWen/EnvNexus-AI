@@ -555,14 +555,19 @@ impl Installer {
                         "下载服务器返回了不匹配的分片范围，已停止以避免文件损坏".to_string(),
                     ));
                 }
-                if !metadata.validator.matches(response.headers()) {
-                    return Err(AppError::InvalidSource(
+                match metadata.validator.matches(response.headers()) {
+                    // A valid If-Range 206 need not repeat Last-Modified. Restart
+                    // a single stream when consistency cannot be checked locally.
+                    None => return Ok(false),
+                    Some(false) => return Err(AppError::InvalidSource(
                         "下载期间官方文件的实体标识发生变化，已丢弃分片，请重新查询版本后下载".to_string(),
-                    ));
+                    )),
+                    Some(true) => {}
                 }
                 let mut file = AsyncBufWriter::with_capacity(DOWNLOAD_BUFFER_BYTES, AsyncFile::create(path).await?);
                 let mut stream = response.bytes_stream();
                 let mut received = 0_u64;
+                let streamed = async {
                 while let Some(chunk) = stream.next().await {
                     if cancelled.load(Ordering::Relaxed) {
                         return Ok(false);
@@ -575,11 +580,21 @@ impl Installer {
                     received += chunk.len() as u64;
                     progress.advance(chunk.len() as u64, "正在并行下载官方发行包（4 路）");
                 }
-                file.flush().await?;
                 if received != expected_range.length() {
                     return Err(AppError::InvalidSource("下载分片提前结束，已停止以避免文件损坏".to_string()));
                 }
                 Ok(true)
+                }.await;
+                if !matches!(streamed, Ok(true)) {
+                    cancelled.store(true, Ordering::Relaxed);
+                }
+                let flushed = finish_download_file(file).await;
+                // Keep the original network/range error even if flushing also fails.
+                // Every opened Tokio file must finish its blocking I/O and close before
+                // this worker returns, including cancellation and body-error paths.
+                let complete = streamed?;
+                flushed?;
+                Ok(complete)
                 }.await;
                 if !matches!(result, Ok(true)) {
                     cancelled.store(true, Ordering::Relaxed);
@@ -595,11 +610,18 @@ impl Installer {
             return Ok(false);
         }
         let mut output = AsyncBufWriter::with_capacity(DOWNLOAD_BUFFER_BYTES, AsyncFile::create(partial).await?);
+        let merged: AppResult<()> = async {
         for path in &parts.paths {
             let mut input = AsyncFile::open(path).await?;
-            tokio::io::copy(&mut input, &mut output).await?;
+            let copied = tokio::io::copy(&mut input, &mut output).await;
+            drop(input.into_std().await);
+            copied?;
         }
-        output.flush().await?;
+        Ok(())
+        }.await;
+        let flushed = finish_download_file(output).await;
+        merged?;
+        flushed?;
         progress.finish("官方发行包下载完成");
         Ok(true)
     }
@@ -836,6 +858,14 @@ impl Installer {
     }
 }
 
+async fn finish_download_file(mut file: AsyncBufWriter<AsyncFile>) -> std::io::Result<()> {
+    let flushed = file.flush().await;
+    // flush can itself fail before polling the inner file's flush. into_std
+    // explicitly awaits any pending Tokio blocking operation even in that case.
+    drop(file.into_inner().into_std().await);
+    flushed
+}
+
 fn download_filename(value: &str) -> AppResult<String> {
     let url = url::Url::parse(value)
         .map_err(|error| AppError::InvalidSource(format!("下载 URL 无效：{error}")))?;
@@ -939,12 +969,12 @@ impl DownloadValidator {
         }
     }
 
-    fn matches(&self, headers: &header::HeaderMap) -> bool {
+    fn matches(&self, headers: &header::HeaderMap) -> Option<bool> {
         let name = match self {
             Self::Etag(_) => header::ETAG,
             Self::LastModified(_) => header::LAST_MODIFIED,
         };
-        headers.get(name) == Some(self.value())
+        headers.get(name).map(|value| value == self.value())
     }
 }
 
@@ -1747,11 +1777,15 @@ mod tests {
         Unsupported,
         WrongRange,
         ChangedEntity,
+        MissingLastModified,
+        CancelledAfterWrite,
     }
 
     fn check_parallel_download(fixture: RangeFixture) {
         use std::sync::atomic::AtomicUsize;
 
+        let temp = tempdir().unwrap();
+        let data_root = temp.path().join("data");
         let payload = Arc::new((0..PARALLEL_DOWNLOAD_MIN_BYTES as usize)
             .map(|index| (index % 251) as u8).collect::<Vec<_>>());
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -1761,10 +1795,12 @@ mod tests {
         let full_requests = Arc::new(AtomicUsize::new(0));
         let active = Arc::new(AtomicUsize::new(0));
         let max_active = Arc::new(AtomicUsize::new(0));
+        let trigger_cancellation = Arc::new(AtomicBool::new(false));
+        let server_data_root = data_root.clone();
         let server_ranges = ranges.clone();
         let server_payload = payload.clone();
         let server_max_active = max_active.clone();
-        let request_count = if matches!(fixture, RangeFixture::Unsupported) { 6 } else { 5 };
+        let request_count = if matches!(fixture, RangeFixture::Unsupported | RangeFixture::MissingLastModified) { 6 } else { 5 };
         let server = std::thread::spawn(move || {
             let deadline = Instant::now() + Duration::from_secs(10);
             let mut workers = Vec::new();
@@ -1783,6 +1819,8 @@ mod tests {
                 let full_requests = full_requests.clone();
                 let active = active.clone();
                 let max_active = server_max_active.clone();
+                let trigger_cancellation = trigger_cancellation.clone();
+                let data_root = server_data_root.clone();
                 workers.push(std::thread::spawn(move || {
                     stream.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
                     let mut request = Vec::new();
@@ -1795,7 +1833,11 @@ mod tests {
                     let request = String::from_utf8(request).unwrap().to_ascii_lowercase();
                     let range = request.lines().find_map(|line| line.strip_prefix("range: bytes="));
                     if let Some(range) = range {
-                        assert!(request.contains("if-range: \"fixture\""));
+                        if matches!(fixture, RangeFixture::MissingLastModified) {
+                            assert!(request.contains("if-range: wed, 14 oct 2026 16:00:00 gmt"));
+                        } else {
+                            assert!(request.contains("if-range: \"fixture\""));
+                        }
                         ranges.lock().unwrap().push(range.to_string());
                         let concurrent = active.fetch_add(1, Ordering::SeqCst) + 1;
                         max_active.fetch_max(concurrent, Ordering::SeqCst);
@@ -1807,9 +1849,38 @@ mod tests {
                             let start = start.parse::<usize>().unwrap();
                             let end = end.parse::<usize>().unwrap();
                             let response_start = if matches!(fixture, RangeFixture::WrongRange) { start + 1 } else { start };
-                            let etag = if matches!(fixture, RangeFixture::ChangedEntity) { "changed" } else { "fixture" };
-                            let headers = format!("HTTP/1.1 206 Partial Content\r\nContent-Length: {}\r\nContent-Range: bytes {}-{}/{}\r\nETag: \"{etag}\"\r\nConnection: close\r\n\r\n", end - start + 1, response_start, end, payload.len());
+                            let cancel_after_write = matches!(fixture, RangeFixture::CancelledAfterWrite) && end + 1 == payload.len();
+                            if cancel_after_write {
+                                let deadline = Instant::now() + Duration::from_secs(3);
+                                loop {
+                                    let written = fs::read_dir(data_root.join("downloads/python")).unwrap()
+                                        .filter_map(Result::ok).filter(|entry| entry.path().is_dir())
+                                        .flat_map(|entry| fs::read_dir(entry.path()).unwrap())
+                                        .filter_map(Result::ok)
+                                        .filter(|entry| entry.metadata().is_ok_and(|metadata| metadata.len() >= DOWNLOAD_BUFFER_BYTES as u64))
+                                        .count();
+                                    if written >= 3 { break; }
+                                    assert!(Instant::now() < deadline, "other workers must write before cancellation");
+                                    std::thread::sleep(Duration::from_millis(5));
+                                }
+                            }
+                            let etag = if matches!(fixture, RangeFixture::ChangedEntity) || cancel_after_write { "changed" } else { "fixture" };
+                            let validator = if matches!(fixture, RangeFixture::MissingLastModified) { String::new() } else { format!("ETag: \"{etag}\"\r\n") };
+                            let headers = format!("HTTP/1.1 206 Partial Content\r\nContent-Length: {}\r\nContent-Range: bytes {}-{}/{}\r\n{validator}Connection: close\r\n\r\n", end - start + 1, response_start, end, payload.len());
                             let _ = stream.write_all(headers.as_bytes());
+                            if cancel_after_write {
+                                trigger_cancellation.store(true, Ordering::SeqCst);
+                            } else if matches!(fixture, RangeFixture::CancelledAfterWrite) {
+                                let first_end = start + 2 * DOWNLOAD_BUFFER_BYTES;
+                                stream.write_all(&payload[start..first_end]).unwrap();
+                                let deadline = Instant::now() + Duration::from_secs(4);
+                                while !trigger_cancellation.load(Ordering::SeqCst) {
+                                    assert!(Instant::now() < deadline, "last worker must trigger cancellation");
+                                    std::thread::sleep(Duration::from_millis(5));
+                                }
+                                std::thread::sleep(Duration::from_millis(20));
+                                let _ = stream.write_all(&payload[first_end..=end]);
+                            }
                             if matches!(fixture, RangeFixture::Supported) {
                                 let _ = stream.write_all(&payload[start..=end]);
                             }
@@ -1817,7 +1888,8 @@ mod tests {
                         active.fetch_sub(1, Ordering::SeqCst);
                     } else {
                         let number = full_requests.fetch_add(1, Ordering::SeqCst);
-                        let headers = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nAccept-Ranges: bytes\r\nETag: \"fixture\"\r\nConnection: close\r\n\r\n", payload.len());
+                        let validator = if matches!(fixture, RangeFixture::MissingLastModified) { "Last-Modified: Wed, 14 Oct 2026 16:00:00 GMT\r\n" } else { "ETag: \"fixture\"\r\n" };
+                        let headers = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nAccept-Ranges: bytes\r\n{validator}Connection: close\r\n\r\n", payload.len());
                         stream.write_all(headers.as_bytes()).unwrap();
                         if number > 0 {
                             stream.write_all(&payload).unwrap();
@@ -1827,8 +1899,6 @@ mod tests {
             }
             for worker in workers { worker.join().unwrap(); }
         });
-        let temp = tempdir().unwrap();
-        let data_root = temp.path().join("data");
         let request = InstallRequest {
             tool_id: "python".to_string(), version: "3.14.6".to_string(),
             root: temp.path().join("tools"), destination: temp.path().join("tools/python/3.14.6"),
@@ -1836,14 +1906,14 @@ mod tests {
             checksum_algorithm: Some("sha256".to_string()), checksum: Some(hex::encode(Sha256::digest(payload.as_slice()))),
         };
         let client = reqwest::Client::builder().no_proxy().connect_timeout(Duration::from_secs(2))
-            .read_timeout(Duration::from_secs(2)).build().unwrap();
+            .read_timeout(Duration::from_secs(5)).build().unwrap();
         let installer = Installer::new(client, data_root.clone());
         let result = tokio::runtime::Runtime::new().unwrap().block_on(installer.download("parallel-test", &request, None));
         server.join().unwrap();
         match fixture {
-            RangeFixture::Supported | RangeFixture::Unsupported => assert_eq!(fs::read(result.unwrap()).unwrap(), *payload),
+            RangeFixture::Supported | RangeFixture::Unsupported | RangeFixture::MissingLastModified => assert_eq!(fs::read(result.unwrap()).unwrap(), *payload),
             RangeFixture::WrongRange => assert!(result.unwrap_err().to_string().contains("分片范围")),
-            RangeFixture::ChangedEntity => assert!(result.unwrap_err().to_string().contains("实体标识")),
+            RangeFixture::ChangedEntity | RangeFixture::CancelledAfterWrite => assert!(result.unwrap_err().to_string().contains("实体标识")),
         }
         assert_eq!(ranges.lock().unwrap().len(), PARALLEL_DOWNLOAD_STREAMS as usize);
         if matches!(fixture, RangeFixture::Supported) {
@@ -1855,7 +1925,8 @@ mod tests {
         for entry in fs::read_dir(data_root.join("downloads/python")).unwrap() {
             assert!(!entry.unwrap().file_name().to_string_lossy().starts_with(".envnexus-parts-"));
         }
-        if matches!(fixture, RangeFixture::WrongRange | RangeFixture::ChangedEntity) {
+        if matches!(fixture, RangeFixture::WrongRange | RangeFixture::ChangedEntity | RangeFixture::CancelledAfterWrite) {
+            assert_eq!(fs::read_dir(data_root.join("downloads/python")).unwrap().count(), 0);
             assert!(!data_root.join("downloads/python/python.zip").exists());
             assert!(!data_root.join("downloads/python/python.zip.part").exists());
         }
@@ -1879,6 +1950,16 @@ mod tests {
     #[test]
     fn parallel_download_rejects_changed_entity_and_cleans_private_parts() {
         check_parallel_download(RangeFixture::ChangedEntity);
+    }
+
+    #[test]
+    fn missing_last_modified_on_valid_ranges_falls_back_without_losing_download() {
+        check_parallel_download(RangeFixture::MissingLastModified);
+    }
+
+    #[test]
+    fn cancelled_workers_close_written_files_before_private_directory_cleanup() {
+        check_parallel_download(RangeFixture::CancelledAfterWrite);
     }
 
     #[test]

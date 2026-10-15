@@ -6,6 +6,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 $ProjectRoot = Split-Path -Parent $PSScriptRoot
+& (Join-Path $PSScriptRoot 'Use-ProjectCache.ps1')
 Push-Location $ProjectRoot
 try {
     & ".\node_modules\.bin\tsc.cmd" --noEmit
