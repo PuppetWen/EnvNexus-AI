@@ -1,9 +1,13 @@
 use std::{
+    ffi::OsString,
     fs::{self, File, OpenOptions as SyncOpenOptions},
     io::{BufReader, Read, Write},
     path::{Component, Path, PathBuf},
-    process::Stdio,
-    time::Duration,
+    sync::{
+        Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
+    time::{Duration, Instant},
 };
 
 use chrono::Utc;
@@ -15,22 +19,22 @@ use sha2::{Digest, Sha256, Sha512};
 use tauri::{AppHandle, Emitter};
 use tokio::{
     fs::{File as AsyncFile, OpenOptions},
-    io::AsyncWriteExt,
+    io::{AsyncWriteExt, BufWriter as AsyncBufWriter},
+    sync::watch,
 };
 
 use crate::{
+    environment::{EnvironmentMap, current_process_environment},
     error::{AppError, AppResult},
     model::{InstallRequest, PlannedAction},
-    process::{output_text, run_capture},
+    process::{output_text, run_capture, run_capture_with_env},
 };
 
-#[cfg(windows)]
-use std::os::windows::process::CommandExt;
-
-#[cfg(windows)]
-const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-
 const DOWNLOAD_MAX_ATTEMPTS: u32 = 8;
+const DOWNLOAD_BUFFER_BYTES: usize = 256 * 1024;
+const PARALLEL_DOWNLOAD_MIN_BYTES: u64 = 8 * 1024 * 1024;
+const PARALLEL_DOWNLOAD_STREAMS: u64 = 4;
+const DOWNLOAD_PROGRESS_INTERVAL: Duration = Duration::from_millis(200);
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -288,14 +292,17 @@ impl Installer {
             app,
             operation_id,
             "complete",
-            "安装完成并已通过版本验证",
+            "安装完成并已通过版本验证；用户环境尚未配置",
             1,
             Some(1),
         );
         Ok(OperationResult {
             operation_id: operation_id.to_string(),
             status: "committed".to_string(),
-            message: format!("{} {} 安装完成", request.tool_id, request.version),
+            message: format!(
+                "{} {} 安装完成；用户环境尚未配置",
+                request.tool_id, request.version
+            ),
             installation_path: Some(request.destination.clone()),
         })
     }
@@ -333,6 +340,7 @@ impl Installer {
 
         let mut received = 0;
         let mut total = None;
+        let mut allow_parallel = true;
         for attempt in 1..=DOWNLOAD_MAX_ATTEMPTS {
             let existing = tokio::fs::metadata(&partial)
                 .await
@@ -360,45 +368,100 @@ impl Installer {
                     tokio::time::sleep(download_retry_delay(attempt)).await;
                     continue;
                 }
-                Err(error) => return Err(error.into()),
+                Err(error) => return Err(download_failure(error, attempt, received)),
             };
             validate_final_download_host(response.url().host_str().unwrap_or_default())?;
 
-            let resumed = existing > 0
-                && response.status() == StatusCode::PARTIAL_CONTENT
-                && content_range_starts_at(response.headers(), existing);
-            if existing > 0 && response.status() == StatusCode::PARTIAL_CONTENT && !resumed {
-                return Err(AppError::InvalidSource(
-                    "下载服务器返回了不匹配的续传范围，已停止以避免文件损坏".to_string(),
-                ));
+            if existing == 0
+                && allow_parallel
+                && attempt < DOWNLOAD_MAX_ATTEMPTS
+                && let Some(metadata) = parallel_download_metadata(&response, request)
+            {
+                allow_parallel = false;
+                drop(response);
+                match self
+                    .download_parallel(operation_id, request, &partial, &metadata, app)
+                    .await
+                {
+                    Ok(true) => {
+                        received = metadata.total;
+                        total = Some(metadata.total);
+                        break;
+                    }
+                    // Some servers advertise ranges but answer a range request with 200.
+                    // Discard every segment and restart through the ordinary streaming path.
+                    Ok(false) => continue,
+                    Err(AppError::Http(error)) if retryable_download_error(&error) => {
+                        emit_download_retry(
+                            app,
+                            operation_id,
+                            0,
+                            Some(metadata.total),
+                            attempt + 1,
+                        );
+                        tokio::time::sleep(download_retry_delay(attempt)).await;
+                        continue;
+                    }
+                    Err(error) => return Err(error),
+                }
             }
+
+            let resume_range = if response.status() == StatusCode::PARTIAL_CONTENT {
+                let range = parse_content_range(response.headers());
+                match range {
+                    Some(range)
+                        if existing > 0
+                            && range.start == existing
+                            && range.end + 1 == range.total
+                            && response
+                                .content_length()
+                                .is_none_or(|length| length == range.length()) =>
+                    {
+                        Some(range)
+                    }
+                    _ => {
+                        return Err(AppError::InvalidSource(
+                            "下载服务器返回了不匹配的续传范围，已停止以避免文件损坏".to_string(),
+                        ));
+                    }
+                }
+            } else {
+                None
+            };
+            let resumed = resume_range.is_some();
             let offset = if resumed { existing } else { 0 };
-            let mut file = if resumed {
+            let file = if resumed {
                 OpenOptions::new().append(true).open(&partial).await?
             } else {
                 AsyncFile::create(&partial).await?
             };
+            let mut file = AsyncBufWriter::with_capacity(DOWNLOAD_BUFFER_BYTES, file);
             let response_length = response.content_length();
-            total = response_length.map(|length| length + offset);
+            total = resume_range.map(|range| range.total).or(response_length);
             received = offset;
+            let progress = DownloadProgress::new(app, operation_id, total, offset);
             let mut stream = response.bytes_stream();
             let mut stream_error = None;
             while let Some(chunk) = stream.next().await {
                 match chunk {
                     Ok(chunk) => {
+                        if total.is_some_and(|expected| {
+                            chunk.len() as u64 > expected.saturating_sub(received)
+                        }) {
+                            return Err(AppError::InvalidSource(
+                                "下载服务器发送了超出声明长度的数据，已停止以避免文件损坏"
+                                    .to_string(),
+                            ));
+                        }
                         file.write_all(&chunk).await?;
                         received += chunk.len() as u64;
-                        emit_progress(
-                            app,
-                            operation_id,
-                            "download",
+                        progress.advance(
+                            chunk.len() as u64,
                             if resumed {
                                 "正在断点续传"
                             } else {
                                 "正在下载官方发行包"
                             },
-                            received,
-                            total,
                         );
                     }
                     Err(error) => {
@@ -409,6 +472,11 @@ impl Installer {
             }
             file.flush().await?;
             drop(file);
+            progress.finish(if resumed {
+                "正在断点续传"
+            } else {
+                "正在下载官方发行包"
+            });
 
             let incomplete = total.is_some_and(|expected| received < expected);
             if let Some(error) = stream_error {
@@ -417,7 +485,7 @@ impl Installer {
                     tokio::time::sleep(download_retry_delay(attempt)).await;
                     continue;
                 }
-                return Err(error.into());
+                return Err(download_failure(error, attempt, received));
             }
             if incomplete {
                 if attempt < DOWNLOAD_MAX_ATTEMPTS {
@@ -465,6 +533,151 @@ impl Installer {
         }
         tokio::fs::rename(&partial, &completed).await?;
         Ok(completed)
+    }
+
+    async fn download_parallel(
+        &self,
+        operation_id: &str,
+        request: &InstallRequest,
+        partial: &Path,
+        metadata: &ParallelDownloadMetadata,
+        app: Option<&AppHandle>,
+    ) -> AppResult<bool> {
+        let parts = DownloadParts::create(partial)?;
+        let progress = DownloadProgress::new(app, operation_id, Some(metadata.total), 0);
+        let (cancel, cancellation) = watch::channel(false);
+        let segment_size = metadata.total.div_ceil(PARALLEL_DOWNLOAD_STREAMS);
+        let downloads = parts.paths.iter().enumerate().map(|(index, path)| {
+            let start = index as u64 * segment_size;
+            let end = start.saturating_add(segment_size).min(metadata.total) - 1;
+            let progress = &progress;
+            let cancel = &cancel;
+            let mut cancellation = cancellation.clone();
+            async move {
+                let result = async {
+                    let response = self
+                        .client
+                        .get(&request.download_url)
+                        .header(header::ACCEPT_ENCODING, "identity")
+                        .header(header::RANGE, format!("bytes={start}-{end}"))
+                        .header(header::IF_RANGE, metadata.validator.value())
+                        .send();
+                    let Some(response) =
+                        unless_download_cancelled(&mut cancellation, response).await
+                    else {
+                        return Ok(false);
+                    };
+                    let response = response?;
+                    validate_final_download_host(response.url().host_str().unwrap_or_default())?;
+                    if response.status() == StatusCode::OK {
+                        return Ok(false);
+                    }
+                    let response = response.error_for_status()?;
+                    let expected_range = DownloadRange {
+                        start,
+                        end,
+                        total: metadata.total,
+                    };
+                    if response.status() != StatusCode::PARTIAL_CONTENT
+                        || parse_content_range(response.headers()) != Some(expected_range)
+                        || response
+                            .content_length()
+                            .is_some_and(|length| length != expected_range.length())
+                        || !identity_content_encoding(response.headers())
+                    {
+                        return Err(AppError::InvalidSource(
+                            "下载服务器返回了不匹配的分片范围，已停止以避免文件损坏".to_string(),
+                        ));
+                    }
+                    match metadata.validator.matches(response.headers()) {
+                        // A valid If-Range 206 need not repeat Last-Modified. Restart
+                        // a single stream when consistency cannot be checked locally.
+                        None => return Ok(false),
+                        Some(false) => return Err(AppError::InvalidSource(
+                            "下载期间官方文件的实体标识发生变化，已丢弃分片，请重新查询版本后下载"
+                                .to_string(),
+                        )),
+                        Some(true) => {}
+                    }
+                    let mut file = AsyncBufWriter::with_capacity(
+                        DOWNLOAD_BUFFER_BYTES,
+                        AsyncFile::create(path).await?,
+                    );
+                    let mut stream = response.bytes_stream();
+                    let mut received = 0_u64;
+                    let streamed = async {
+                        loop {
+                            let chunk =
+                                match unless_download_cancelled(&mut cancellation, stream.next())
+                                    .await
+                                {
+                                    Some(Some(chunk)) => chunk,
+                                    Some(None) => break,
+                                    None => return Ok(false),
+                                };
+                            let chunk = chunk?;
+                            if chunk.len() as u64 > expected_range.length().saturating_sub(received)
+                            {
+                                return Err(AppError::InvalidSource(
+                                    "下载分片超出声明长度，已停止以避免文件损坏".to_string(),
+                                ));
+                            }
+                            file.write_all(&chunk).await?;
+                            received += chunk.len() as u64;
+                            progress.advance(chunk.len() as u64, "正在并行下载官方发行包（4 路）");
+                        }
+                        if received != expected_range.length() {
+                            return Err(AppError::InvalidSource(
+                                "下载分片提前结束，已停止以避免文件损坏".to_string(),
+                            ));
+                        }
+                        Ok(true)
+                    }
+                    .await;
+                    if !matches!(streamed, Ok(true)) {
+                        cancel.send_replace(true);
+                    }
+                    let flushed = finish_download_file(file).await;
+                    // Keep the original network/range error even if flushing also fails.
+                    // Every opened Tokio file must finish its blocking I/O and close before
+                    // this worker returns, including cancellation and body-error paths.
+                    let complete = streamed?;
+                    flushed?;
+                    Ok(complete)
+                }
+                .await;
+                if !matches!(result, Ok(true)) {
+                    cancel.send_replace(true);
+                }
+                result
+            }
+        });
+        // Await every scoped worker after cancellation. In particular, no Tokio file
+        // operation may still be writing when the private directory is cleaned up.
+        let completed = futures_util::future::join_all(downloads)
+            .await
+            .into_iter()
+            .collect::<AppResult<Vec<bool>>>()?;
+        if completed.iter().any(|completed| !completed) {
+            return Ok(false);
+        }
+        let mut output =
+            AsyncBufWriter::with_capacity(DOWNLOAD_BUFFER_BYTES, AsyncFile::create(partial).await?);
+        let merged: AppResult<()> = async {
+            for path in &parts.paths {
+                let mut input = AsyncFile::open(path).await?;
+                let copied = tokio::io::copy(&mut input, &mut output).await;
+                drop(input.into_std().await);
+                copied?;
+            }
+            Ok(())
+        }
+        .await;
+        let flushed = finish_download_file(output).await;
+        merged?;
+        flushed?;
+        progress.finish("官方发行包下载完成");
+        Ok(true)
     }
 
     async fn repair(
@@ -699,6 +912,29 @@ impl Installer {
     }
 }
 
+async fn unless_download_cancelled<F: std::future::Future>(
+    cancellation: &mut watch::Receiver<bool>,
+    future: F,
+) -> Option<F::Output> {
+    if *cancellation.borrow() {
+        return None;
+    }
+    let changed = cancellation.changed();
+    futures_util::pin_mut!(changed, future);
+    match futures_util::future::select(changed, future).await {
+        futures_util::future::Either::Left(_) => None,
+        futures_util::future::Either::Right((output, _)) => Some(output),
+    }
+}
+
+async fn finish_download_file(mut file: AsyncBufWriter<AsyncFile>) -> std::io::Result<()> {
+    let flushed = file.flush().await;
+    // flush can itself fail before polling the inner file's flush. into_std
+    // explicitly awaits any pending Tokio blocking operation even in that case.
+    drop(file.into_inner().into_std().await);
+    flushed
+}
+
 fn download_filename(value: &str) -> AppResult<String> {
     let url = url::Url::parse(value)
         .map_err(|error| AppError::InvalidSource(format!("下载 URL 无效：{error}")))?;
@@ -735,6 +971,7 @@ fn validate_final_download_host(host: &str) -> AppResult<()> {
         "builds.dotnet.microsoft.com",
         "download.visualstudio.microsoft.com",
         "windows.php.net",
+        "downloads.php.net",
     ];
     if allowed.contains(&host.as_str()) {
         Ok(())
@@ -762,14 +999,200 @@ fn download_retry_delay(failed_attempt: u32) -> Duration {
     Duration::from_millis(750 * 2_u64.pow(failed_attempt.saturating_sub(1).min(3)))
 }
 
-fn content_range_starts_at(headers: &header::HeaderMap, expected: u64) -> bool {
+fn download_failure(error: reqwest::Error, attempt: u32, received: u64) -> AppError {
+    AppError::Message(format!(
+        "下载失败（已尝试 {attempt} 次，已下载 {received} 字节）：{}",
+        AppError::Http(error)
+    ))
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct DownloadRange {
+    start: u64,
+    end: u64,
+    total: u64,
+}
+
+impl DownloadRange {
+    fn length(self) -> u64 {
+        self.end - self.start + 1
+    }
+}
+
+fn parse_content_range(headers: &header::HeaderMap) -> Option<DownloadRange> {
+    let value = headers
+        .get(header::CONTENT_RANGE)?
+        .to_str()
+        .ok()?
+        .strip_prefix("bytes ")?;
+    let (range, total) = value.split_once('/')?;
+    let (start, end) = range.split_once('-')?;
+    let range = DownloadRange {
+        start: start.parse().ok()?,
+        end: end.parse().ok()?,
+        total: total.parse().ok()?,
+    };
+    (range.start <= range.end && range.end < range.total).then_some(range)
+}
+
+enum DownloadValidator {
+    Etag(header::HeaderValue),
+    LastModified(header::HeaderValue),
+}
+
+impl DownloadValidator {
+    fn value(&self) -> &header::HeaderValue {
+        match self {
+            Self::Etag(value) | Self::LastModified(value) => value,
+        }
+    }
+
+    fn matches(&self, headers: &header::HeaderMap) -> Option<bool> {
+        let name = match self {
+            Self::Etag(_) => header::ETAG,
+            Self::LastModified(_) => header::LAST_MODIFIED,
+        };
+        headers.get(name).map(|value| value == self.value())
+    }
+}
+
+struct ParallelDownloadMetadata {
+    total: u64,
+    validator: DownloadValidator,
+}
+
+fn identity_content_encoding(headers: &header::HeaderMap) -> bool {
     headers
-        .get(header::CONTENT_RANGE)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.strip_prefix("bytes "))
-        .and_then(|value| value.split_once('-'))
-        .and_then(|(start, _)| start.parse::<u64>().ok())
-        == Some(expected)
+        .get(header::CONTENT_ENCODING)
+        .is_none_or(|value| value == "identity")
+}
+
+fn parallel_download_metadata(
+    response: &reqwest::Response,
+    request: &InstallRequest,
+) -> Option<ParallelDownloadMetadata> {
+    let total = response.content_length()?;
+    if response.status() != StatusCode::OK
+        || total < PARALLEL_DOWNLOAD_MIN_BYTES
+        || !identity_content_encoding(response.headers())
+        || response
+            .headers()
+            .get(header::ACCEPT_RANGES)?
+            .to_str()
+            .ok()?
+            != "bytes"
+        || request
+            .checksum
+            .as_deref()
+            .is_none_or(|value| value.trim().is_empty())
+        || !matches!(
+            request.checksum_algorithm.as_deref(),
+            Some("sha256" | "sha512" | "sha1")
+        )
+    {
+        return None;
+    }
+    let validator = response
+        .headers()
+        .get(header::ETAG)
+        .filter(|value| {
+            value.to_str().is_ok_and(|value| {
+                value.starts_with('"') && value.ends_with('"') && value.len() > 2
+            })
+        })
+        .cloned()
+        .map(DownloadValidator::Etag)
+        .or_else(|| {
+            response
+                .headers()
+                .get(header::LAST_MODIFIED)
+                .filter(|value| value.to_str().is_ok_and(|value| !value.is_empty()))
+                .cloned()
+                .map(DownloadValidator::LastModified)
+        })?;
+    Some(ParallelDownloadMetadata { total, validator })
+}
+
+struct DownloadParts {
+    directory: PathBuf,
+    paths: Vec<PathBuf>,
+}
+
+impl DownloadParts {
+    fn create(partial: &Path) -> AppResult<Self> {
+        let parent = partial
+            .parent()
+            .ok_or_else(|| AppError::UnsafePath(partial.to_path_buf()))?;
+        let directory = parent.join(format!(".envnexus-parts-{}", uuid::Uuid::new_v4()));
+        fs::create_dir(&directory)?;
+        let paths = (0..PARALLEL_DOWNLOAD_STREAMS)
+            .map(|index| directory.join(format!("{index}.part")))
+            .collect();
+        Ok(Self { directory, paths })
+    }
+}
+
+impl Drop for DownloadParts {
+    fn drop(&mut self) {
+        // Never recursively delete or touch any other operation's temporary files.
+        for path in &self.paths {
+            let _ = fs::remove_file(path);
+        }
+        let _ = fs::remove_dir(&self.directory);
+    }
+}
+
+struct DownloadProgress<'a> {
+    app: Option<&'a AppHandle>,
+    operation_id: &'a str,
+    total: Option<u64>,
+    received: AtomicU64,
+    last_emit: Mutex<Instant>,
+}
+
+impl<'a> DownloadProgress<'a> {
+    fn new(
+        app: Option<&'a AppHandle>,
+        operation_id: &'a str,
+        total: Option<u64>,
+        received: u64,
+    ) -> Self {
+        Self {
+            app,
+            operation_id,
+            total,
+            received: AtomicU64::new(received),
+            last_emit: Mutex::new(Instant::now()),
+        }
+    }
+
+    fn advance(&self, bytes: u64, message: &str) {
+        let received = self.received.fetch_add(bytes, Ordering::Relaxed) + bytes;
+        if let Ok(mut last_emit) = self.last_emit.lock()
+            && last_emit.elapsed() >= DOWNLOAD_PROGRESS_INTERVAL
+        {
+            emit_progress(
+                self.app,
+                self.operation_id,
+                "download",
+                message,
+                received,
+                self.total,
+            );
+            *last_emit = Instant::now();
+        }
+    }
+
+    fn finish(&self, message: &str) {
+        emit_progress(
+            self.app,
+            self.operation_id,
+            "download",
+            message,
+            self.received.load(Ordering::Relaxed),
+            self.total,
+        );
+    }
 }
 
 fn verify_checksum(
@@ -878,24 +1301,33 @@ fn install_rust(_tool_id: &str, version: &str, installer: &Path, staging: &Path)
     let cargo_home = staging.join("cargo");
     let rustup_home = staging.join("rustup");
     let toolchain = format!("{version}-x86_64-pc-windows-msvc");
-    let mut command = std::process::Command::new(installer);
-    command
-        .args([
+    let mut environment =
+        crate::network_proxy::child_download_environment(current_process_environment()?);
+    environment.insert(
+        "CARGO_HOME".to_string(),
+        cargo_home.to_string_lossy().into_owned(),
+    );
+    environment.insert(
+        "RUSTUP_HOME".to_string(),
+        rustup_home.to_string_lossy().into_owned(),
+    );
+    let environment = environment
+        .iter()
+        .map(|(key, value)| (key.as_str(), std::ffi::OsStr::new(value)))
+        .collect::<Vec<_>>();
+    let output = run_capture_with_env(
+        installer,
+        &[
             "-y",
             "--no-modify-path",
             "--profile",
             "minimal",
             "--default-toolchain",
             &toolchain,
-        ])
-        .env("CARGO_HOME", &cargo_home)
-        .env("RUSTUP_HOME", &rustup_home)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    #[cfg(windows)]
-    command.creation_flags(CREATE_NO_WINDOW);
-    let output = command.output()?;
+        ],
+        Duration::from_secs(30 * 60),
+        &environment,
+    )?;
     if output.status.success() {
         Ok(())
     } else {
@@ -1095,15 +1527,68 @@ fn verify_installation(request: &InstallRequest) -> AppResult<()> {
         if !program.is_file() {
             continue;
         }
-        let output = run_capture(&program, &args, Duration::from_secs(20))?;
-        if output.status.success() || !output_text(&output).is_empty() {
-            return Ok(());
-        }
+        crate::tool_runtime::validate_runtime_dependencies(&request.tool_id, &program)?;
+        let environment = installation_process_environment(request, current_process_environment()?);
+        let environment = environment
+            .iter()
+            .map(|(key, value)| (key.as_str(), value.as_os_str()))
+            .collect::<Vec<_>>();
+        let output = run_capture_with_env(&program, &args, Duration::from_secs(20), &environment)?;
+        return verify_probe_output(&program, &output);
     }
     Err(AppError::Message(format!(
         "安装后未找到或无法执行 {} 的预期命令",
         request.tool_id
     )))
+}
+
+fn installation_process_environment(
+    request: &InstallRequest,
+    current: EnvironmentMap,
+) -> Vec<(String, OsString)> {
+    let mut environment = current
+        .into_iter()
+        .map(|(key, value)| (key, OsString::from(value)))
+        .collect::<Vec<_>>();
+    for (key, value) in installation_probe_environment(request) {
+        environment.retain(|(existing, _)| !existing.eq_ignore_ascii_case(key));
+        environment.push((key.to_string(), value));
+    }
+    environment
+}
+
+fn installation_probe_environment(request: &InstallRequest) -> Vec<(&'static str, OsString)> {
+    if request.tool_id == "rust" {
+        vec![
+            (
+                "CARGO_HOME",
+                request.destination.join("cargo").into_os_string(),
+            ),
+            (
+                "RUSTUP_HOME",
+                request.destination.join("rustup").into_os_string(),
+            ),
+            (
+                "RUSTUP_TOOLCHAIN",
+                format!("{}-x86_64-pc-windows-msvc", request.version).into(),
+            ),
+        ]
+    } else {
+        Vec::new()
+    }
+}
+
+fn verify_probe_output(program: &Path, output: &std::process::Output) -> AppResult<()> {
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(AppError::Message(format!(
+            "安装后命令验证失败（{}，退出状态 {}）：{}",
+            program.display(),
+            output.status,
+            output_text(output)
+        )))
+    }
 }
 
 fn validate_destination_boundary(root: &Path, destination: &Path) -> AppResult<()> {
@@ -1308,6 +1793,102 @@ mod tests {
     }
 
     #[test]
+    fn php_download_hosts_are_exact_official_hosts() {
+        for host in ["windows.php.net", "downloads.php.net", "DOWNLOADS.PHP.NET"] {
+            assert!(validate_final_download_host(host).is_ok(), "{host}");
+        }
+        for host in [
+            "downloads.php.net.evil.invalid",
+            "evil-downloads.php.net",
+            "uploads.php.net",
+        ] {
+            assert!(validate_final_download_host(host).is_err(), "{host}");
+        }
+    }
+
+    #[test]
+    fn php_redirect_to_official_distribution_host_downloads_and_checks_checksum() {
+        let temp = tempdir().unwrap();
+        let payload = b"official PHP Windows package fixture";
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            for redirected in [false, true] {
+                let mut stream = loop {
+                    match listener.accept() {
+                        Ok((stream, _)) => break stream,
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            assert!(Instant::now() < deadline, "missing PHP download request");
+                            std::thread::sleep(Duration::from_millis(5));
+                        }
+                        Err(error) => panic!("test HTTP server failed: {error}"),
+                    }
+                };
+                stream.set_nonblocking(false).unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(2)))
+                    .unwrap();
+                stream
+                    .set_write_timeout(Some(Duration::from_secs(2)))
+                    .unwrap();
+                let mut request = Vec::new();
+                let mut buffer = [0_u8; 1024];
+                while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    let count = stream.read(&mut buffer).unwrap();
+                    assert!(count > 0 && request.len() + count <= 16 * 1024);
+                    request.extend_from_slice(&buffer[..count]);
+                }
+                let request = String::from_utf8(request).unwrap().to_ascii_lowercase();
+                if redirected {
+                    assert!(request.starts_with("get /~windows/releases/php.zip http/1.1\r\n"));
+                    assert!(request.contains(&format!(
+                        "\r\nhost: downloads.php.net:{}\r\n",
+                        address.port()
+                    )));
+                    write!(
+                        stream,
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        payload.len()
+                    )
+                    .unwrap();
+                    stream.write_all(payload).unwrap();
+                } else {
+                    assert!(request.starts_with("get /php.zip http/1.1\r\n"));
+                    write!(
+                        stream,
+                        "HTTP/1.1 302 Found\r\nLocation: http://downloads.php.net:{}/~windows/releases/php.zip\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                        address.port()
+                    ).unwrap();
+                }
+            }
+        });
+        let request = InstallRequest {
+            tool_id: "php".to_string(),
+            version: "8.5.11".to_string(),
+            root: temp.path().join("tools"),
+            destination: temp.path().join("tools/php/8.5.11"),
+            download_url: format!("http://{address}/php.zip"),
+            checksum_algorithm: Some("sha256".to_string()),
+            checksum: Some(hex::encode(Sha256::digest(payload))),
+        };
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .resolve("downloads.php.net", address)
+            .connect_timeout(Duration::from_secs(2))
+            .read_timeout(Duration::from_secs(2))
+            .build()
+            .unwrap();
+        let installer = Installer::new(client, temp.path().join("data"));
+        let result = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(installer.download("php-redirect-test", &request, None));
+        server.join().unwrap();
+        assert_eq!(fs::read(result.unwrap()).unwrap(), payload);
+    }
+
+    #[test]
     fn destination_must_stay_below_root() {
         let temp = tempdir().unwrap();
         let root = temp.path().join("root");
@@ -1320,6 +1901,408 @@ mod tests {
             validate_destination_boundary(&root, &root.join("node").join("..").join("outside"))
                 .is_err()
         );
+    }
+
+    #[test]
+    fn managed_rust_probe_uses_its_own_homes_and_requested_toolchain() {
+        let request = InstallRequest {
+            tool_id: "rust".to_string(),
+            version: "1.99.0".to_string(),
+            root: PathBuf::from(r"E:\Environment"),
+            destination: PathBuf::from(r"E:\Environment\rust\1.99.0"),
+            download_url:
+                "https://static.rust-lang.org/rustup/dist/x86_64-pc-windows-msvc/rustup-init.exe"
+                    .to_string(),
+            checksum_algorithm: None,
+            checksum: None,
+        };
+        let environment = installation_probe_environment(&request);
+        assert_eq!(
+            environment[0],
+            (
+                "CARGO_HOME",
+                request.destination.join("cargo").into_os_string()
+            )
+        );
+        assert_eq!(
+            environment[1],
+            (
+                "RUSTUP_HOME",
+                request.destination.join("rustup").into_os_string()
+            )
+        );
+        assert_eq!(
+            environment[2],
+            (
+                "RUSTUP_TOOLCHAIN",
+                OsString::from("1.99.0-x86_64-pc-windows-msvc")
+            )
+        );
+    }
+
+    #[test]
+    fn probe_uses_fresh_java_home_and_overlays_managed_rust_homes() {
+        let request = InstallRequest {
+            tool_id: "rust".to_string(),
+            version: "1.99.0".to_string(),
+            root: PathBuf::from(r"E:\Environment"),
+            destination: PathBuf::from(r"E:\Environment\rust\1.99.0"),
+            download_url: String::new(),
+            checksum_algorithm: None,
+            checksum: None,
+        };
+        let current = EnvironmentMap::from([
+            (
+                "JAVA_HOME".to_string(),
+                r"E:\Environment\java\27".to_string(),
+            ),
+            (
+                "Path".to_string(),
+                r"E:\Environment\java\27\bin".to_string(),
+            ),
+            ("rustup_home".to_string(), r"C:\old-rust".to_string()),
+        ]);
+        let environment = installation_process_environment(&request, current);
+        assert!(environment.contains(&(
+            "JAVA_HOME".to_string(),
+            OsString::from(r"E:\Environment\java\27")
+        )));
+        assert!(environment.contains(&(
+            "Path".to_string(),
+            OsString::from(r"E:\Environment\java\27\bin")
+        )));
+        let rustup_homes = environment
+            .iter()
+            .filter(|(key, _)| key.eq_ignore_ascii_case("RUSTUP_HOME"))
+            .collect::<Vec<_>>();
+        assert_eq!(rustup_homes.len(), 1);
+        assert_eq!(
+            rustup_homes[0].1,
+            request.destination.join("rustup").into_os_string()
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn failed_probe_stderr_is_an_error_not_installation_success() {
+        use std::os::windows::process::ExitStatusExt;
+        let output = std::process::Output {
+            status: std::process::ExitStatus::from_raw(1),
+            stdout: Vec::new(),
+            stderr: b"JAVA_HOME is not defined correctly".to_vec(),
+        };
+        let error = verify_probe_output(Path::new("mvn.cmd"), &output)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("JAVA_HOME is not defined correctly"));
+        assert!(error.contains("mvn.cmd"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn successful_probe_may_report_version_on_stderr() {
+        use std::os::windows::process::ExitStatusExt;
+        let output = std::process::Output {
+            status: std::process::ExitStatus::from_raw(0),
+            stdout: Vec::new(),
+            stderr: b"openjdk version 27".to_vec(),
+        };
+        assert!(verify_probe_output(Path::new("java.exe"), &output).is_ok());
+    }
+
+    #[derive(Clone, Copy)]
+    enum RangeFixture {
+        Supported,
+        Unsupported,
+        WrongRange,
+        ChangedEntity,
+        MissingLastModified,
+        CancelledAfterWrite,
+    }
+
+    fn check_parallel_download(fixture: RangeFixture) {
+        use std::sync::atomic::{AtomicBool, AtomicUsize};
+
+        let temp = tempdir().unwrap();
+        let data_root = temp.path().join("data");
+        let payload = Arc::new(
+            (0..PARALLEL_DOWNLOAD_MIN_BYTES as usize)
+                .map(|index| (index % 251) as u8)
+                .collect::<Vec<_>>(),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let address = listener.local_addr().unwrap();
+        let ranges = Arc::new(Mutex::new(Vec::new()));
+        let full_requests = Arc::new(AtomicUsize::new(0));
+        let active = Arc::new(AtomicUsize::new(0));
+        let max_active = Arc::new(AtomicUsize::new(0));
+        let trigger_cancellation = Arc::new(AtomicBool::new(false));
+        let download_finished = Arc::new(AtomicBool::new(false));
+        let cancellation_started = Arc::new(Mutex::new(None));
+        let server_data_root = data_root.clone();
+        let server_ranges = ranges.clone();
+        let server_payload = payload.clone();
+        let server_max_active = max_active.clone();
+        let server_finished = download_finished.clone();
+        let server_cancellation_started = cancellation_started.clone();
+        let request_count = if matches!(
+            fixture,
+            RangeFixture::Unsupported | RangeFixture::MissingLastModified
+        ) {
+            6
+        } else {
+            5
+        };
+        let server = std::thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            let mut workers = Vec::new();
+            while workers.len() < request_count {
+                let (mut stream, _) = match listener.accept() {
+                    Ok(connection) => connection,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        assert!(Instant::now() < deadline, "missing download requests");
+                        std::thread::sleep(Duration::from_millis(5));
+                        continue;
+                    }
+                    Err(error) => panic!("test HTTP server failed: {error}"),
+                };
+                // Windows accepted sockets inherit a nonblocking listener's mode.
+                // These synchronous fixture workers require blocking read/write_all.
+                stream.set_nonblocking(false).unwrap();
+                stream
+                    .set_write_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                let payload = server_payload.clone();
+                let ranges = server_ranges.clone();
+                let full_requests = full_requests.clone();
+                let active = active.clone();
+                let max_active = server_max_active.clone();
+                let trigger_cancellation = trigger_cancellation.clone();
+                let download_finished = server_finished.clone();
+                let cancellation_started = server_cancellation_started.clone();
+                let data_root = server_data_root.clone();
+                workers.push(std::thread::spawn(move || {
+                    stream.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+                    let mut request = Vec::new();
+                    let mut buffer = [0_u8; 4096];
+                    while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                        let count = stream.read(&mut buffer).unwrap();
+                        assert!(count > 0);
+                        request.extend_from_slice(&buffer[..count]);
+                    }
+                    let request = String::from_utf8(request).unwrap().to_ascii_lowercase();
+                    let range = request.lines().find_map(|line| line.strip_prefix("range: bytes="));
+                    if let Some(range) = range {
+                        if matches!(fixture, RangeFixture::MissingLastModified) {
+                            assert!(request.contains("if-range: wed, 14 oct 2026 16:00:00 gmt"));
+                        } else {
+                            assert!(request.contains("if-range: \"fixture\""));
+                        }
+                        ranges.lock().unwrap().push(range.to_string());
+                        let concurrent = active.fetch_add(1, Ordering::SeqCst) + 1;
+                        max_active.fetch_max(concurrent, Ordering::SeqCst);
+                        // Every request must be in flight before a response can cancel
+                        // its siblings; sleeping here would race on a busy CI runner.
+                        let deadline = Instant::now() + Duration::from_secs(5);
+                        while ranges.lock().unwrap().len() < PARALLEL_DOWNLOAD_STREAMS as usize {
+                            assert!(Instant::now() < deadline, "all range requests must arrive before responding");
+                            std::thread::sleep(Duration::from_millis(5));
+                        }
+                        if matches!(fixture, RangeFixture::Unsupported) {
+                            let _ = write!(stream, "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", payload.len());
+                        } else {
+                            let (start, end) = range.split_once('-').unwrap();
+                            let start = start.parse::<usize>().unwrap();
+                            let end = end.parse::<usize>().unwrap();
+                            let response_start = if matches!(fixture, RangeFixture::WrongRange) { start + 1 } else { start };
+                            let cancel_after_write = matches!(fixture, RangeFixture::CancelledAfterWrite) && end + 1 == payload.len();
+                            if cancel_after_write {
+                                let deadline = Instant::now() + Duration::from_secs(10);
+                                loop {
+                                    let written = fs::read_dir(data_root.join("downloads/python")).unwrap()
+                                        .filter_map(Result::ok).filter(|entry| entry.path().is_dir())
+                                        .flat_map(|entry| fs::read_dir(entry.path()).unwrap())
+                                        .filter_map(Result::ok)
+                                        .filter(|entry| {
+                                            // Observe actual bytes, not directory metadata
+                                            // for another worker's still-open Windows file.
+                                            let mut bytes = vec![0; DOWNLOAD_BUFFER_BYTES];
+                                            File::open(entry.path())
+                                                .and_then(|mut file| file.read_exact(&mut bytes))
+                                                .is_ok()
+                                        })
+                                        .count();
+                                    if written >= 3 { break; }
+                                    assert!(Instant::now() < deadline, "other workers must write before cancellation");
+                                    std::thread::sleep(Duration::from_millis(5));
+                                }
+                            }
+                            let etag = if matches!(fixture, RangeFixture::ChangedEntity) || cancel_after_write { "changed" } else { "fixture" };
+                            let validator = if matches!(fixture, RangeFixture::MissingLastModified) { String::new() } else { format!("ETag: \"{etag}\"\r\n") };
+                            let headers = format!("HTTP/1.1 206 Partial Content\r\nContent-Length: {}\r\nContent-Range: bytes {}-{}/{}\r\n{validator}Connection: close\r\n\r\n", end - start + 1, response_start, end, payload.len());
+                            if cancel_after_write {
+                                *cancellation_started.lock().unwrap() = Some(Instant::now());
+                            }
+                            let _ = stream.write_all(headers.as_bytes());
+                            if cancel_after_write {
+                                trigger_cancellation.store(true, Ordering::SeqCst);
+                            } else if matches!(fixture, RangeFixture::CancelledAfterWrite) {
+                                let first_end = start + 2 * DOWNLOAD_BUFFER_BYTES;
+                                stream.write_all(&payload[start..first_end]).unwrap();
+                                let deadline = Instant::now() + Duration::from_secs(10);
+                                while !trigger_cancellation.load(Ordering::SeqCst) {
+                                    assert!(Instant::now() < deadline, "last worker must trigger cancellation");
+                                    std::thread::sleep(Duration::from_millis(5));
+                                }
+                                // Keep the body idle and the socket open. Cancellation
+                                // must wake a pending body read without waiting for the
+                                // client read timeout or another network byte.
+                                let deadline = Instant::now() + Duration::from_secs(3);
+                                while !download_finished.load(Ordering::SeqCst) {
+                                    assert!(Instant::now() < deadline, "cancelled workers must wake while response bodies remain idle");
+                                    std::thread::sleep(Duration::from_millis(5));
+                                }
+                            }
+                            if matches!(fixture, RangeFixture::Supported) {
+                                let _ = stream.write_all(&payload[start..=end]);
+                            }
+                        }
+                        active.fetch_sub(1, Ordering::SeqCst);
+                    } else {
+                        let number = full_requests.fetch_add(1, Ordering::SeqCst);
+                        let validator = if matches!(fixture, RangeFixture::MissingLastModified) { "Last-Modified: Wed, 14 Oct 2026 16:00:00 GMT\r\n" } else { "ETag: \"fixture\"\r\n" };
+                        let headers = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nAccept-Ranges: bytes\r\n{validator}Connection: close\r\n\r\n", payload.len());
+                        stream.write_all(headers.as_bytes()).unwrap();
+                        if number > 0 {
+                            stream.write_all(&payload).unwrap();
+                        }
+                    }
+                }));
+            }
+            for worker in workers {
+                worker.join().unwrap();
+            }
+        });
+        let request = InstallRequest {
+            tool_id: "python".to_string(),
+            version: "3.14.6".to_string(),
+            root: temp.path().join("tools"),
+            destination: temp.path().join("tools/python/3.14.6"),
+            download_url: format!("http://{address}/python.zip"),
+            checksum_algorithm: Some("sha256".to_string()),
+            checksum: Some(hex::encode(Sha256::digest(payload.as_slice()))),
+        };
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .connect_timeout(Duration::from_secs(2))
+            .read_timeout(Duration::from_secs(5))
+            .build()
+            .unwrap();
+        let installer = Installer::new(client, data_root.clone());
+        let result = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(installer.download("parallel-test", &request, None));
+        let cancellation_elapsed = cancellation_started
+            .lock()
+            .unwrap()
+            .map(|started| started.elapsed());
+        download_finished.store(true, Ordering::SeqCst);
+        server.join().unwrap();
+        if matches!(fixture, RangeFixture::CancelledAfterWrite) {
+            assert!(
+                cancellation_elapsed.is_some_and(|elapsed| elapsed < Duration::from_secs(3)),
+                "cancellation must not wait for the 5-second response read timeout: {cancellation_elapsed:?}"
+            );
+        }
+        match fixture {
+            RangeFixture::Supported
+            | RangeFixture::Unsupported
+            | RangeFixture::MissingLastModified => {
+                assert_eq!(fs::read(result.unwrap()).unwrap(), *payload)
+            }
+            RangeFixture::WrongRange => {
+                assert!(result.unwrap_err().to_string().contains("分片范围"))
+            }
+            RangeFixture::ChangedEntity | RangeFixture::CancelledAfterWrite => {
+                assert!(result.unwrap_err().to_string().contains("实体标识"))
+            }
+        }
+        assert_eq!(
+            ranges.lock().unwrap().len(),
+            PARALLEL_DOWNLOAD_STREAMS as usize
+        );
+        if matches!(fixture, RangeFixture::Supported) {
+            assert!(
+                max_active.load(Ordering::SeqCst) >= 2,
+                "range requests must overlap"
+            );
+            let mut actual = ranges.lock().unwrap().clone();
+            actual.sort();
+            assert_eq!(
+                actual,
+                [
+                    "0-2097151",
+                    "2097152-4194303",
+                    "4194304-6291455",
+                    "6291456-8388607"
+                ]
+            );
+        }
+        for entry in fs::read_dir(data_root.join("downloads/python")).unwrap() {
+            assert!(
+                !entry
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".envnexus-parts-")
+            );
+        }
+        if matches!(
+            fixture,
+            RangeFixture::WrongRange
+                | RangeFixture::ChangedEntity
+                | RangeFixture::CancelledAfterWrite
+        ) {
+            assert_eq!(
+                fs::read_dir(data_root.join("downloads/python"))
+                    .unwrap()
+                    .count(),
+                0
+            );
+            assert!(!data_root.join("downloads/python/python.zip").exists());
+            assert!(!data_root.join("downloads/python/python.zip.part").exists());
+        }
+    }
+
+    #[test]
+    fn large_download_uses_validated_concurrent_ranges_and_checksum() {
+        check_parallel_download(RangeFixture::Supported);
+    }
+
+    #[test]
+    fn server_ignoring_ranges_falls_back_to_a_fresh_single_stream() {
+        check_parallel_download(RangeFixture::Unsupported);
+    }
+
+    #[test]
+    fn parallel_download_rejects_wrong_range_and_cleans_private_parts() {
+        check_parallel_download(RangeFixture::WrongRange);
+    }
+
+    #[test]
+    fn parallel_download_rejects_changed_entity_and_cleans_private_parts() {
+        check_parallel_download(RangeFixture::ChangedEntity);
+    }
+
+    #[test]
+    fn missing_last_modified_on_valid_ranges_falls_back_without_losing_download() {
+        check_parallel_download(RangeFixture::MissingLastModified);
+    }
+
+    #[test]
+    fn cancelled_workers_close_written_files_before_private_directory_cleanup() {
+        check_parallel_download(RangeFixture::CancelledAfterWrite);
     }
 
     #[test]

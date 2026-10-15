@@ -367,8 +367,27 @@ pub struct OperationPlan {
     pub steps: Vec<PlanStep>,
     #[serde(skip)]
     pub environment_fingerprint: String,
-    #[serde(skip)]
+    #[serde(
+        rename = "actionKind",
+        skip_deserializing,
+        serialize_with = "serialize_action_kind"
+    )]
     pub action: PlannedAction,
+}
+
+fn serialize_action_kind<S>(action: &PlannedAction, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    serializer.serialize_str(match action {
+        PlannedAction::Switch { .. } => "switch",
+        PlannedAction::Install(_) => "install",
+        PlannedAction::Repair(_) => "repair",
+        PlannedAction::Uninstall { .. } => "uninstall",
+        PlannedAction::RestoreEnvironment { .. } => "restoreEnvironment",
+        PlannedAction::UpdateUserEnvironment { .. } => "updateUserEnvironment",
+        PlannedAction::None => "none",
+    })
 }
 
 #[derive(Debug, Clone, Default)]

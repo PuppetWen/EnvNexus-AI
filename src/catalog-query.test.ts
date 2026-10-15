@@ -23,7 +23,7 @@ describe("official version catalog queries", () => {
 
   it("shows a cached result instead of leaving the query spinner active", () => {
     expect(appSource).toContain("catalog.cached");
-    expect(appSource).toContain("网络不可用，显示上次成功结果");
+    expect(appSource).toContain("本地缓存，过期后后台更新");
     expect(appSource).toContain('fetchingCatalog ? "disabled" : ""');
   });
 
@@ -51,7 +51,8 @@ describe("official version catalog queries", () => {
   });
 
   it("does not truncate official catalogs and batches the Python file lookup", () => {
-    expect(sourceProviders).not.toMatch(/\.truncate\(|\.take\(/);
+    const productionProviders = sourceProviders.split("#[cfg(test)]")[0];
+    expect(productionProviders).not.toMatch(/\.truncate\(|\.take\(/);
     expect(sourceProviders).toContain(
       'const FILES_SOURCE: &str = "https://www.python.org/api/v2/downloads/release_file/";',
     );

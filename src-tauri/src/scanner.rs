@@ -1,5 +1,6 @@
 use std::{
     collections::{HashMap, HashSet},
+    ffi::OsStr,
     fs,
     path::{Path, PathBuf},
     time::{Duration, UNIX_EPOCH},
@@ -8,19 +9,20 @@ use std::{
 use chrono::Utc;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use walkdir::WalkDir;
 
 #[cfg(windows)]
 use windows_sys::Win32::Storage::FileSystem::{GetDriveTypeW, GetLogicalDriveStringsW};
 
 const DISCOVERY_INDEX_SCHEMA: u32 = 1;
-const PROBE_CACHE_SCHEMA: u32 = 1;
+const PROBE_CACHE_SCHEMA: u32 = 2;
 const DRIVE_FIXED: u32 = 3;
 
 use crate::{
     environment::{
-        EnvironmentMap, collect_candidate_roots, diagnose_environment, get_case_insensitive,
-        read_environment, split_path,
+        EnvironmentMap, collect_candidate_roots, current_process_environment, diagnose_environment,
+        get_case_insensitive, read_environment, split_path,
     },
     error::AppResult,
     installer::{InstallManifest, managed_manifests, manifest_executables},
@@ -29,7 +31,7 @@ use crate::{
         IssueLevel, ToolCapabilities, ToolInventory, VersionManagerInventory,
     },
     plugins::{PluginRegistry, ToolDescriptor, ToolPlugin},
-    process::{output_text, run_capture},
+    process::{output_text, run_capture, run_capture_with_env},
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -72,6 +74,7 @@ struct ToolProbeContext {
     cache: ToolProbeCache,
     touched_keys: HashSet<String>,
     reuse_cached: bool,
+    child_environment: EnvironmentMap,
 }
 
 struct ToolScanSources<'a> {
@@ -97,6 +100,7 @@ fn scan_internal(
     let started = Utc::now();
     let user = read_environment(EnvironmentScope::User)?;
     let system = read_environment(EnvironmentScope::System)?;
+    let child_environment = current_process_environment()?;
     let mut global_issues = diagnose_environment(&user, &system);
     let mut tools = Vec::with_capacity(registry.all().len());
     let version_managers = detect_version_managers(&user, &system);
@@ -115,6 +119,7 @@ fn scan_internal(
         },
         touched_keys: HashSet::new(),
         reuse_cached: !force_disk_discovery,
+        child_environment,
     };
     let mut manifests = managed_manifests(data_root);
     merge_discovered_manifests(&mut manifests, discovery.manifests);
@@ -220,8 +225,18 @@ fn write_tool_probe_cache(data_root: &Path, cache: &ToolProbeCache) {
 }
 
 fn disk_discovery(registry: &PluginRegistry, data_root: &Path, force: bool) -> DiskDiscoveryIndex {
-    if !force && let Some(index) = read_disk_discovery_index(registry, data_root) {
-        return index;
+    if !force {
+        // Saving roots and completing operations only refresh known locations.
+        // An absent or invalid index must not silently initiate a full disk scan,
+        // nor be persisted as though the user had requested and completed one.
+        return read_disk_discovery_index(registry, data_root).unwrap_or_else(|| {
+            DiskDiscoveryIndex {
+                schema_version: DISCOVERY_INDEX_SCHEMA,
+                scanned_at: Utc::now(),
+                executables: HashMap::new(),
+                manifests: Vec::new(),
+            }
+        });
     }
     let index = discover_disk_index_in_roots(registry, &fixed_drive_roots());
     if let Ok(bytes) = serde_json::to_vec_pretty(&index) {
@@ -422,6 +437,28 @@ fn should_scan_disk_entry(root: &Path, path: &Path) -> bool {
         .to_string_lossy()
         .replace('/', "\\")
         .to_ascii_lowercase();
+    // Match only the package caches configured by Use-ProjectCache.ps1.
+    // Keep actual tool installations such as .devtools/rustup and cargo/bin.
+    if [
+        r"\.devtools\cargo\registry",
+        r"\.devtools\cargo\git",
+        r"\.devtools\pnpm-store",
+        r"\.devtools\pnpm-cache",
+        r"\.devtools\pnpm-state",
+        r"\.devtools\npm-cache",
+        r"\.devtools\pip-cache",
+        r"\.devtools\uv-cache",
+        r"\.devtools\cache",
+    ]
+    .iter()
+    .any(|fragment| {
+        normalized
+            .split(*fragment)
+            .skip(1)
+            .any(|suffix| suffix.is_empty() || suffix.starts_with('\\'))
+    }) {
+        return false;
+    }
     if [
         r"\.cargo\registry",
         r"\.cargo\git",
@@ -655,6 +692,7 @@ fn scan_tool(
             &source,
             &default_executable,
             probes,
+            &mut issues,
         ) {
             installed.push(version);
         }
@@ -672,6 +710,7 @@ fn scan_tool(
                 "EnvNexus AI",
                 &default_executable,
                 probes,
+                &mut issues,
             ) {
                 version.managed = true;
                 version.path = crate::paths::simplify(manifest.installation_path.clone());
@@ -945,12 +984,40 @@ fn inspect_candidate(
     source: &str,
     default_executable: &Option<PathBuf>,
     probes: &mut ToolProbeContext,
+    issues: &mut Vec<DiagnosticIssue>,
 ) -> Option<InstalledVersion> {
     let executable =
         canonical(executable).unwrap_or_else(|| crate::paths::simplify(executable.to_path_buf()));
+    let normalized_executable = normalized_path_key(&executable);
+    let cache_key = format!("{}|{}", descriptor.id, normalized_executable);
+    if let Err(error) =
+        crate::tool_runtime::validate_runtime_dependencies(descriptor.id, &executable)
+    {
+        probes.cache.entries.remove(&cache_key);
+        probes.touched_keys.remove(&cache_key);
+        let code = format!(
+            "{}_MISSING_RUNTIME_DEPENDENCIES_{}",
+            descriptor.id.to_ascii_uppercase(),
+            hex::encode(Sha256::digest(normalized_executable.as_bytes()))
+        );
+        let evidence = executable.to_string_lossy().into_owned();
+        if !issues
+            .iter()
+            .any(|issue| issue.code == code && issue.evidence.as_deref() == Some(evidence.as_str()))
+        {
+            issues.push(DiagnosticIssue {
+                code,
+                level: IssueLevel::Warning,
+                title: format!("{} 安装文件不完整，已跳过版本检测", descriptor.display_name),
+                detail: error.to_string(),
+                evidence: Some(evidence),
+                repairable: false,
+            });
+        }
+        return None;
+    }
     let root = crate::paths::simplify(installation_root_for(descriptor, &executable));
     let fingerprint = tool_probe_fingerprint(descriptor, &executable, &root)?;
-    let cache_key = format!("{}|{}", descriptor.id, normalized_path_key(&executable));
     probes.touched_keys.insert(cache_key.clone());
     let is_default = Some(&executable) == default_executable.as_ref();
     if probes.reuse_cached
@@ -970,7 +1037,19 @@ fn inspect_candidate(
         });
     }
 
-    let output = run_capture(&executable, descriptor.version_args, Duration::from_secs(4)).ok()?;
+    let environment =
+        candidate_process_environment(descriptor.id, &root, &probes.child_environment);
+    let overrides = environment
+        .iter()
+        .map(|(name, value)| (name.as_str(), OsStr::new(value)))
+        .collect::<Vec<_>>();
+    let output = run_capture_with_env(
+        &executable,
+        descriptor.version_args,
+        Duration::from_secs(4),
+        &overrides,
+    )
+    .ok()?;
     let text = output_text(&output);
     let version = if descriptor.id == "android-ndk" {
         package_revision(&root)?
@@ -1005,6 +1084,39 @@ fn inspect_candidate(
         health,
         executable: Some(executable),
     })
+}
+
+fn candidate_process_environment(
+    tool_id: &str,
+    installation_root: &Path,
+    current_environment: &EnvironmentMap,
+) -> EnvironmentMap {
+    let mut environment = current_environment.clone();
+    if tool_id != "rust"
+        || !installation_root
+            .file_name()
+            .is_some_and(|name| name.to_string_lossy().eq_ignore_ascii_case("cargo"))
+    {
+        return environment;
+    }
+    let Some(rustup_home) = installation_root.parent().map(|root| root.join("rustup")) else {
+        return environment;
+    };
+    if !rustup_home.is_dir() {
+        return environment;
+    }
+    environment.retain(|name, _| {
+        !name.eq_ignore_ascii_case("CARGO_HOME") && !name.eq_ignore_ascii_case("RUSTUP_HOME")
+    });
+    environment.insert(
+        "CARGO_HOME".to_string(),
+        installation_root.to_string_lossy().into_owned(),
+    );
+    environment.insert(
+        "RUSTUP_HOME".to_string(),
+        rustup_home.to_string_lossy().into_owned(),
+    );
+    environment
 }
 
 fn cacheable_probe_candidate(source: &str, executable: &Path) -> bool {
@@ -1422,26 +1534,24 @@ fn add_cross_tool_diagnostics(
     if let Some(android) = by_id
         .get("adb")
         .and_then(|tool| tool.default_version.as_ref())
-    {
-        if let Some(java) = by_id
+        && let Some(java) = by_id
             .get("java")
             .and_then(|tool| tool.default_version.as_ref())
-            && drive_key(&android.path) != drive_key(&java.path)
-        {
-            issues.push(DiagnosticIssue {
-                code: "ANDROID_WORKSPACE_DISTRIBUTED".to_string(),
-                level: IssueLevel::Info,
-                title: "Android 依赖当前分布在不同根目录".to_string(),
-                detail: "EnvNexus AI 可以为后续安装建立统一根目录，但不会自动迁移已有目录。"
-                    .to_string(),
-                evidence: Some(format!(
-                    "ADB={} | JDK={}",
-                    android.path.display(),
-                    java.path.display()
-                )),
-                repairable: false,
-            });
-        }
+        && drive_key(&android.path) != drive_key(&java.path)
+    {
+        issues.push(DiagnosticIssue {
+            code: "ANDROID_WORKSPACE_DISTRIBUTED".to_string(),
+            level: IssueLevel::Info,
+            title: "Android 依赖当前分布在不同根目录".to_string(),
+            detail: "EnvNexus AI 可以为后续安装建立统一根目录，但不会自动迁移已有目录。"
+                .to_string(),
+            evidence: Some(format!(
+                "ADB={} | JDK={}",
+                android.path.display(),
+                java.path.display()
+            )),
+            repairable: false,
+        });
     }
 }
 
@@ -1562,6 +1672,188 @@ fn drive_key(path: &Path) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn refresh_without_discovery_index_does_not_create_a_full_disk_index() {
+        let directory = tempfile::tempdir().unwrap();
+        let registry = PluginRegistry::builtin();
+        let index = disk_discovery(&registry, directory.path(), false);
+
+        assert!(index.executables.is_empty());
+        assert!(index.manifests.is_empty());
+        assert!(!disk_discovery_index_path(directory.path()).exists());
+    }
+
+    #[test]
+    fn refresh_with_invalid_discovery_index_does_not_scan_or_overwrite_it() {
+        let unsupported = DiskDiscoveryIndex {
+            schema_version: DISCOVERY_INDEX_SCHEMA + 1,
+            scanned_at: Utc::now(),
+            executables: HashMap::new(),
+            manifests: Vec::new(),
+        };
+        for bytes in [
+            b"{invalid JSON".to_vec(),
+            serde_json::to_vec(&unsupported).unwrap(),
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            let registry = PluginRegistry::builtin();
+            let path = disk_discovery_index_path(directory.path());
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(&path, &bytes).unwrap();
+
+            let index = disk_discovery(&registry, directory.path(), false);
+
+            assert!(index.executables.is_empty());
+            assert!(index.manifests.is_empty());
+            assert_eq!(fs::read(path).unwrap(), bytes);
+        }
+    }
+
+    #[test]
+    fn refresh_reuses_a_valid_discovery_index_without_rewriting_it() {
+        let directory = tempfile::tempdir().unwrap();
+        let registry = PluginRegistry::builtin();
+        let executable = crate::paths::simplify(directory.path().join("python.exe"));
+        fs::write(&executable, b"cached executable; must not be launched").unwrap();
+        let cached = DiskDiscoveryIndex {
+            schema_version: DISCOVERY_INDEX_SCHEMA,
+            scanned_at: chrono::DateTime::from_timestamp(1, 0).unwrap(),
+            executables: HashMap::from([("python".to_string(), vec![executable])]),
+            manifests: Vec::new(),
+        };
+        let bytes = serde_json::to_vec(&cached).unwrap();
+        let path = disk_discovery_index_path(directory.path());
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, &bytes).unwrap();
+
+        let index = disk_discovery(&registry, directory.path(), false);
+
+        assert_eq!(index.scanned_at, cached.scanned_at);
+        assert_eq!(index.executables, cached.executables);
+        assert_eq!(fs::read(path).unwrap(), bytes);
+    }
+
+    #[test]
+    fn managed_rust_probe_uses_its_sibling_homes_and_preserves_fresh_java() {
+        let directory = tempfile::tempdir().unwrap();
+        let installation = directory.path().join("rust").join("1.99.0");
+        let cargo = installation.join("cargo");
+        let rustup = installation.join("rustup");
+        let executable = cargo.join("bin").join("rustc.exe");
+        fs::create_dir_all(executable.parent().unwrap()).unwrap();
+        fs::create_dir_all(&rustup).unwrap();
+        let registry = PluginRegistry::builtin();
+        let rust = registry.get("rust").unwrap();
+        let root = installation_root_for(rust.descriptor(), &executable);
+        let current = EnvironmentMap::from([
+            ("cargo_home".to_string(), r"C:\GlobalCargo".to_string()),
+            ("Rustup_Home".to_string(), r"C:\GlobalRustup".to_string()),
+            (
+                "JAVA_HOME".to_string(),
+                r"E:\Environment\java\21".to_string(),
+            ),
+            (
+                "PATH".to_string(),
+                r"C:\Windows;E:\FreshJava\bin".to_string(),
+            ),
+        ]);
+
+        let managed = candidate_process_environment("rust", &root, &current);
+
+        assert_eq!(managed["CARGO_HOME"], cargo.to_string_lossy());
+        assert_eq!(managed["RUSTUP_HOME"], rustup.to_string_lossy());
+        assert!(!managed.contains_key("cargo_home"));
+        assert!(!managed.contains_key("Rustup_Home"));
+        assert_eq!(managed["JAVA_HOME"], current["JAVA_HOME"]);
+        assert_eq!(managed["PATH"], current["PATH"]);
+        assert_eq!(
+            candidate_process_environment("maven", &root, &current),
+            current
+        );
+        assert_eq!(
+            candidate_process_environment("rust", directory.path(), &current),
+            current
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn candidate_command_receives_fresh_java_without_changing_parent_environment() {
+        let directory = tempfile::tempdir().unwrap();
+        let executable = directory.path().join("maven").join("bin").join("mvn.cmd");
+        fs::create_dir_all(executable.parent().unwrap()).unwrap();
+        fs::write(
+            &executable,
+            b"@echo off\r\nif not \"%JAVA_HOME%\"==\"envnexus-scanner-fresh-java\" exit /b 1\r\necho Apache Maven 3.9.9\r\n",
+        )
+        .unwrap();
+        let original_java = std::env::var_os("JAVA_HOME");
+        let registry = PluginRegistry::builtin();
+        let maven = registry.get("maven").unwrap();
+        let descriptor = maven.descriptor();
+        let pattern = Regex::new(descriptor.version_pattern).unwrap();
+        let mut probes = ToolProbeContext {
+            cache: ToolProbeCache {
+                schema_version: PROBE_CACHE_SCHEMA,
+                entries: HashMap::new(),
+            },
+            touched_keys: HashSet::new(),
+            reuse_cached: false,
+            child_environment: EnvironmentMap::from([(
+                "JAVA_HOME".to_string(),
+                "envnexus-scanner-fresh-java".to_string(),
+            )]),
+        };
+
+        let version = inspect_candidate(
+            descriptor,
+            Some(&pattern),
+            &executable,
+            "EnvNexus AI",
+            &None,
+            &mut probes,
+            &mut Vec::new(),
+        )
+        .unwrap();
+
+        assert_eq!(version.version, "3.9.9");
+        assert_eq!(version.health, HealthLevel::Healthy);
+        assert_eq!(std::env::var_os("JAVA_HOME"), original_java);
+    }
+
+    #[test]
+    fn probe_cache_from_previous_environment_behavior_is_discarded() {
+        let directory = tempfile::tempdir().unwrap();
+        let executable = directory.path().join("python.exe");
+        fs::write(&executable, b"cached executable").unwrap();
+        let registry = PluginRegistry::builtin();
+        let python = registry.get("python").unwrap();
+        let root = installation_root_for(python.descriptor(), &executable);
+        let previous = ToolProbeCache {
+            schema_version: PROBE_CACHE_SCHEMA - 1,
+            entries: HashMap::from([(
+                "previous".to_string(),
+                ToolProbeCacheEntry {
+                    tool_id: "python".to_string(),
+                    executable: executable.clone(),
+                    fingerprint: tool_probe_fingerprint(python.descriptor(), &executable, &root)
+                        .unwrap(),
+                    version: "3.14.6".to_string(),
+                    installation_root: root,
+                    health: HealthLevel::Healthy,
+                },
+            )]),
+        };
+        let path = tool_probe_cache_path(directory.path());
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, serde_json::to_vec(&previous).unwrap()).unwrap();
+
+        let cache = read_tool_probe_cache(&registry, directory.path());
+
+        assert_eq!(cache.schema_version, PROBE_CACHE_SCHEMA);
+        assert!(cache.entries.is_empty());
+    }
 
     #[test]
     fn walks_up_from_executable_to_installation_root() {
@@ -1721,7 +2013,29 @@ mod tests {
             .join("project")
             .join("node_modules")
             .join("node.exe");
-        for executable in [&python, &java, &ignored_node] {
+        let devtools = drive.path().join("project").join(".devtools");
+        let rust = devtools
+            .join("rustup")
+            .join("toolchains")
+            .join("stable-x86_64-pc-windows-msvc")
+            .join("bin")
+            .join("rustc.exe");
+        let cached_executables = [
+            "cargo/registry/src/package/node.exe",
+            "cargo/git/checkouts/package/node.exe",
+            "pnpm-store/v11/files/node.exe",
+            "pnpm-cache/metadata/node.exe",
+            "pnpm-state/node.exe",
+            "npm-cache/node.exe",
+            "pip-cache/package/node.exe",
+            "uv-cache/package/node.exe",
+            "cache/package/node.exe",
+        ]
+        .map(|relative| devtools.join(relative));
+        for executable in [&python, &java, &ignored_node, &rust]
+            .into_iter()
+            .chain(cached_executables.iter())
+        {
             fs::create_dir_all(executable.parent().unwrap()).unwrap();
             fs::write(executable, b"test").unwrap();
         }
@@ -1741,7 +2055,20 @@ mod tests {
                 fs::canonicalize(&java).unwrap()
             )])
         );
+        assert_eq!(
+            index.executables.get("rust"),
+            Some(&vec![crate::paths::simplify(
+                fs::canonicalize(&rust).unwrap()
+            )])
+        );
         assert!(!index.executables.contains_key("node"));
+        assert!(should_scan_disk_entry(drive.path(), &devtools));
+        for relative in ["cargo/registry-tools", "pnpm-store-tools", "cache-tools"] {
+            assert!(should_scan_disk_entry(
+                drive.path(),
+                &devtools.join(relative)
+            ));
+        }
     }
 
     #[test]
@@ -1773,6 +2100,7 @@ mod tests {
             },
             touched_keys: HashSet::new(),
             reuse_cached: true,
+            child_environment: EnvironmentMap::new(),
         };
         let pattern = Regex::new(descriptor.version_pattern).unwrap();
 
@@ -1783,6 +2111,7 @@ mod tests {
             "测试",
             &None,
             &mut probes,
+            &mut Vec::new(),
         )
         .unwrap();
         assert_eq!(cached.version, "3.14.6");
@@ -1796,8 +2125,210 @@ mod tests {
                 "测试",
                 &None,
                 &mut probes,
+                &mut Vec::new(),
             )
             .is_none()
         );
+    }
+
+    fn cached_adb_probe_context(executable: &Path) -> ToolProbeContext {
+        let executable = canonical(executable).unwrap();
+        let registry = PluginRegistry::builtin();
+        let adb = registry.get("adb").unwrap();
+        let descriptor = adb.descriptor();
+        let root = installation_root_for(descriptor, &executable);
+        let fingerprint = tool_probe_fingerprint(descriptor, &executable, &root).unwrap();
+        let key = format!("{}|{}", descriptor.id, normalized_path_key(&executable));
+        ToolProbeContext {
+            cache: ToolProbeCache {
+                schema_version: PROBE_CACHE_SCHEMA,
+                entries: HashMap::from([(
+                    key,
+                    ToolProbeCacheEntry {
+                        tool_id: descriptor.id.to_string(),
+                        executable,
+                        fingerprint,
+                        version: "1.0.41".to_string(),
+                        installation_root: root,
+                        health: HealthLevel::Healthy,
+                    },
+                )]),
+            },
+            touched_keys: HashSet::new(),
+            reuse_cached: true,
+            child_environment: EnvironmentMap::new(),
+        }
+    }
+
+    #[test]
+    fn adb_probe_rejects_cached_version_after_companion_dll_disappears() {
+        let directory = tempfile::tempdir().unwrap();
+        let executable = directory.path().join("adb.exe");
+        fs::write(&executable, b"cached executable; must not be launched").unwrap();
+        for name in ["AdbWinApi.dll", "AdbWinUsbApi.dll"] {
+            fs::write(directory.path().join(name), b"test DLL").unwrap();
+        }
+        let registry = PluginRegistry::builtin();
+        let adb = registry.get("adb").unwrap();
+        let descriptor = adb.descriptor();
+        let pattern = Regex::new(descriptor.version_pattern).unwrap();
+        let mut probes = cached_adb_probe_context(&executable);
+        let mut issues = Vec::new();
+
+        let complete = inspect_candidate(
+            descriptor,
+            Some(&pattern),
+            &executable,
+            "全机磁盘扫描",
+            &None,
+            &mut probes,
+            &mut issues,
+        )
+        .unwrap();
+        assert_eq!(complete.version, "1.0.41");
+        assert!(issues.is_empty());
+
+        fs::remove_file(directory.path().join("AdbWinApi.dll")).unwrap();
+        assert!(
+            inspect_candidate(
+                descriptor,
+                Some(&pattern),
+                &executable,
+                "全机磁盘扫描",
+                &None,
+                &mut probes,
+                &mut issues,
+            )
+            .is_none()
+        );
+        assert!(probes.cache.entries.is_empty());
+        assert!(probes.touched_keys.is_empty());
+        assert_eq!(issues.len(), 1);
+        assert!(
+            issues[0]
+                .code
+                .starts_with("ADB_MISSING_RUNTIME_DEPENDENCIES_")
+        );
+        assert!(issues[0].detail.contains("AdbWinApi.dll"));
+        assert_eq!(
+            issues[0].evidence.as_deref(),
+            Some(canonical(&executable).unwrap().to_string_lossy().as_ref())
+        );
+    }
+
+    #[test]
+    fn scanner_reports_incomplete_adb_once_across_candidate_sources() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("platform-tools");
+        fs::create_dir_all(&root).unwrap();
+        let executable = root.join("adb.exe");
+        fs::write(&executable, b"must not be launched without companion DLLs").unwrap();
+        let manifest = InstallManifest {
+            schema_version: 1,
+            operation_id: "incomplete-adb-test".to_string(),
+            tool_id: "adb".to_string(),
+            version: "1.0.41".to_string(),
+            installed_at: Utc::now(),
+            managed_root: directory.path().to_path_buf(),
+            installation_path: root.clone(),
+            source_url:
+                "https://dl.google.com/android/repository/platform-tools-latest-windows.zip"
+                    .to_string(),
+            checksum_algorithm: None,
+            checksum: None,
+        };
+        let registry = PluginRegistry::builtin();
+        let adb = registry.get("adb").unwrap();
+        let user = EnvironmentMap::from([
+            ("Path".to_string(), root.to_string_lossy().into_owned()),
+            (
+                "ANDROID_SDK_ROOT".to_string(),
+                directory.path().to_string_lossy().into_owned(),
+            ),
+        ]);
+        let mut probes = cached_adb_probe_context(&executable);
+
+        let inventory = scan_tool(
+            adb.as_ref(),
+            &user,
+            &EnvironmentMap::new(),
+            ToolScanSources {
+                manifests: &[manifest],
+                configured_root: Some(directory.path()),
+                disk_executables: std::slice::from_ref(&executable),
+                configured_executables: std::slice::from_ref(&executable),
+            },
+            &mut probes,
+        );
+
+        assert!(inventory.installed_versions.is_empty());
+        assert!(inventory.default_version.is_none());
+        assert_eq!(inventory.issues.len(), 1);
+        let issue = &inventory.issues[0];
+        assert!(issue.code.starts_with("ADB_MISSING_RUNTIME_DEPENDENCIES_"));
+        assert!(issue.detail.contains("AdbWinApi.dll"));
+        assert!(issue.detail.contains("AdbWinUsbApi.dll"));
+        assert!(probes.cache.entries.is_empty());
+    }
+
+    #[test]
+    fn incomplete_adb_diagnostics_have_stable_distinct_ids_for_each_path() {
+        let directory = tempfile::tempdir().unwrap();
+        let executables = ["first", "second"].map(|name| {
+            let executable = directory.path().join(name).join("adb.exe");
+            fs::create_dir_all(executable.parent().unwrap()).unwrap();
+            fs::write(&executable, b"must not be launched without companion DLLs").unwrap();
+            executable
+        });
+        let registry = PluginRegistry::builtin();
+        let adb = registry.get("adb").unwrap();
+        let mut probes = cached_adb_probe_context(&executables[0]);
+        let mut issues = Vec::new();
+
+        for executable in &executables {
+            assert!(
+                inspect_candidate(
+                    adb.descriptor(),
+                    None,
+                    executable,
+                    "全机磁盘扫描",
+                    &None,
+                    &mut probes,
+                    &mut issues,
+                )
+                .is_none()
+            );
+        }
+        assert_eq!(issues.len(), 2);
+        assert!(
+            issues
+                .iter()
+                .all(|issue| issue.code.starts_with("ADB_MISSING_RUNTIME_DEPENDENCIES_"))
+        );
+        assert_ne!(issues[0].code, issues[1].code);
+        assert_ne!(issues[0].evidence, issues[1].evidence);
+
+        let mut repeated = Vec::new();
+        for executable in executables.iter().rev() {
+            inspect_candidate(
+                adb.descriptor(),
+                None,
+                executable,
+                "EnvNexus AI",
+                &None,
+                &mut probes,
+                &mut repeated,
+            );
+        }
+        assert_eq!(repeated.len(), 2);
+        for issue in &issues {
+            assert_eq!(
+                repeated
+                    .iter()
+                    .find(|other| other.evidence == issue.evidence)
+                    .map(|other| &other.code),
+                Some(&issue.code)
+            );
+        }
     }
 }

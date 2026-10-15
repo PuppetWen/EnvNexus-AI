@@ -1,11 +1,18 @@
 param(
-    [string]$ReleaseNotes
+    [string]$ReleaseNotes,
+    [string]$ReleaseNotesFile,
+    [string]$TauriExecutable
 )
 
 $ErrorActionPreference = "Stop"
 $ProjectRoot = Split-Path -Parent $PSScriptRoot
+& (Join-Path $PSScriptRoot 'Use-ProjectCache.ps1')
 $Configuration = Get-Content -LiteralPath (Join-Path $ProjectRoot "src-tauri\tauri.conf.json") -Raw -Encoding UTF8 | ConvertFrom-Json
 $Version = [string]$Configuration.version
+if ($ReleaseNotesFile) {
+    if ($ReleaseNotes) { throw "Provide either -ReleaseNotes or -ReleaseNotesFile, not both." }
+    $ReleaseNotes = Get-Content -LiteralPath $ReleaseNotesFile -Raw -Encoding UTF8
+}
 if (-not $ReleaseNotes) {
     $ReleaseNotes = "EnvNexus AI $Version release."
 }
@@ -20,6 +27,22 @@ foreach ($RequiredFile in @($ExecutableSource, $InstallerSource, $SignatureSourc
         throw "Release input not found: $RequiredFile"
     }
 }
+foreach ($VersionedInput in @($ExecutableSource, $InstallerSource)) {
+    $FileVersion = (Get-Item -LiteralPath $VersionedInput).VersionInfo.FileVersion
+    if (-not $FileVersion -or [version]$FileVersion -ne [version]$Version) {
+        throw "Release input version does not match $Version`: $VersionedInput ($FileVersion)"
+    }
+}
+if (-not $TauriExecutable) {
+    $TauriExecutable = @(
+        (Join-Path $ProjectRoot ".devtools\tauri-cli\bin\cargo-tauri.exe"),
+        (Join-Path $ProjectRoot ".devtools\cargo\bin\cargo-tauri.exe"),
+        (Join-Path $ProjectRoot "node_modules\.bin\tauri.cmd")
+    ) | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } | Select-Object -First 1
+}
+if (-not $TauriExecutable -or -not (Test-Path -LiteralPath $TauriExecutable -PathType Leaf)) {
+    throw "Tauri CLI not found. Install the project dependencies or provide -TauriExecutable."
+}
 
 New-Item -ItemType Directory -Path $ReleaseDirectory -Force | Out-Null
 $PortableName = "EnvNexus-AI_${Version}_x64-portable.exe"
@@ -30,7 +53,8 @@ $InstallerPath = Join-Path $ReleaseDirectory $InstallerName
 $SignaturePath = Join-Path $ReleaseDirectory $SignatureName
 $PortableSignaturePath = "$PortablePath.sig"
 
-Copy-Item -LiteralPath $ExecutableSource -Destination $PortablePath -Force
+& node (Join-Path $PSScriptRoot 'Prepare-Portable.mjs') $ExecutableSource $PortablePath
+if ($LASTEXITCODE -ne 0) { throw 'Portable payload preparation failed.' }
 Copy-Item -LiteralPath $InstallerSource -Destination $InstallerPath -Force
 Copy-Item -LiteralPath $SignatureSource -Destination $SignaturePath -Force
 
@@ -40,10 +64,6 @@ if (-not $env:TAURI_SIGNING_PRIVATE_KEY) {
         throw "Updater signing key not found. Set TAURI_SIGNING_PRIVATE_KEY or restore .devtools\updater\envnexus-ai.key."
     }
     $env:TAURI_SIGNING_PRIVATE_KEY = [System.IO.File]::ReadAllText($LocalSigningKey)
-}
-$TauriExecutable = Join-Path $ProjectRoot "node_modules\.bin\tauri.cmd"
-if (-not (Test-Path -LiteralPath $TauriExecutable -PathType Leaf)) {
-    throw "Tauri CLI not found. Run pnpm install first."
 }
 Remove-Item -LiteralPath $PortableSignaturePath -Force -ErrorAction SilentlyContinue
 if ([string]::IsNullOrEmpty($env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD)) {

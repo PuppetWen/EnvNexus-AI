@@ -3539,6 +3539,13 @@ code {
   font-size: 10.5px;
 }
 
+.catalog-install-note {
+  margin: 0 0 12px;
+  color: var(--text-muted);
+  font-size: 11px;
+  line-height: 1.6;
+}
+
 .source-proof time {
   margin-left: auto;
   color: var(--text-faint);

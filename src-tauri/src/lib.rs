@@ -1,12 +1,14 @@
 mod ai;
 mod app_preferences;
 pub mod application_update;
+mod catalogs;
 pub mod cli;
 mod diagnostics;
 mod environment;
 mod error;
 mod installer;
 mod model;
+mod network_proxy;
 mod paths;
 mod plans;
 mod plugins;
@@ -14,6 +16,7 @@ mod process;
 mod scanner;
 mod sources;
 mod terminal;
+mod tool_runtime;
 mod versioning;
 
 use std::{
@@ -95,7 +98,7 @@ struct TrayMenuStatus {
 
 struct AppState {
     registry: PluginRegistry,
-    client: reqwest::Client,
+    catalogs: catalogs::CatalogService,
     ai_client: reqwest::Client,
     update_client: reqwest::Client,
     plans: PlanService,
@@ -648,30 +651,38 @@ fn recent_operation_logs(
 #[tauri::command]
 async fn fetch_versions(
     tool_id: String,
+    refresh: Option<bool>,
+    app: tauri::AppHandle,
     state: State<'_, Arc<AppState>>,
 ) -> Result<VersionCatalog, String> {
-    let plugin = state.registry.get(&tool_id).map_err(error::command_error)?;
-    let fetched = tokio::time::timeout(
-        std::time::Duration::from_secs(45),
-        plugin.fetch_available_versions(&state.client),
-    )
-    .await;
-    let failure = match fetched {
-        Ok(Ok(mut catalog)) if !catalog.versions.is_empty() => {
-            versioning::sort_remote_versions_descending(&mut catalog.versions);
-            let _ = write_version_catalog_cache(&state.data_root, &catalog);
-            return Ok(catalog);
+    state.registry.get(&tool_id).map_err(error::command_error)?;
+    if !refresh.unwrap_or(false)
+        && let Ok(Some(catalog)) = read_version_catalog_cache(&state.data_root, &tool_id)
+    {
+        if catalogs::needs_refresh(&catalog) {
+            let background = state.inner().clone();
+            tauri::async_runtime::spawn(async move {
+                if let Ok(catalog) = background
+                    .catalogs
+                    .load(&background.registry, &background.data_root, &tool_id, false)
+                    .await
+                {
+                    let _ = app.emit("version-catalog-updated", &catalog);
+                }
+            });
         }
-        Ok(Ok(_)) => "官方源没有返回可安装的 Windows x64 版本".to_string(),
-        Ok(Err(error)) => error.to_string(),
-        Err(_) => "查询超过 45 秒，已停止等待".to_string(),
-    };
-    if let Ok(Some(catalog)) = read_version_catalog_cache(&state.data_root, &tool_id) {
         return Ok(catalog);
     }
-    Err(format!(
-        "官方版本源暂时不可用：{failure}。请检查网络或代理设置后重试"
-    ))
+    state
+        .catalogs
+        .load(
+            &state.registry,
+            &state.data_root,
+            &tool_id,
+            refresh.unwrap_or(false),
+        )
+        .await
+        .map_err(error::command_error)
 }
 
 #[tauri::command]
@@ -694,18 +705,14 @@ async fn preview_install(
     state: State<'_, Arc<AppState>>,
 ) -> Result<OperationPlan, String> {
     let plugin = state.registry.get(&tool_id).map_err(error::command_error)?;
-    let catalog = plugin
-        .fetch_available_versions(&state.client)
+    let remote = state
+        .catalogs
+        .selected_version(&state.registry, &state.data_root, &tool_id, &version)
         .await
         .map_err(error::command_error)?;
-    let remote = catalog
-        .versions
-        .iter()
-        .find(|remote| remote.version == version)
-        .ok_or_else(|| "所选版本不在刚刚查询的官方版本清单中".to_string())?;
     state
         .plans
-        .preview_install(plugin.descriptor(), remote, root)
+        .preview_install(plugin.descriptor(), &remote, root)
         .map_err(error::command_error)
 }
 
@@ -723,20 +730,21 @@ async fn preview_repair(
     if manifest.tool_id != tool_id {
         return Err("受管安装清单与工具 ID 不匹配".to_string());
     }
-    let catalog = plugin
-        .fetch_available_versions(&state.client)
+    let remote = state
+        .catalogs
+        .selected_version(
+            &state.registry,
+            &state.data_root,
+            &tool_id,
+            &manifest.version,
+        )
         .await
         .map_err(error::command_error)?;
-    let remote = catalog
-        .versions
-        .iter()
-        .find(|remote| remote.version == manifest.version)
-        .ok_or_else(|| "官方清单中已找不到该版本，不能安全地自动修复".to_string())?;
     state
         .plans
         .preview_repair(
             plugin.descriptor(),
-            remote,
+            &remote,
             manifest.managed_root,
             manifest.installation_path,
         )
@@ -863,15 +871,36 @@ async fn apply_plan(
                 }
             }
         }
-        _ => state
-            .installer
-            .execute(&plan.id, &plan.action, &app)
-            .await
-            .map_err(error::command_error),
+        _ => Installer::new(
+            download_http_client().map_err(error::command_error)?,
+            state.data_root.clone(),
+        )
+        .execute(&plan.id, &plan.action, &app)
+        .await
+        .map_err(error::command_error),
     }
 }
 
+fn download_http_client() -> error::AppResult<reqwest::Client> {
+    Ok(reqwest::Client::builder()
+        .user_agent(format!("EnvNexus-AI/{}", env!("CARGO_PKG_VERSION")))
+        .https_only(true)
+        .connect_timeout(std::time::Duration::from_secs(20))
+        .read_timeout(std::time::Duration::from_secs(60))
+        .build()?)
+}
+
+fn metadata_http_client() -> error::AppResult<reqwest::Client> {
+    Ok(reqwest::Client::builder()
+        .user_agent(format!("EnvNexus-AI/{}", env!("CARGO_PKG_VERSION")))
+        .https_only(true)
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .timeout(std::time::Duration::from_secs(20))
+        .build()?)
+}
+
 pub fn run() {
+    process::initialize_error_mode();
     let data_root = resolve_data_root();
     if let Err(error) = ensure_data_layout(&data_root) {
         panic!(
@@ -880,19 +909,7 @@ pub fn run() {
         );
     }
     application_update::cleanup_stale_updates(&data_root);
-    let client = reqwest::Client::builder()
-        .user_agent(format!("EnvNexus-AI/{}", env!("CARGO_PKG_VERSION")))
-        .https_only(true)
-        .timeout(std::time::Duration::from_secs(30))
-        .build()
-        .expect("无法创建 HTTP 客户端");
-    let download_client = reqwest::Client::builder()
-        .user_agent(format!("EnvNexus-AI/{}", env!("CARGO_PKG_VERSION")))
-        .https_only(true)
-        .connect_timeout(std::time::Duration::from_secs(20))
-        .read_timeout(std::time::Duration::from_secs(60))
-        .build()
-        .expect("无法创建下载 HTTP 客户端");
+    let download_client = download_http_client().expect("无法创建下载 HTTP 客户端");
     let ai_client = reqwest::Client::builder()
         .user_agent(format!("EnvNexus-AI/{}", env!("CARGO_PKG_VERSION")))
         .https_only(true)
@@ -906,7 +923,7 @@ pub fn run() {
         plans: PlanService::new(data_root.clone()),
         installer: Installer::new(download_client.clone(), data_root.clone()),
         update_client: download_client,
-        client,
+        catalogs: catalogs::CatalogService::default(),
         ai_client,
         data_root,
         app_preferences: RwLock::new(preferences),
@@ -1892,6 +1909,7 @@ fn version_catalog_cache_path(root: &Path, tool_id: &str) -> PathBuf {
 }
 
 fn write_version_catalog_cache(root: &Path, catalog: &VersionCatalog) -> std::io::Result<()> {
+    fs::create_dir_all(root.join("cache").join("version-sources"))?;
     let path = version_catalog_cache_path(root, &catalog.tool_id);
     let bytes = serde_json::to_vec_pretty(catalog).map_err(std::io::Error::other)?;
     write_bytes_atomic(&path, &bytes)

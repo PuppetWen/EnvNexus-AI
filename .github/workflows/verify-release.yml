@@ -1,0 +1,187 @@
+name: Verify and build Windows release
+
+on:
+  push:
+    branches:
+      - main
+      - codex/**
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-verify-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  windows:
+    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
+    runs-on: windows-latest
+    timeout-minutes: 60
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_HOME: ${{ github.workspace }}/.devtools/cargo
+      RUSTUP_HOME: ${{ github.workspace }}/.devtools/rustup
+      RUST_BACKTRACE: '1'
+      HAS_SIGNING_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY != '' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Keep build dependencies and temporary caches in the workspace
+        shell: pwsh
+        run: |
+          & ./scripts/Use-ProjectCache.ps1 -Report
+          'CARGO_HOME','RUSTUP_HOME','CARGO_TARGET_DIR','TEMP','TMP','npm_config_cache','npm_config_store_dir','npm_config_cache_dir','npm_config_state_dir','pnpm_config_store_dir','pnpm_config_cache_dir','pnpm_config_state_dir','PNPM_HOME','COREPACK_HOME','PIP_CACHE_DIR','UV_CACHE_DIR','XDG_CACHE_HOME' | ForEach-Object {
+            "$_=$([Environment]::GetEnvironmentVariable($_, 'Process'))" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          }
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - uses: pnpm/action-setup@v4
+        with:
+          run_install: false
+          dest: ${{ github.workspace }}/../envnexus-pnpm-cli
+
+      - uses: actions/cache@v4
+        id: rust-cache
+        with:
+          path: |
+            .devtools/cargo/registry
+            .devtools/cargo/git/db
+            .devtools/rustup
+            src-tauri/target
+          key: windows-rust-${{ hashFiles('src-tauri/Cargo.lock') }}-${{ github.sha }}
+          restore-keys: |
+            windows-rust-${{ hashFiles('src-tauri/Cargo.lock') }}-
+            windows-rust-
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Check types, frontend tests, Rust format, tests, and clippy
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path artifacts/ci-logs -Force | Out-Null
+          & ./scripts/Verify.ps1 *>&1 | Tee-Object -FilePath artifacts/ci-logs/verification.log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Check live official sources and isolated installation
+        if: github.event_name != 'pull_request'
+        shell: pwsh
+        run: |
+          & ./scripts/Invoke-Rust.ps1 -Task live-sources *>&1 | Tee-Object -FilePath artifacts/ci-logs/live-sources.log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & ./scripts/Invoke-Rust.ps1 -Task live-install *>&1 | Tee-Object -FilePath artifacts/ci-logs/live-install.log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Build signed packages when a signing secret is already configured
+        if: github.event_name != 'pull_request' && env.HAS_SIGNING_KEY == 'true'
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        shell: pwsh
+        run: |
+          & ./scripts/Invoke-Rust.ps1 -Task tauri *>&1 | Tee-Object -FilePath artifacts/ci-logs/bundle.log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & ./scripts/Prepare-Release.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & ./scripts/Invoke-Rust.ps1 -Task release-assets *>&1 | Tee-Object -FilePath artifacts/ci-logs/signature-verification.log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Build unsigned packages without a signing secret
+        if: github.event_name == 'pull_request' || env.HAS_SIGNING_KEY != 'true'
+        shell: pwsh
+        run: |
+          # Unsigned validation builds have no updater manifest and cannot replace signed updates.
+          '{"bundle":{"createUpdaterArtifacts":false}}' | Set-Content -LiteralPath artifacts/ci-unsigned.json -Encoding utf8
+          $config = (Resolve-Path artifacts/ci-unsigned.json).Path
+          & ./node_modules/.bin/tauri.cmd build --ci --config $config *>&1 | Tee-Object -FilePath artifacts/ci-logs/bundle.log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $version = (Get-Content src-tauri/tauri.conf.json -Raw | ConvertFrom-Json).version
+          New-Item -ItemType Directory -Path release -Force | Out-Null
+          & node ./scripts/Prepare-Portable.mjs src-tauri/target/release/envnexus-ai.exe "release/EnvNexus-AI_${version}_x64-portable.exe"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Copy-Item -LiteralPath "src-tauri/target/release/bundle/nsis/EnvNexus AI_${version}_x64-setup.exe" -Destination "release/EnvNexus-AI_${version}_x64-setup.exe"
+          Get-ChildItem release -Filter '*.exe' | ForEach-Object {
+            $hash = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+            "$hash  $($_.Name)"
+          } | Set-Content -LiteralPath release/SHA256SUMS.txt -Encoding utf8
+
+      - name: Upload portable and NSIS packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-packages-${{ github.sha }}
+          path: |
+            release/*.exe
+            release/*.sig
+            release/latest.json
+            release/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Validate the NSIS installer in an isolated directory
+        shell: pwsh
+        run: |
+          $version = (Get-Content src-tauri/tauri.conf.json -Raw | ConvertFrom-Json).version
+          $installRoot = Join-Path $env:GITHUB_WORKSPACE 'artifacts/installed-app'
+          $installer = Join-Path $env:GITHUB_WORKSPACE "release/EnvNexus-AI_${version}_x64-setup.exe"
+          $process = Start-Process -FilePath $installer -ArgumentList @('/S', "/D=$installRoot") -WindowStyle Hidden -Wait -PassThru
+          if ($process.ExitCode -ne 0) { throw "NSIS installation failed: $($process.ExitCode)" }
+          $installed = Join-Path $installRoot 'envnexus-ai.exe'
+          $portable = Join-Path $env:GITHUB_WORKSPACE "release/EnvNexus-AI_${version}_x64-portable.exe"
+          $installedHash = (Get-FileHash $installed -Algorithm SHA256).Hash
+          $portableHash = (Get-FileHash $portable -Algorithm SHA256).Hash
+          [pscustomobject]@{ installed=$installedHash; portable=$portableHash; version=(Get-Item $installed).VersionInfo.FileVersion } | ConvertTo-Json | Tee-Object -FilePath artifacts/ci-logs/installer-payload.json
+          if ($installedHash -ne $portableHash) { throw 'Installed executable differs from the prepared portable payload' }
+          $env:ENVNEXUS_AI_DATA_ROOT = Join-Path $env:GITHUB_WORKSPACE 'artifacts/installed-app-data'
+          $tools = & $installed tools --json | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or @($tools).Count -ne 15) { throw 'Installed application command mode failed' }
+
+      - name: Check command mode and generated scripts using an isolated data directory
+        shell: pwsh
+        run: |
+          & ./scripts/Smoke-Cli.ps1 *>&1 | Tee-Object -FilePath artifacts/ci-logs/cli-smoke.log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Install official tool packages and preview activation
+        if: github.event_name != 'pull_request'
+        shell: pwsh
+        run: |
+          & ./scripts/Smoke-Installability.ps1 *>&1 | Tee-Object -FilePath artifacts/ci-logs/installability.log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Upload test and build reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-reports-${{ github.sha }}
+          path: |
+            artifacts/ci-logs/
+            artifacts/smoke/**/summary.json
+            artifacts/installability-*/summary.json
+            artifacts/installability-*/reports/
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Retain compiled dependencies after test failures
+        if: failure() && steps.rust-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            .devtools/cargo/registry
+            .devtools/cargo/git/db
+            .devtools/rustup
+            src-tauri/target
+          key: windows-rust-${{ hashFiles('src-tauri/Cargo.lock') }}-${{ github.sha }}
