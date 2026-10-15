@@ -78,11 +78,13 @@ ADB 实际执行当前用户环境激活，`activationApplied`、`activationDefa
 
 `ci-logs/installer-payload.json` 记录版本 `0.1.6`，NSIS 安装后的主程序与便携版 SHA-256 均为 `2fd8e082fc89e0192463734b8eb1f48db527da9a0098bccdcb04cd6339f34242`。
 
-0.1.6 签名资产已上传到 draft Release，签名在本机使用原有长期密钥完成，未向云端上传私钥。独立签名验证运行 [38706313686](https://github.com/PuppetWen/EnvNexus-AI/actions/runs/38706313686) 已完成，最终结论 `success`；该工作流从草稿下载六项资产，检查版本、下载 URL、签名侧文件和完整 SHA-256 清单，并使用应用内公钥执行真实 Rust 签名校验。草稿尚不能视为已公开发布；正式发布和公开更新入口、公开资产回读仍待完成。
+签名在本机使用原有长期密钥完成，未向云端上传私钥。独立签名验证运行 [38706313686](https://github.com/PuppetWen/EnvNexus-AI/actions/runs/38706313686) 已完成，最终结论 `success`；该工作流从草稿下载六项资产，检查版本、下载 URL、签名侧文件和完整 SHA-256 清单，并使用应用内公钥执行真实 Rust 签名校验。
+
+[PR #5](https://github.com/PuppetWen/EnvNexus-AI/pull/5) 已合并到 `main`（`b1f7554`）；该提交与 CI5 已验证的 `1ea507c` 仅有三份文档的差异。版本 [v0.1.6](https://github.com/PuppetWen/EnvNexus-AI/releases/tag/v0.1.6) 于 `2026-10-15T09:00:11Z` 正式发布。未携带 GitHub 凭据访问公开 `releases/latest/download/latest.json`，版本为 `0.1.6`，SHA-256 为 `005b69369466a250b1bf90a699af8f9c9cb6bc37f645525fa5b6233ad619daf4`，与已验证清单一致。安装包、便携包、两个签名侧文件、`latest.json` 和 `SHA256SUMS.txt` 六项资产从公开地址重新下载成功，逐文件哈希与本机已验证资产一致；下载后的两个包再次通过签名验证。
 
 ### 验证边界与公开交付状态
 
-Python 修复后的独立 PATH 确认已由前端测试覆盖；本节的 CI 新装和修复通过不表示已在用户开发机执行真实 Python PATH 切换或完成本机 GUI 复测。尚未逐一安装全部 47 个历史 Python 完整运行时，也没有验证所有第三方包、原生扩展编译、IDE 集成或每个工具的真实多版本切换及卸载恢复。当前仍为草稿发行版，正式发布及公开下载回读尚待完成，不宣称公开交付已验证。
+Python 修复后的独立 PATH 确认已由前端测试覆盖；本节的 CI 新装和修复通过不表示已在用户开发机执行真实 Python PATH 切换或完成本机 GUI 复测。尚未逐一安装全部 47 个历史 Python 完整运行时，也没有验证所有第三方包、原生扩展编译、IDE 集成或每个工具的真实多版本切换及卸载恢复。升级应用不会自动替换已有的嵌入式 Python，用户仍需在该版本卡片点击“修复”；修复会重建版本目录，自定义文件和第三方包需事先备份。
 
 ## 0.1.5 验证记录（2026-10-15 UTC）
 
