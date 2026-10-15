@@ -229,11 +229,13 @@ fn disk_discovery(registry: &PluginRegistry, data_root: &Path, force: bool) -> D
         // Saving roots and completing operations only refresh known locations.
         // An absent or invalid index must not silently initiate a full disk scan,
         // nor be persisted as though the user had requested and completed one.
-        return read_disk_discovery_index(registry, data_root).unwrap_or_else(|| DiskDiscoveryIndex {
-            schema_version: DISCOVERY_INDEX_SCHEMA,
-            scanned_at: Utc::now(),
-            executables: HashMap::new(),
-            manifests: Vec::new(),
+        return read_disk_discovery_index(registry, data_root).unwrap_or_else(|| {
+            DiskDiscoveryIndex {
+                schema_version: DISCOVERY_INDEX_SCHEMA,
+                scanned_at: Utc::now(),
+                executables: HashMap::new(),
+                manifests: Vec::new(),
+            }
         });
     }
     let index = discover_disk_index_in_roots(registry, &fixed_drive_roots());
@@ -435,6 +437,28 @@ fn should_scan_disk_entry(root: &Path, path: &Path) -> bool {
         .to_string_lossy()
         .replace('/', "\\")
         .to_ascii_lowercase();
+    // Match only the package caches configured by Use-ProjectCache.ps1.
+    // Keep actual tool installations such as .devtools/rustup and cargo/bin.
+    if [
+        r"\.devtools\cargo\registry",
+        r"\.devtools\cargo\git",
+        r"\.devtools\pnpm-store",
+        r"\.devtools\pnpm-cache",
+        r"\.devtools\pnpm-state",
+        r"\.devtools\npm-cache",
+        r"\.devtools\pip-cache",
+        r"\.devtools\uv-cache",
+        r"\.devtools\cache",
+    ]
+    .iter()
+    .any(|fragment| {
+        normalized
+            .split(*fragment)
+            .skip(1)
+            .any(|suffix| suffix.is_empty() || suffix.starts_with('\\'))
+    }) {
+        return false;
+    }
     if [
         r"\.cargo\registry",
         r"\.cargo\git",
@@ -1668,7 +1692,10 @@ mod tests {
             executables: HashMap::new(),
             manifests: Vec::new(),
         };
-        for bytes in [b"{invalid JSON".to_vec(), serde_json::to_vec(&unsupported).unwrap()] {
+        for bytes in [
+            b"{invalid JSON".to_vec(),
+            serde_json::to_vec(&unsupported).unwrap(),
+        ] {
             let directory = tempfile::tempdir().unwrap();
             let registry = PluginRegistry::builtin();
             let path = disk_discovery_index_path(directory.path());
@@ -1986,7 +2013,29 @@ mod tests {
             .join("project")
             .join("node_modules")
             .join("node.exe");
-        for executable in [&python, &java, &ignored_node] {
+        let devtools = drive.path().join("project").join(".devtools");
+        let rust = devtools
+            .join("rustup")
+            .join("toolchains")
+            .join("stable-x86_64-pc-windows-msvc")
+            .join("bin")
+            .join("rustc.exe");
+        let cached_executables = [
+            "cargo/registry/src/package/node.exe",
+            "cargo/git/checkouts/package/node.exe",
+            "pnpm-store/v11/files/node.exe",
+            "pnpm-cache/metadata/node.exe",
+            "pnpm-state/node.exe",
+            "npm-cache/node.exe",
+            "pip-cache/package/node.exe",
+            "uv-cache/package/node.exe",
+            "cache/package/node.exe",
+        ]
+        .map(|relative| devtools.join(relative));
+        for executable in [&python, &java, &ignored_node, &rust]
+            .into_iter()
+            .chain(cached_executables.iter())
+        {
             fs::create_dir_all(executable.parent().unwrap()).unwrap();
             fs::write(executable, b"test").unwrap();
         }
@@ -2006,7 +2055,17 @@ mod tests {
                 fs::canonicalize(&java).unwrap()
             )])
         );
+        assert_eq!(
+            index.executables.get("rust"),
+            Some(&vec![crate::paths::simplify(
+                fs::canonicalize(&rust).unwrap()
+            )])
+        );
         assert!(!index.executables.contains_key("node"));
+        assert!(should_scan_disk_entry(drive.path(), &devtools));
+        for relative in ["cargo/registry-tools", "pnpm-store-tools", "cache-tools"] {
+            assert!(should_scan_disk_entry(drive.path(), &devtools.join(relative)));
+        }
     }
 
     #[test]

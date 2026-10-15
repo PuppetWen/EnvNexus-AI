@@ -33,9 +33,12 @@ EnvNexus AI 是一款使用 Rust + Tauri 2 开发的 Windows 桌面 App。它把
 - 管理 Python、Java/JDK、Go、Rust、Node.js、Git、Maven、.NET SDK、Ruby、PHP，以及 Android SDK、NDK、JDK、Gradle、CMake、ADB。
 - 每个工具都有独立页面和独立安装根目录；Android 组件集中使用同一个用户指定根目录。
 - 显示当前默认版本、本机全部版本、官方可安装版本、安装位置和环境状态。
+- 官方版本列表优先显示已有缓存，过期内容在后台刷新；合并重复查询，安装前获取选中版本所需的校验信息。
 - 手动全机扫描会遍历所有本地固定磁盘并建立索引；App 启动时只读取快照，安装、切换和修复后使用文件指纹增量刷新。
+- 首次保存安装目录不会触发全盘扫描；尚无全机索引时，只检查配置目录和当前 PATH 中的工具。
 - 增量刷新复用未变化工具的已验证版本，仅对新增或发生变化的可执行文件重新探测；手动全机扫描始终强制复核。
 - 切换默认版本前显示用户级 PATH/环境变量差异、冲突、备份和确认计划；系统级修改默认拒绝。
+- 安装完成后自动展示环境配置计划，可确认设为默认版本，也可选择仅保留安装。
 - 支持断点续传、哈希校验、安全解压、暂存安装、失败回滚、环境备份、操作日志和诊断报告。
 - 识别 pyenv-win、NVM for Windows、fnm、Volta、rustup、Jabba、goenv、rbenv、Uru 等版本管理器，并在诊断和修复建议中保护它们的 shim、链接与根目录。
 - 生成 `jdk-list`、`python-install`、`env-diagnose` 等 CMD 脚本；脚本调用同一个主程序，可从任意新开的 CMD 或 PowerShell 使用。
@@ -54,8 +57,8 @@ AI 不会绕过本地安全边界：它不能直接修改环境。任何一键�
 
 从 [GitHub Releases](https://github.com/PuppetWen/EnvNexus-AI/releases/latest) 下载：
 
-- `EnvNexus-AI_0.1.4_x64-setup.exe`：当前用户安装版，可选择安装目录；检测到已有安装时会复用原路径并原地升级。
-- `EnvNexus-AI_0.1.4_x64-portable.exe`：便携主程序；App 内更新会在原路径安全自替换。
+- `EnvNexus-AI_0.1.5_x64-setup.exe`：当前用户安装版，可选择安装目录；检测到已有安装时会复用原路径并原地升级。
+- `EnvNexus-AI_0.1.5_x64-portable.exe`：便携主程序；App 内更新会在原路径安全自替换。
 - `SHA256SUMS.txt`：下载文件校验值。
 
 首次打开不会扫描电脑。可先进入“工具链”为各工具设置目录，再按需扫描或查询官方版本。
@@ -87,7 +90,8 @@ App 启动后会连接本仓库的最新 GitHub Release 检查版本，“设置
 要求 Windows 10/11、Node.js、pnpm、Rust stable、Visual Studio 2022 C++ Build Tools 和 Windows SDK：
 
 ```powershell
-pnpm install
+.\scripts\Use-ProjectCache.ps1
+pnpm install --frozen-lockfile
 .\scripts\Verify.ps1
 .\scripts\Invoke-Rust.ps1 -Task tauri
 ```
@@ -111,9 +115,12 @@ EnvNexus AI is a Windows desktop application built with Rust and Tauri 2. It pro
 - Manages Python, Java/JDK, Go, Rust, Node.js, Git, Maven, .NET SDK, Ruby, PHP, and the Android SDK/NDK/JDK/Gradle/CMake/ADB toolchain.
 - Gives every tool its own management page and selectable installation root. Android components share one user-selected root.
 - Shows the current default, every locally installed version, official releases, locations, and environment health.
+- Shows cached official catalogs first, refreshes stale results in the background, and merges duplicate queries. Installation fetches the selected version's required checksum metadata.
 - Full scans index every local fixed disk without relying on preset installation paths. Startup restores the last snapshot without traversing disks.
+- Saving an installation root never starts a whole-computer scan. Before an index exists, refreshes check configured roots and the current PATH.
 - Fingerprinted incremental refreshes re-run only changed tools while the active PATH defaults are always verified live.
 - Previews user PATH/environment changes, conflicts, backups, and confirmation plans before switching a default version. System-level writes are denied by default.
+- After installation, previews environment setup so you can confirm the new default or keep only the installation.
 - Supports resumable downloads, checksum verification, safe extraction, staged commits, rollback, logs, backups, and diagnostics.
 - Detects existing managers such as pyenv-win, NVM for Windows, fnm, Volta, rustup, Jabba, goenv, rbenv, and Uru.
 - Generates commands such as `jdk-list`, `python-install`, and `env-diagnose` for any new CMD or PowerShell session.
@@ -131,8 +138,8 @@ AI cannot bypass local safety controls or directly change the environment. One-c
 
 Download the latest build from [GitHub Releases](https://github.com/PuppetWen/EnvNexus-AI/releases/latest):
 
-- `EnvNexus-AI_0.1.4_x64-setup.exe`: per-user installer with a selectable install directory. Existing installations are upgraded in their previous location.
-- `EnvNexus-AI_0.1.4_x64-portable.exe`: portable executable. In-app updates safely replace it in its original location.
+- `EnvNexus-AI_0.1.5_x64-setup.exe`: per-user installer with a selectable install directory. Existing installations are upgraded in their previous location.
+- `EnvNexus-AI_0.1.5_x64-portable.exe`: portable executable. In-app updates safely replace it in its original location.
 - `SHA256SUMS.txt`: release checksums.
 
 The first launch does not scan the machine. You can configure each tool's installation root before running a scan or querying official releases.
@@ -163,7 +170,8 @@ EnvNexus AI checks the latest GitHub Release once after the interface opens. The
 Windows 10/11, Node.js, pnpm, stable Rust, Visual Studio 2022 C++ Build Tools, and the Windows SDK are required:
 
 ```powershell
-pnpm install
+.\scripts\Use-ProjectCache.ps1
+pnpm install --frozen-lockfile
 .\scripts\Verify.ps1
 .\scripts\Invoke-Rust.ps1 -Task tauri
 ```

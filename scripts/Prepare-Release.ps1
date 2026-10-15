@@ -53,7 +53,8 @@ $InstallerPath = Join-Path $ReleaseDirectory $InstallerName
 $SignaturePath = Join-Path $ReleaseDirectory $SignatureName
 $PortableSignaturePath = "$PortablePath.sig"
 
-Copy-Item -LiteralPath $ExecutableSource -Destination $PortablePath -Force
+& node (Join-Path $PSScriptRoot 'Prepare-Portable.mjs') $ExecutableSource $PortablePath
+if ($LASTEXITCODE -ne 0) { throw 'Portable payload preparation failed.' }
 Copy-Item -LiteralPath $InstallerSource -Destination $InstallerPath -Force
 Copy-Item -LiteralPath $SignatureSource -Destination $SignaturePath -Force
 

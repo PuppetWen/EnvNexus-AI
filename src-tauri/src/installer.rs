@@ -1301,10 +1301,18 @@ fn install_rust(_tool_id: &str, version: &str, installer: &Path, staging: &Path)
     let cargo_home = staging.join("cargo");
     let rustup_home = staging.join("rustup");
     let toolchain = format!("{version}-x86_64-pc-windows-msvc");
-    let mut environment = crate::network_proxy::child_download_environment(current_process_environment()?);
-    environment.insert("CARGO_HOME".to_string(), cargo_home.to_string_lossy().into_owned());
-    environment.insert("RUSTUP_HOME".to_string(), rustup_home.to_string_lossy().into_owned());
-    let environment = environment.iter()
+    let mut environment =
+        crate::network_proxy::child_download_environment(current_process_environment()?);
+    environment.insert(
+        "CARGO_HOME".to_string(),
+        cargo_home.to_string_lossy().into_owned(),
+    );
+    environment.insert(
+        "RUSTUP_HOME".to_string(),
+        rustup_home.to_string_lossy().into_owned(),
+    );
+    let environment = environment
+        .iter()
         .map(|(key, value)| (key.as_str(), std::ffi::OsStr::new(value)))
         .collect::<Vec<_>>();
     let output = run_capture_with_env(
@@ -1819,8 +1827,12 @@ mod tests {
                     }
                 };
                 stream.set_nonblocking(false).unwrap();
-                stream.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
-                stream.set_write_timeout(Some(Duration::from_secs(2))).unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(2)))
+                    .unwrap();
+                stream
+                    .set_write_timeout(Some(Duration::from_secs(2)))
+                    .unwrap();
                 let mut request = Vec::new();
                 let mut buffer = [0_u8; 1024];
                 while !request.windows(4).any(|window| window == b"\r\n\r\n") {
@@ -1831,12 +1843,16 @@ mod tests {
                 let request = String::from_utf8(request).unwrap().to_ascii_lowercase();
                 if redirected {
                     assert!(request.starts_with("get /~windows/releases/php.zip http/1.1\r\n"));
-                    assert!(request.contains(&format!("\r\nhost: downloads.php.net:{}\r\n", address.port())));
+                    assert!(request.contains(&format!(
+                        "\r\nhost: downloads.php.net:{}\r\n",
+                        address.port()
+                    )));
                     write!(
                         stream,
                         "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                         payload.len()
-                    ).unwrap();
+                    )
+                    .unwrap();
                     stream.write_all(payload).unwrap();
                 } else {
                     assert!(request.starts_with("get /php.zip http/1.1\r\n"));

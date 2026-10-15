@@ -9,6 +9,9 @@ $ProjectRoot = Split-Path -Parent $PSScriptRoot
 & (Join-Path $PSScriptRoot 'Use-ProjectCache.ps1')
 Push-Location $ProjectRoot
 try {
+    & node --test (Join-Path $PSScriptRoot 'Prepare-Portable.nodecheck.mjs')
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
     & ".\node_modules\.bin\tsc.cmd" --noEmit
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 

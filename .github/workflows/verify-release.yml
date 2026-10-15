@@ -119,12 +119,43 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $version = (Get-Content src-tauri/tauri.conf.json -Raw | ConvertFrom-Json).version
           New-Item -ItemType Directory -Path release -Force | Out-Null
-          Copy-Item -LiteralPath src-tauri/target/release/envnexus-ai.exe -Destination "release/EnvNexus-AI_${version}_x64-portable.exe"
+          & node ./scripts/Prepare-Portable.mjs src-tauri/target/release/envnexus-ai.exe "release/EnvNexus-AI_${version}_x64-portable.exe"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           Copy-Item -LiteralPath "src-tauri/target/release/bundle/nsis/EnvNexus AI_${version}_x64-setup.exe" -Destination "release/EnvNexus-AI_${version}_x64-setup.exe"
           Get-ChildItem release -Filter '*.exe' | ForEach-Object {
             $hash = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
             "$hash  $($_.Name)"
           } | Set-Content -LiteralPath release/SHA256SUMS.txt -Encoding utf8
+
+      - name: Upload portable and NSIS packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-packages-${{ github.sha }}
+          path: |
+            release/*.exe
+            release/*.sig
+            release/latest.json
+            release/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Validate the NSIS installer in an isolated directory
+        shell: pwsh
+        run: |
+          $version = (Get-Content src-tauri/tauri.conf.json -Raw | ConvertFrom-Json).version
+          $installRoot = Join-Path $env:GITHUB_WORKSPACE 'artifacts/installed-app'
+          $installer = Join-Path $env:GITHUB_WORKSPACE "release/EnvNexus-AI_${version}_x64-setup.exe"
+          $process = Start-Process -FilePath $installer -ArgumentList @('/S', "/D=$installRoot") -WindowStyle Hidden -Wait -PassThru
+          if ($process.ExitCode -ne 0) { throw "NSIS installation failed: $($process.ExitCode)" }
+          $installed = Join-Path $installRoot 'envnexus-ai.exe'
+          $portable = Join-Path $env:GITHUB_WORKSPACE "release/EnvNexus-AI_${version}_x64-portable.exe"
+          $installedHash = (Get-FileHash $installed -Algorithm SHA256).Hash
+          $portableHash = (Get-FileHash $portable -Algorithm SHA256).Hash
+          [pscustomobject]@{ installed=$installedHash; portable=$portableHash; version=(Get-Item $installed).VersionInfo.FileVersion } | ConvertTo-Json | Tee-Object -FilePath artifacts/ci-logs/installer-payload.json
+          if ($installedHash -ne $portableHash) { throw 'Installed executable differs from the prepared portable payload' }
+          $env:ENVNEXUS_AI_DATA_ROOT = Join-Path $env:GITHUB_WORKSPACE 'artifacts/installed-app-data'
+          $tools = & $installed tools --json | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or @($tools).Count -ne 15) { throw 'Installed application command mode failed' }
 
       - name: Check command mode and generated scripts using an isolated data directory
         shell: pwsh
@@ -138,32 +169,6 @@ jobs:
         run: |
           & ./scripts/Smoke-Installability.ps1 *>&1 | Tee-Object -FilePath artifacts/ci-logs/installability.log
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-
-      - name: Validate the NSIS installer in an isolated directory
-        shell: pwsh
-        run: |
-          $version = (Get-Content src-tauri/tauri.conf.json -Raw | ConvertFrom-Json).version
-          $installRoot = Join-Path $env:GITHUB_WORKSPACE 'artifacts/installed-app'
-          $installer = Join-Path $env:GITHUB_WORKSPACE "release/EnvNexus-AI_${version}_x64-setup.exe"
-          $process = Start-Process -FilePath $installer -ArgumentList @('/S', "/D=$installRoot") -WindowStyle Hidden -Wait -PassThru
-          if ($process.ExitCode -ne 0) { throw "NSIS installation failed: $($process.ExitCode)" }
-          $installed = Join-Path $installRoot 'envnexus-ai.exe'
-          if ((Get-FileHash $installed).Hash -ne (Get-FileHash 'src-tauri/target/release/envnexus-ai.exe').Hash) { throw 'Installed executable differs from the verified portable build' }
-          $env:ENVNEXUS_AI_DATA_ROOT = Join-Path $env:GITHUB_WORKSPACE 'artifacts/installed-app-data'
-          $tools = & $installed tools --json | ConvertFrom-Json
-          if ($LASTEXITCODE -ne 0 -or @($tools).Count -ne 15) { throw 'Installed application command mode failed' }
-
-      - name: Upload portable and NSIS packages
-        uses: actions/upload-artifact@v4
-        with:
-          name: windows-packages-${{ github.sha }}
-          path: |
-            release/*.exe
-            release/*.sig
-            release/latest.json
-            release/SHA256SUMS.txt
-          if-no-files-found: error
-          retention-days: 14
 
       - name: Upload test and build reports
         if: always()

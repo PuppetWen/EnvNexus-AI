@@ -158,6 +158,8 @@ NSIS 使用 `currentUser` 安装模式和 Tauri 默认安装器模板，并配�
 
 Tauri updater 的 minisign 签名只用于更新包完整性与来源校验，不等同于 Windows Authenticode；正式分发前仍建议配置 Windows 代码签名证书。
 
+`Prepare-Portable.mjs` 在签名前为便携副本写入与 Tauri NSIS 相同的 bundle 标记，保留编译输出原件。CI 静默安装 NSIS 后逐字节校验主程序与发布便携包的 SHA-256 一致，以兼容旧更新器的目标校验。脚本会拒绝已含 Authenticode 签名的输入；将来添加代码签名时，必须在签名前处理标记并继续保证两种交付方式使用相同的已签名主程序。
+
 ## 构建环境警告
 
 当前项目内 xwin SDK 的 MSVC 静态运行库不包含调试 PDB，Release 链接会显示 `LNK4099`。链接成功且二进制可启动；该警告只表示无法为系统运行库对象加载调试符号。使用完整 Windows SDK/Visual Studio 安装时通常不会出现。

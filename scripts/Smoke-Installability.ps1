@@ -139,11 +139,165 @@ function Invoke-AppJson([string[]]$CommandArguments) {
     ($taskOutput -join [Environment]::NewLine) | ConvertFrom-Json
 }
 
+function Get-UserRegistrySnapshot([object[]]$Diffs) {
+    $taskNames = @{}
+    $taskKey = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment', $false)
+    if (-not $taskKey) { throw 'HKCU\Environment is unavailable on this runner.' }
+    try {
+        $taskExistingNames = @($taskKey.GetValueNames())
+        foreach ($taskDiff in $Diffs) {
+            $taskName = [string]$taskDiff.variable
+            if ($taskDiff.scope -ne 'user' -or $taskName -notin @('Path','ANDROID_HOME','ANDROID_SDK_ROOT') -or $taskNames.ContainsKey($taskName)) {
+                throw 'ADB activation contains an unexpected scope or duplicate/unexpected variable.'
+            }
+            $taskNames[$taskName] = $true
+            $taskOriginalName = $taskExistingNames | Where-Object { $_ -ieq $taskName } | Select-Object -First 1
+            $taskExists = $null -ne $taskOriginalName
+            $taskOriginalKind = $null
+            [object]$taskOriginalRawValue = $null
+            if ($taskExists) {
+                $taskOriginalKind = $taskKey.GetValueKind($taskOriginalName)
+                $taskOriginalRawValue = $taskKey.GetValue($taskOriginalName, $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+            }
+            [pscustomobject]@{
+                requestedName=$taskName; originalName=$taskOriginalName; existed=$taskExists;
+                kind=$taskOriginalKind; rawValue=$taskOriginalRawValue
+            }
+        }
+    } finally { $taskKey.Dispose() }
+}
+
+function Restore-UserRegistrySnapshot([object[]]$Snapshots) {
+    if ($env:CI -ne 'true' -or $env:GITHUB_ACTIONS -ne 'true') { throw 'Registry restoration is restricted to the isolated GitHub CI runner.' }
+    $taskRestoreErrors = @()
+    $taskKey = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment', $true)
+    if (-not $taskKey) { $taskKey = [Microsoft.Win32.Registry]::CurrentUser.CreateSubKey('Environment') }
+    try {
+        foreach ($taskSnapshot in $Snapshots) {
+            try {
+                if ($taskSnapshot.existed) {
+                    $taskCurrentName = @($taskKey.GetValueNames()) | Where-Object { $_ -ieq $taskSnapshot.requestedName } | Select-Object -First 1
+                    if ($null -ne $taskCurrentName -and $taskCurrentName -cne $taskSnapshot.originalName) {
+                        $taskKey.DeleteValue($taskCurrentName, $false)
+                    }
+                    $taskKey.SetValue($taskSnapshot.originalName, $taskSnapshot.rawValue, [Microsoft.Win32.RegistryValueKind]$taskSnapshot.kind)
+                } else {
+                    $taskKey.DeleteValue($taskSnapshot.requestedName, $false)
+                }
+            } catch { $taskRestoreErrors += "$($taskSnapshot.requestedName): $($_.Exception.Message)" }
+        }
+        $taskKey.Flush()
+        foreach ($taskSnapshot in $Snapshots) {
+            try {
+                $taskCurrentName = @($taskKey.GetValueNames()) | Where-Object { $_ -ieq $taskSnapshot.requestedName } | Select-Object -First 1
+                if (-not $taskSnapshot.existed) {
+                    if ($null -ne $taskCurrentName) { throw 'A previously absent value still exists.' }
+                    continue
+                }
+                if ($taskCurrentName -cne $taskSnapshot.originalName -or $taskKey.GetValueKind($taskCurrentName) -ne $taskSnapshot.kind) {
+                    throw 'The original registry value name or kind was not restored.'
+                }
+                $taskRaw = $taskKey.GetValue($taskCurrentName, $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+                $taskBeforeJson = ConvertTo-Json -InputObject $taskSnapshot.rawValue -Compress -Depth 5
+                $taskRestoredJson = ConvertTo-Json -InputObject $taskRaw -Compress -Depth 5
+                if ($taskBeforeJson -cne $taskRestoredJson) { throw 'The original unexpanded registry data was not restored.' }
+            } catch { $taskRestoreErrors += "$($taskSnapshot.requestedName): $($_.Exception.Message)" }
+        }
+    } finally { $taskKey.Dispose() }
+    if ($taskRestoreErrors.Count -gt 0) { throw ('Registry restoration failed: ' + ($taskRestoreErrors -join ' | ')) }
+}
+
+function Test-AdbActivation([object]$Plan, [string]$Installation, [object]$Result) {
+    if ($env:CI -ne 'true' -or $env:GITHUB_ACTIONS -ne 'true') { throw 'Actual ADB activation is restricted to the isolated GitHub CI runner.' }
+    $Result.activationApplied = 'not-checked'
+    $Result.activationDefaultVerified = 'not-checked'
+    if ($Plan.requiresElevation) {
+        $Result.activationApplied = 'blocked'
+        throw 'ADB activation is blocked by system PATH; this check will not bypass that conflict.'
+    }
+    $taskDiffs = @($Plan.environmentDiffs)
+    foreach ($taskRequiredName in @('Path','ANDROID_HOME','ANDROID_SDK_ROOT')) {
+        if (@($taskDiffs | Where-Object { $_.variable -ieq $taskRequiredName }).Count -ne 1) {
+            throw "ADB activation is missing the expected user variable diff: $taskRequiredName"
+        }
+    }
+    $taskSnapshots = @(Get-UserRegistrySnapshot $taskDiffs)
+    Save-JsonReport @($taskSnapshots | Select-Object requestedName,originalName,existed,kind) (Join-Path $taskToolReport 'activation-registry-before.json')
+    $Result.userEnvironmentRestored = 'pending'
+    $taskActivationErrors = @()
+    try {
+        $Result.stage = 'activation-apply'
+        $taskApplied = Invoke-AppJson @('use','adb',$Installation,'--yes','--json')
+        Save-JsonReport $taskApplied (Join-Path $taskToolReport 'activation-applied.json')
+        if ($taskApplied.status -ne 'committed') { throw 'Actual ADB activation did not commit.' }
+        $Result.activationApplied = 'passed'
+        $Result.stage = 'activation-registry-readback'
+        $taskReadbacks = @()
+        $taskKey = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment', $false)
+        if (-not $taskKey) { throw 'The applied user environment registry key is unavailable.' }
+        try {
+            $taskCurrentNames = @($taskKey.GetValueNames())
+            foreach ($taskDiff in $taskDiffs) {
+                $taskCurrentName = $taskCurrentNames | Where-Object { $_ -ieq $taskDiff.variable } | Select-Object -First 1
+                if ($null -eq $taskDiff.after) {
+                    if ($null -ne $taskCurrentName) { throw "ADB activation did not remove $($taskDiff.variable) as planned." }
+                } else {
+                    if ($null -eq $taskCurrentName) { throw "ADB activation did not write $($taskDiff.variable)." }
+                    $taskRaw = $taskKey.GetValue($taskCurrentName, $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+                    if ($taskRaw -isnot [string] -or $taskRaw -cne [string]$taskDiff.after) {
+                        throw "ADB activation registry readback differs from the preview: $($taskDiff.variable)"
+                    }
+                    $taskReadbacks += [pscustomobject]@{ variable=$taskCurrentName; kind=$taskKey.GetValueKind($taskCurrentName).ToString(); value=$taskRaw }
+                }
+            }
+            $taskUserPath = [string]$taskKey.GetValue('Path', $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+            $taskPathContainsAdb = @($taskUserPath -split ';' | Where-Object { $_.Trim().Trim('"') -ieq $Installation }).Count -gt 0
+            if (-not $taskPathContainsAdb) { throw 'The user PATH does not contain the installed ADB directory.' }
+            $taskAndroidRoot = Get-NormalizedAbsolutePath ([IO.Path]::GetDirectoryName($Installation))
+            foreach ($taskName in @('ANDROID_HOME','ANDROID_SDK_ROOT')) {
+                $taskValue = [string]$taskKey.GetValue($taskName, $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+                if ((Get-NormalizedAbsolutePath $taskValue) -ine $taskAndroidRoot) { throw "$taskName does not point to the selected Android root." }
+            }
+        } finally { $taskKey.Dispose() }
+        Save-JsonReport $taskReadbacks (Join-Path $taskToolReport 'activation-registry-readback.json')
+        $Result.stage = 'activation-default'
+        $taskRefresh = Invoke-AppJson @('refresh','--json')
+        Save-JsonReport $taskRefresh (Join-Path $taskToolReport 'activation-refresh.json')
+        $taskAdbList = Invoke-AppJson @('list','adb','--json')
+        Save-JsonReport $taskAdbList (Join-Path $taskToolReport 'activation-default.json')
+        $taskDefault = $taskAdbList.inventory.defaultVersion
+        $taskExpectedExecutable = Get-NormalizedAbsolutePath (Join-Path $Installation 'adb.exe')
+        if (-not $taskDefault -or -not $taskDefault.executable -or
+            (Get-NormalizedAbsolutePath ([string]$taskDefault.executable)) -ine $taskExpectedExecutable -or -not $taskDefault.isDefault) {
+            throw 'The freshly read default ADB command is not the installed adb.exe.'
+        }
+        $Result.activationDefaultVerified = 'passed'
+    } catch {
+        if ($Result.activationApplied -ne 'passed') { $Result.activationApplied = 'failed' }
+        if ($Result.activationDefaultVerified -ne 'passed') { $Result.activationDefaultVerified = 'failed' }
+        $taskActivationErrors += $_.Exception.Message
+    } finally {
+        try {
+            Restore-UserRegistrySnapshot $taskSnapshots
+            $Result.userEnvironmentRestored = 'passed'
+        } catch {
+            $Result.userEnvironmentRestored = 'failed'
+            $taskActivationErrors += $_.Exception.Message
+        }
+        Save-JsonReport ([pscustomobject]@{
+            activationApplied=$Result.activationApplied; activationDefaultVerified=$Result.activationDefaultVerified;
+            userEnvironmentRestored=$Result.userEnvironmentRestored
+        }) (Join-Path $taskToolReport 'activation-result.json')
+    }
+    if ($taskActivationErrors.Count -gt 0) { throw ($taskActivationErrors -join ' | ') }
+}
+
 $taskEnvironmentBefore = Get-EnvironmentFingerprint
 $taskResults = @($ToolIds | ForEach-Object {
     [pscustomobject][ordered]@{
         tool=$_; version=$null; status='failed'; stage='not-started'; installationStatus=$null;
         seconds=0; installationPath=$null; manifest='not-checked'; activationPreview='not-checked';
+        activationApplied='not-requested'; activationDefaultVerified='not-requested'; userEnvironmentRestored='not-required';
         switchBlockedBySystemPath=$null; catalogCache='not-checked'; userEnvironment='not-checked';
         cachedDownloadBytes=0L; installedBytes=0L; cleanup='not-started'; error='The tool has not been attempted.'
     }
@@ -248,6 +402,9 @@ try {
             if ($taskPlan.actionKind -ne 'switch' -or @($taskPlan.environmentDiffs).Count -eq 0) { throw "$taskTool activation preview is incomplete." }
             $taskResult.activationPreview = 'passed'
             $taskResult.switchBlockedBySystemPath = [bool]$taskPlan.requiresElevation
+            if ($taskTool -eq 'adb') {
+                Test-AdbActivation $taskPlan $taskInstallation $taskResult
+            }
             $taskResult.stage = 'catalog-cache'
             $taskCached = Invoke-AppJson @('versions',$taskTool,'--json')
             if (-not $taskCached.cached) { throw "$taskTool did not reuse its successful catalog." }

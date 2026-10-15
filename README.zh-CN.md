@@ -7,15 +7,19 @@ EnvNexus AI 是面向 Windows 10/11 的开发环境与多版本工具链管理�
 ## 主要能力
 
 - 管理 Python、Java/JDK、Go、Rust、Node.js、Git、Maven、.NET SDK、Ruby、PHP、Android SDK/NDK、Gradle、CMake 和 ADB。
-- 扫描电脑上的全部本地固定磁盘，不依赖固定用户名、桌面目录或预设安装路径。
+- 按需手动扫描全部本地固定磁盘，不依赖固定用户名、桌面目录或预设安装路径。
+- 官方版本清单优先显示已有缓存，过期后在后台刷新；合并重复查询，安装前补齐选中版本的校验信息。
 - 运行工具自身的版本命令验证候选，按工具类型归类，并按数字版本倒序展示。
 - 读取最新用户级和系统级 PATH，识别当前默认版本；安装或切换后立即刷新。
+- 安装完成后展示 PATH 和工具变量配置计划，可确认设为默认版本或仅保留安装。
 - 识别 pyenv-win、NVM for Windows、fnm、Volta、rustup、Jabba、goenv、rbenv 和 Uru 等版本管理器。
 - 支持续传下载、哈希与签名校验、安全解压、事务安装、失败回滚和环境备份。
 - 安装版可以选择目录并原地升级；便携版在原路径安全自替换。
 - 支持托盘驻留、开机启动、多语言、五套主题及可选 AI 诊断增强。
 
 ## 全机扫描与增量刷新
+
+App 启动不遍历全盘。首次保存安装目录时，即使没有全机索引，也只检查配置目录和当前 PATH 中的工具，不会自动启动全盘扫描。
 
 首次点击“扫描整台电脑”或执行 `env-scan` 时，程序遍历所有本地固定磁盘，建立：
 
@@ -47,8 +51,8 @@ EnvNexus AI 是面向 Windows 10/11 的开发环境与多版本工具链管理�
 
 从 [GitHub Releases](https://github.com/PuppetWen/EnvNexus-AI/releases/latest) 获取：
 
-- `EnvNexus-AI_0.1.4_x64-setup.exe`：安装版，可选择安装目录；已有安装会复用原目录覆盖升级。
-- `EnvNexus-AI_0.1.4_x64-portable.exe`：便携版，可放在任意可写目录运行。
+- `EnvNexus-AI_0.1.5_x64-setup.exe`：安装版，可选择安装目录；已有安装会复用原目录覆盖升级。
+- `EnvNexus-AI_0.1.5_x64-portable.exe`：便携版，可放在任意可写目录运行。
 - `SHA256SUMS.txt`：发布文件 SHA-256 校验值。
 - `latest.json` 与 `.sig`：应用内自动更新使用的签名元数据。
 
@@ -86,7 +90,8 @@ env-diagnose
 需要 Windows 10/11、Node.js、pnpm、Rust stable、Visual Studio 2022 C++ Build Tools 和 Windows SDK：
 
 ```powershell
-pnpm install
+.\scripts\Use-ProjectCache.ps1
+pnpm install --frozen-lockfile
 .\scripts\Verify.ps1
 .\scripts\Invoke-Rust.ps1 -Task tauri
 .\scripts\Prepare-Release.ps1
