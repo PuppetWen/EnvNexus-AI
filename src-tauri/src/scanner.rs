@@ -726,6 +726,9 @@ fn scan_tool(
         add_android_sdk_platforms(root, "已配置安装目录", &mut installed);
     }
     deduplicate_installed(&mut installed);
+    if descriptor.id == "python" {
+        diagnose_managed_python(&mut installed, &mut issues);
+    }
 
     crate::versioning::sort_installed_versions_descending(&mut installed);
     let default_version = installed.iter().find(|version| version.is_default).cloned();
@@ -809,6 +812,49 @@ fn scan_tool(
         environment_status,
         issues,
         scanned_at: Utc::now(),
+    }
+}
+
+fn diagnose_managed_python(installed: &mut [InstalledVersion], issues: &mut Vec<DiagnosticIssue>) {
+    for version in installed.iter_mut().filter(|version| version.managed) {
+        let root = &version.path;
+        let embedded = fs::read_dir(root).is_ok_and(|entries| {
+            entries.flatten().any(|entry| {
+                let name = entry.file_name().to_string_lossy().to_ascii_lowercase();
+                name.starts_with("python") && name.ends_with("._pth") && entry.path().is_file()
+            })
+        });
+        let missing = [
+            ("pip", "Lib/site-packages/pip/__init__.py"),
+            ("venv", "Lib/venv/__init__.py"),
+            ("ensurepip", "Lib/ensurepip/__init__.py"),
+            ("pip.exe", "Scripts/pip.exe"),
+        ]
+        .into_iter()
+        .filter(|(_, relative)| !root.join(relative).is_file())
+        .map(|(name, _)| name)
+        .collect::<Vec<_>>();
+        if !embedded && missing.is_empty() {
+            continue;
+        }
+        version.health = HealthLevel::Warning;
+        issues.push(DiagnosticIssue {
+            code: format!(
+                "PYTHON_INCOMPLETE_DEVELOPMENT_RUNTIME_{}",
+                hex::encode(Sha256::digest(normalized_path_key(root).as_bytes()))
+            ),
+            level: IssueLevel::Warning,
+            title: "受管 Python 缺少完整开发环境".to_string(),
+            detail: if embedded {
+                "此目录使用嵌入式 Python，不能作为包含 pip 和 venv 的完整开发环境。请在该版本卡片点击“修复”，迁移到官方完整运行时；修复后确认 PATH 计划。".to_string()
+            } else {
+                format!("缺少 {}。请在该版本卡片点击“修复”，恢复官方完整运行时及 pip 命令。", missing.join("、"))
+            },
+            evidence: Some(root.to_string_lossy().into_owned()),
+            // The version card owns the download/replacement confirmation. This
+            // is not one of the environment-only diagnostic repair rules.
+            repairable: false,
+        });
     }
 }
 
@@ -1672,6 +1718,78 @@ fn drive_key(path: &Path) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn managed_python_development_health_is_checked_even_with_a_cached_version() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("python").join("3.15.0");
+        fs::create_dir_all(&root).unwrap();
+        let executable = root.join("python.exe");
+        fs::write(&executable, b"cached probe fixture must not execute").unwrap();
+        fs::write(root.join("python315._pth"), b"python315.zip\n.\n").unwrap();
+        let executable = canonical(&executable).unwrap();
+        let registry = PluginRegistry::builtin();
+        let plugin = registry.get("python").unwrap();
+        let fingerprint = tool_probe_fingerprint(plugin.descriptor(), &executable, &root).unwrap();
+        let mut probes = ToolProbeContext {
+            cache: ToolProbeCache {
+                schema_version: PROBE_CACHE_SCHEMA,
+                entries: HashMap::from([(
+                    format!("python|{}", normalized_path_key(&executable)),
+                    ToolProbeCacheEntry {
+                        tool_id: "python".to_string(),
+                        executable: executable.clone(),
+                        fingerprint,
+                        version: "3.15.0".to_string(),
+                        installation_root: root.clone(),
+                        health: HealthLevel::Healthy,
+                    },
+                )]),
+            },
+            touched_keys: HashSet::new(),
+            reuse_cached: true,
+            child_environment: EnvironmentMap::new(),
+        };
+        let manifests = [InstallManifest {
+            schema_version: 1,
+            operation_id: "old-python".to_string(),
+            tool_id: "python".to_string(),
+            version: "3.15.0".to_string(),
+            installed_at: Utc::now(),
+            managed_root: directory.path().to_path_buf(),
+            installation_path: root.clone(),
+            source_url: "https://www.python.org/ftp/python/3.15.0/python-3.15.0-embed-amd64.zip".to_string(),
+            checksum_algorithm: None,
+            checksum: None,
+        }];
+        let scan = |probes: &mut ToolProbeContext| {
+            scan_tool(plugin.as_ref(), &EnvironmentMap::new(), &EnvironmentMap::new(), ToolScanSources {
+                manifests: &manifests,
+                configured_root: None,
+                disk_executables: &[],
+                configured_executables: &[],
+            }, probes)
+        };
+        let old = scan(&mut probes);
+        assert_eq!(old.installed_versions.len(), 1);
+        assert!(old.installed_versions[0].managed);
+        assert_eq!(old.installed_versions[0].health, HealthLevel::Warning);
+        assert!(old.issues.iter().any(|issue| issue.code.starts_with("PYTHON_INCOMPLETE_DEVELOPMENT_RUNTIME_")));
+
+        fs::remove_file(root.join("python315._pth")).unwrap();
+        for relative in ["Lib/site-packages/pip/__init__.py", "Lib/venv/__init__.py", "Lib/ensurepip/__init__.py", "Scripts/pip.exe"] {
+            let path = root.join(relative);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, b"fixture").unwrap();
+        }
+        let repaired = scan(&mut probes);
+        assert_eq!(repaired.installed_versions[0].health, HealthLevel::Healthy);
+        assert!(!repaired.issues.iter().any(|issue| issue.code.starts_with("PYTHON_INCOMPLETE_DEVELOPMENT_RUNTIME_")));
+        fs::remove_file(root.join("Lib/site-packages/pip/__init__.py")).unwrap();
+        let damaged = scan(&mut probes);
+        assert_eq!(damaged.installed_versions[0].health, HealthLevel::Warning);
+        assert_eq!(damaged.installed_versions.len(), 1);
+    }
 
     #[test]
     fn refresh_without_discovery_index_does_not_create_a_full_disk_index() {

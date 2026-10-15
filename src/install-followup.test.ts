@@ -195,4 +195,16 @@ describe("installation environment confirmation", () => {
     expect(missingPath.notice).toContain("环境尚未配置");
     expect(preview).not.toHaveBeenCalled();
   });
+
+  it("offers a separate environment plan after Python repair adds pip scripts", async () => {
+    const pythonPath = "E:\\Environment\\python\\3.15.0";
+    const plan = { ...installPlan, actionKind: "repair" as const, toolId: "python" };
+    const preview = vi.fn().mockResolvedValue({ ...switchPlan, toolId: "python" });
+    const result = await previewInstallationEnvironment(
+      plan, { ...installResult, installationPath: pythonPath }, preview,
+    );
+    expect(preview).toHaveBeenCalledExactlyOnceWith("python", pythonPath);
+    expect(result.pendingPlan?.toolId).toBe("python");
+    expect(result.notice).toContain("请确认默认版本计划");
+  });
 });

@@ -14,7 +14,8 @@ export async function previewInstallationEnvironment(
   ) => Promise<OperationPlan>,
 ): Promise<InstallationFollowup> {
   if (
-    plan.actionKind !== "install" ||
+    (plan.actionKind !== "install" &&
+      !(plan.actionKind === "repair" && plan.toolId === "python")) ||
     (result.status !== "committed" && result.status !== "committed_with_warning")
   ) {
     return { notice: result.message };

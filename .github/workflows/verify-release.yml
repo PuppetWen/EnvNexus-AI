@@ -70,6 +70,14 @@ jobs:
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Format Rust sources and retain the exact formatting patch
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path artifacts/ci-logs -Force | Out-Null
+          cargo fmt --manifest-path src-tauri/Cargo.toml --all
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          git diff --output=artifacts/ci-logs/rustfmt.patch -- src-tauri
+
       - name: Check types, frontend tests, Rust format, tests, and clippy
         shell: pwsh
         run: |
@@ -149,6 +157,13 @@ jobs:
           $tools = & $installed tools --json | ConvertFrom-Json
           if ($LASTEXITCODE -ne 0 -or @($tools).Count -ne 15) { throw 'Installed application command mode failed' }
 
+      - name: Verify full Python development features and repair old embedded installs
+        if: github.event_name != 'pull_request'
+        shell: pwsh
+        run: |
+          & ./scripts/Smoke-Python.ps1 *>&1 | Tee-Object -FilePath artifacts/ci-logs/python-smoke.log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
       - name: Check command mode and generated scripts using an isolated data directory
         shell: pwsh
         run: |
@@ -172,6 +187,8 @@ jobs:
             artifacts/smoke/**/summary.json
             artifacts/installability-*/summary.json
             artifacts/installability-*/reports/
+            artifacts/python-*/summary.json
+            artifacts/python-*/reports/
           if-no-files-found: warn
           retention-days: 14
 

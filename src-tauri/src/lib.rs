@@ -1929,6 +1929,16 @@ fn read_version_catalog_cache(
     if catalog.tool_id != tool_id || catalog.versions.is_empty() {
         return Ok(None);
     }
+    // Older releases cached the embedded Python distribution under the same
+    // version number. Never reuse it for a fresh install or an in-place repair.
+    if tool_id == "python"
+        && catalog
+            .versions
+            .iter()
+            .any(|remote| !sources::is_supported_python_runtime(remote))
+    {
+        return Ok(None);
+    }
     versioning::sort_remote_versions_descending(&mut catalog.versions);
     catalog.cached = true;
     Ok(Some(catalog))
@@ -1997,9 +2007,9 @@ mod tests {
                 channel: "stable".to_string(),
                 published_at: None,
                 architecture: "x86_64".to_string(),
-                download_url: Some("https://www.python.org/ftp/python/example.zip".to_string()),
+                download_url: Some("https://www.python.org/ftp/python/3.13.14/python-3.13.14-amd64.zip".to_string()),
                 checksum_algorithm: Some("sha256".to_string()),
-                checksum: Some("abc123".to_string()),
+                checksum: Some("a".repeat(64)),
                 notes_url: None,
             }],
         };
@@ -2011,6 +2021,36 @@ mod tests {
 
         assert!(restored.cached);
         assert_eq!(restored.versions[0].version, "3.13.14");
+    }
+
+    #[test]
+    fn embedded_python_catalog_is_invalidated_even_when_fresh() {
+        let temporary = tempfile::tempdir().unwrap();
+        let mut catalog = VersionCatalog {
+            tool_id: "python".to_string(),
+            source_name: "Python.org".to_string(),
+            source_url: "https://www.python.org/".to_string(),
+            fetched_at: chrono::Utc::now(),
+            cached: false,
+            versions: vec![crate::model::RemoteVersion {
+                version: "3.15.0".to_string(),
+                channel: "stable".to_string(),
+                published_at: None,
+                architecture: "x86_64".to_string(),
+                download_url: Some("https://www.python.org/ftp/python/3.15.0/python-3.15.0-embed-amd64.zip".to_string()),
+                checksum_algorithm: Some("sha256".to_string()),
+                checksum: Some("a".repeat(64)),
+                notes_url: None,
+            }],
+        };
+        write_version_catalog_cache(temporary.path(), &catalog).unwrap();
+        assert!(read_version_catalog_cache(temporary.path(), "python").unwrap().is_none());
+        catalog.versions[0].download_url = Some("https://www.python.org/ftp/python/3.15.0/python-3.15.0-amd64.zip".to_string());
+        write_version_catalog_cache(temporary.path(), &catalog).unwrap();
+        assert!(read_version_catalog_cache(temporary.path(), "python").unwrap().is_some());
+        catalog.versions[0].checksum = None;
+        write_version_catalog_cache(temporary.path(), &catalog).unwrap();
+        assert!(read_version_catalog_cache(temporary.path(), "python").unwrap().is_none());
     }
 
     #[test]

@@ -7,6 +7,7 @@ EnvNexus AI 是面向 Windows 10/11 的开发环境与多版本工具链管理�
 ## 主要能力
 
 - 管理 Python、Java/JDK、Go、Rust、Node.js、Git、Maven、.NET SDK、Ruby、PHP、Android SDK/NDK、Gradle、CMake 和 ADB。
+- Python 使用官方 PythonCore 完整运行时 ZIP 和 SHA-256，包含 pip、venv、Tk/IDLE；仅提供完整包和校验值齐全的稳定版本，当前可用历史从 3.11 起。
 - 按需手动扫描全部本地固定磁盘，不依赖固定用户名、桌面目录或预设安装路径。
 - 官方版本清单优先显示已有缓存，过期后在后台刷新；合并重复查询，安装前补齐选中版本的校验信息。
 - 运行工具自身的版本命令验证候选，按工具类型归类，并按数字版本倒序展示。
@@ -51,10 +52,12 @@ App 启动不遍历全盘。首次保存安装目录时，即使没有全机索�
 
 从 [GitHub Releases](https://github.com/PuppetWen/EnvNexus-AI/releases/latest) 获取：
 
-- `EnvNexus-AI_0.1.5_x64-setup.exe`：安装版，可选择安装目录；已有安装会复用原目录覆盖升级。
-- `EnvNexus-AI_0.1.5_x64-portable.exe`：便携版，可放在任意可写目录运行。
+- `EnvNexus-AI_0.1.6_x64-setup.exe`：安装版，可选择安装目录；已有安装会复用原目录覆盖升级。
+- `EnvNexus-AI_0.1.6_x64-portable.exe`：便携版，可放在任意可写目录运行。
 - `SHA256SUMS.txt`：发布文件 SHA-256 校验值。
 - `latest.json` 与 `.sig`：应用内自动更新使用的签名元数据。
+
+0.1.5 的受管 Python 安装使用嵌入式包，不包含完整 pip/venv 开发环境。升级后，旧版本清单缓存自动失效；对仍有对应官方完整发行包的版本，可在版本卡片点击“修复”，在原安装路径迁移到完整运行时。修复结束后单独确认 PATH/默认版本配置，或选择仅保留安装。没有官方完整 ZIP 或 SHA-256 的旧版本不会退回嵌入式包；诊断会标出不完整的受管 Python。
 
 ## 常用命令
 
