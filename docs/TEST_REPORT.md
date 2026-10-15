@@ -1,5 +1,89 @@
 # EnvNexus AI 测试报告
 
+## 0.1.6 验证记录（2026-10-15 UTC）
+
+本节记录完整 Python 开发运行时修复的当前证据。0.1.5 的测试结果保留在下一节，不作为 0.1.6 完整 Python、旧安装迁移或最终发布包已通过的证明。
+
+### 本机官方包与索引检查
+
+- 实读 Python 官方运行时索引三页：`index-windows.json` → `index-windows-recent.json` → `index-windows-legacy.json`。按当前筛选条件得到 47 个稳定 Windows x64 完整 ZIP，范围为 `3.11.0` 至 `3.15.0`。
+- 实际字段核对覆盖 `3.14.3`、`3.12.9`、`3.11.0`；正常完整包的 `id/tag` 均为不带 patch 的 `pythoncore-3.<minor>-64` / `3.<minor>-64`。27 个明确带 `t` 的 free-threaded 条目被排除，正常完整版本误过滤数为 0。旧 NuGet 包及无有效官方 SHA-256 的条目不会作为完整运行时替代品。
+- 官方 `python-3.15.0-amd64.zip` 大小为 `45,140,897` 字节，SHA-256 为 `6b1a3f885ce416cf3a68af203e62203664eb5224d8d0c1d2a1945fddec5c500b`，与官方清单一致。
+- 在本项目 E 盘隔离目录 `.devtools/python-full-smoke-3f16062fbc2d4551aa60a7bc8c92b7f1` 中，普通 `python.exe -I -m pip` 检查、离线生成 `pip.exe`、创建 venv 及 venv 中的 `pip list` 均通过；pip 版本为 `26.2.1`。没有修改用户已有 Python 安装或全局环境。
+- 安装器实际使用的 `runpy` wrapper 也已在 E 盘私有隔离目录中验证通过：预先设置 `ENSUREPIP_OPTIONS=altinstall`，子进程移除此值，并使用 `runpy.run_module(module, run_name='__main__', alter_sys=True)` 启动 ensurepip/pip。离线重建入口及 pip `26.2.1` 检查通过，验证包含 `alter_sys=True` 的真实入口语义，不只依赖普通 `python -m pip` 的结果。
+
+这些本机结果验证了官方完整包及离线 pip/venv 能力；正式主程序的新装与旧安装修复结果以下述 CI5 原始报告为依据。
+
+### 当前 CI5 已完成的检查
+
+以下结果来自修复后的 CI5 提交 `1ea507c`，运行记录为 [38704689185](https://github.com/PuppetWen/EnvNexus-AI/actions/runs/38704689185)。整轮 CheckRun 已确认 `COMPLETED / SUCCESS`，完成时间为 `2026-10-15T08:41:22Z`；功能、测试、构建及工作流收尾均成功，以下结果有对应原始报告：
+
+| 项目 | 当前证据 |
+| --- | --- |
+| TypeScript / 前端 | `tsc`、Vite 生产构建、49 项前端测试通过 |
+| Rust | 严格格式检查、clippy、134 项 Rust 测试通过；4 项联网或发布产物测试在默认单元测试中显式忽略，相关联网覆盖另列 |
+| 发布脚本 | 4 项 Node 纯 JavaScript 测试通过 |
+| 官方源 | 15 类官方版本源实时查询通过 |
+| 完整 Python 实际安装事务 | 通过：官方完整运行时下载、校验、安装初始化及 pip/venv 验收 |
+| 完整 Python 独立冒烟 | `Smoke-Python.ps1` 的全新安装、真实旧嵌入式 ZIP 加 fresh 旧缓存的同版本原路径修复均通过；旧清单缓存被拒绝，安装清单迁移及完整开发功能检查通过 |
+| 编译与 NSIS | 0.1.6 编译、NSIS 隔离安装及主程序一致性验证通过 |
+| 命令模式 | 全盘扫描、15 类工具定义、110 个 CMD 脚本、目录持久化、生成脚本读取最新根目录、只读不扫描及无确认的预览保护通过 |
+| 15 类工具真实安装 | 15/15 通过、0 失败；安装事务、清单、版本探测、切换预览、缓存和清理检查均通过 |
+
+历史 CI4 提交 `47f4dfc`、运行 [38703167061](https://github.com/PuppetWen/EnvNexus-AI/actions/runs/38703167061) 曾在完整 Python 实际安装时失败：`runpy` 令 `sys.argv[0]` 保持为 `pip`，触发 Windows pip 的自更新保护。该问题通过 `alter_sys=True` 修复；上表以 CI5 的实际通过结果为依据，CI4 整轮不计为成功。
+
+### 完整 Python 新装与真实旧安装修复
+
+原始证据为 `python-89fbe4b7280d4702a05eb750b789d91b/summary.json` 及对应 `reports/`，汇总为 `status: passed`、`complete: true`、`cleanup: passed`、`errors: []`。两个场景均使用正式 0.1.6 CLI：
+
+| 检查 | 全新安装 | 真实旧嵌入式包修复 |
+| --- | --- | --- |
+| Python 版本 | `3.15.0` | 保持 `3.15.0`，`sameVersion: true` |
+| 发行包 | 官方 `python-3.15.0-amd64.zip` | 从真实 `python-3.15.0-embed-amd64.zip` 迁移到完整 ZIP |
+| 旧缓存与路径 | 新建隔离版本目录 | fresh 旧嵌入式清单被拒绝，`oldCatalogRejected: true`，安装路径保持不变 |
+| pip | 模块、`pip.exe --version`、两种 `pip list` 均通过，版本 `26.2.1` | 同左，版本 `26.2.1` |
+| 开发组件 | Tk `9.0`、IDLE 导入、`include/Python.h`、3 个导入库通过 | 同左 |
+| venv | 独立 prefix、正确 base prefix、venv 内 pip 模块和入口、`pip list` 及小程序结果通过 | 同左 |
+| 用户环境 | `unchanged` | `unchanged` |
+
+Python 冒烟整体执行前后的用户环境指纹相同，临时目录清理通过。该修复场景实际下载并校验旧嵌入式 ZIP，再写入同版本的旧安装清单和 fresh 旧版本缓存；执行 repair 前没有先刷新清单，因此验证了生产修复流程自行拒绝旧缓存并替换原路径。
+
+### 全工具安装、命令模式与环境恢复
+
+原始证据为 `installability-9cd36e4ebbb143d78e883a201a303eeb/summary.json`：`complete: true`、`passedCount: 15`、`failedCount: 0`、`userEnvironment: unchanged`，每项 `cleanup: passed`。
+
+| 工具 | CI5 实测版本 |
+| --- | --- |
+| Python | `3.15.0`（完整运行时） |
+| Java | `27+35` |
+| Go | `1.27.2` |
+| Rust | `1.99.0` |
+| Node.js | `26.12.0` |
+| Git | `2.56.0.windows.2` |
+| Android SDK Command-line Tools | `23.0` |
+| Android NDK | `30.0.16248370` |
+| Gradle | `9.8.1` |
+| CMake | `4.4.4` |
+| ADB / Platform Tools | `37.0.1` |
+| Maven | `3.10.0` |
+| .NET SDK | `10.0.402` |
+| Ruby | `4.0.7-1` |
+| PHP | `8.5.11` |
+
+ADB 实际执行当前用户环境激活，`activationApplied`、`activationDefaultVerified`、`userEnvironmentRestored` 均为 `passed`，回读 PATH/Android 变量及默认版本后恢复原环境。其余 14 类工具仅验证切换计划，未实际应用；系统 PATH 遮蔽仍被明确阻止，安装成功不表示已经成为默认版本。
+
+命令模式证据为 `smoke/cli-9503a681bf8744368bf9e7665a97b71c/summary.json`：记录了完成的全盘扫描、15 类定义和 110 个生成命令；根目录持久化、旧生成脚本读取新根目录、只读命令不扫描、预览保护及 JDK/修复/刷新脚本检查均通过。自动检查原始日志为 `ci-logs/verification.log`，联网结果为 `live-sources.log` 和 `live-install.log`。
+
+### 安装包与签名验证
+
+`ci-logs/installer-payload.json` 记录版本 `0.1.6`，NSIS 安装后的主程序与便携版 SHA-256 均为 `2fd8e082fc89e0192463734b8eb1f48db527da9a0098bccdcb04cd6339f34242`。
+
+0.1.6 签名资产已上传到 draft Release，签名在本机使用原有长期密钥完成，未向云端上传私钥。独立签名验证运行 [38706313686](https://github.com/PuppetWen/EnvNexus-AI/actions/runs/38706313686) 已完成，最终结论 `success`；该工作流从草稿下载六项资产，检查版本、下载 URL、签名侧文件和完整 SHA-256 清单，并使用应用内公钥执行真实 Rust 签名校验。草稿尚不能视为已公开发布；正式发布和公开更新入口、公开资产回读仍待完成。
+
+### 验证边界与公开交付状态
+
+Python 修复后的独立 PATH 确认已由前端测试覆盖；本节的 CI 新装和修复通过不表示已在用户开发机执行真实 Python PATH 切换或完成本机 GUI 复测。尚未逐一安装全部 47 个历史 Python 完整运行时，也没有验证所有第三方包、原生扩展编译、IDE 集成或每个工具的真实多版本切换及卸载恢复。当前仍为草稿发行版，正式发布及公开下载回读尚待完成，不宣称公开交付已验证。
+
 ## 0.1.5 验证记录（2026-10-15 UTC）
 
 本节记录 0.1.5 的新验证结果；后文保留 0.1.4 及更早版本的日期、数据和历史失败，不能把旧版 GUI 结果视为本版复测。

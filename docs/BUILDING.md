@@ -137,7 +137,7 @@ src-tauri/target/release/bundle/nsis/EnvNexus AI_0.1.6_x64-setup.exe.sig
 gh workflow run verify-signed-release.yml --ref main -f tag=v0.1.6
 ```
 
-所选源码版本必须与 tag 一致。该工作流仅需 `contents:read`，使用仓库令牌下载六份公开发行资产，不接触私钥；它检查 PE 版本、发布 URL、签名旁文件、完整 SHA-256 清单，并运行应用自身的 Rust 签名验证测试。验证报告随运行上传，发布完成应以实际验证结果为依据。首次启用手动触发前，该工作流文件需要存在于默认分支。
+所选源码版本必须与 tag 一致。该工作流的 `verify` 作业使用 `contents: write` 权限访问 draft Release：GitHub 不向仅有读取权限的令牌开放草稿。作业只下载对应草稿或已发布发行版的六项资产（安装包、便携包、各自签名、`latest.json`、`SHA256SUMS.txt`）并验证，不发布或修改发行版，也不接触私钥；checkout 禁用凭据持久化。它检查 PE 版本、发布 URL、签名旁文件、完整 SHA-256 清单，并运行应用自身的 Rust 签名验证测试。验证报告随运行上传，发布完成应以实际验证结果为依据。首次启用手动触发前，该工作流文件需要存在于默认分支。
 
 命令脚本隔离冒烟：
 
