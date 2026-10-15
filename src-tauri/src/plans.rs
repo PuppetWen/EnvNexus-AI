@@ -25,8 +25,9 @@ use crate::{
 
 #[cfg(windows)]
 use winreg::{
-    RegKey,
-    enums::{HKEY_CURRENT_USER, KEY_SET_VALUE},
+    RegKey, RegValue,
+    enums::{HKEY_CURRENT_USER, KEY_QUERY_VALUE, KEY_SET_VALUE, REG_EXPAND_SZ, RegType},
+    types::ToRegValue,
 };
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -175,7 +176,9 @@ impl PlanService {
         let created_at = Utc::now();
         let id = Uuid::new_v4().to_string();
         let token = confirmation_token(&id, &fingerprint);
-        let mut warnings = Vec::new();
+        let mut warnings = vec![
+            "安装完成后需要配置用户 PATH 和工具环境变量。图形界面会展示默认版本计划；命令行请另行执行 use <工具> <安装路径> --yes。".to_string(),
+        ];
         if remote.checksum.is_none() || remote.checksum_algorithm.is_none() {
             warnings.push(
                 "该官方源没有在 API 中提供可用校验值；执行前应单独评估供应链风险。".to_string(),
@@ -1409,6 +1412,10 @@ fn activation_for(descriptor: &ToolDescriptor, root: &Path) -> AppResult<Activat
             };
             let platform_tools = sdk_root.join("platform-tools");
             require_file(platform_tools.join("adb.exe"))?;
+            crate::tool_runtime::validate_runtime_dependencies(
+                "adb",
+                &platform_tools.join("adb.exe"),
+            )?;
             variables.insert(
                 "ANDROID_HOME".to_string(),
                 sdk_root.to_string_lossy().into_owned(),
@@ -1629,9 +1636,24 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> AppResult<()> {
 fn write_user_environment(values: &EnvironmentMap) -> AppResult<()> {
     let root = RegKey::predef(HKEY_CURRENT_USER);
     let key = root
-        .open_subkey_with_flags("Environment", KEY_SET_VALUE)
+        .open_subkey_with_flags("Environment", KEY_QUERY_VALUE | KEY_SET_VALUE)
         .map_err(|error| AppError::Message(format!("打开 HKCU\\Environment 失败：{error}")))?;
     let current = read_environment(EnvironmentScope::User)?;
+    let writes = values
+        .iter()
+        .map(|(name, value)| {
+            let existing_type = match key.get_raw_value(name) {
+                Ok(existing) => Some(existing.vtype),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                Err(error) => {
+                    return Err(AppError::Message(format!(
+                        "读取用户环境变量 {name} 的类型失败：{error}"
+                    )));
+                }
+            };
+            Ok((name, environment_registry_value(value, existing_type)))
+        })
+        .collect::<AppResult<Vec<_>>>()?;
     for name in current.keys() {
         if !values
             .keys()
@@ -1642,11 +1664,31 @@ fn write_user_environment(values: &EnvironmentMap) -> AppResult<()> {
             })?;
         }
     }
-    for (name, value) in values {
-        key.set_value(name, value)
+    for (name, value) in writes {
+        key.set_raw_value(name, &value)
             .map_err(|error| AppError::Message(format!("写入用户环境变量 {name} 失败：{error}")))?;
     }
     Ok(())
+}
+
+#[cfg(windows)]
+fn environment_registry_value(value: &str, existing_type: Option<RegType>) -> RegValue {
+    let mut encoded = value.to_reg_value();
+    let mut fragments = value.split('%');
+    fragments.next();
+    let mut has_reference = false;
+    while let Some(name) = fragments.next() {
+        if fragments.next().is_some() && !name.is_empty() {
+            has_reference = true;
+            break;
+        }
+    }
+    // Keep expandable values expandable even when an update temporarily removes
+    // their references, and allow new %NAME% references to expand in Windows.
+    if existing_type == Some(REG_EXPAND_SZ) || has_reference {
+        encoded.vtype = REG_EXPAND_SZ;
+    }
+    encoded
 }
 
 #[cfg(not(windows))]
@@ -1682,6 +1724,112 @@ mod tests {
     use super::*;
     use crate::plugins::PluginRegistry;
     use tempfile::tempdir;
+
+    #[cfg(windows)]
+    #[test]
+    fn environment_registry_values_preserve_expansion_and_unicode() {
+        use winreg::enums::REG_SZ;
+
+        let path = r"E:\Environment\工具\bin;%LOCALAPPDATA%\Microsoft\WindowsApps";
+        let encoded = environment_registry_value(path, Some(REG_EXPAND_SZ));
+        assert_eq!(encoded.vtype, REG_EXPAND_SZ);
+        let expected = path
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .flat_map(u16::to_le_bytes)
+            .collect::<Vec<_>>();
+        assert_eq!(encoded.bytes, expected);
+
+        let literal = r"E:\Environment\node\22";
+        assert_eq!(
+            environment_registry_value(literal, Some(REG_EXPAND_SZ)).vtype,
+            REG_EXPAND_SZ
+        );
+        assert_eq!(
+            environment_registry_value(literal, Some(REG_SZ)).vtype,
+            REG_SZ
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn new_environment_references_are_stored_as_expandable_strings() {
+        use winreg::enums::REG_SZ;
+
+        for existing_type in [None, Some(REG_SZ)] {
+            assert_eq!(
+                environment_registry_value(r"%JAVA_HOME%\bin;C:\Windows", existing_type).vtype,
+                REG_EXPAND_SZ
+            );
+        }
+        for literal in [r"E:\Environment\node", "100% complete", "%%", "%UNCLOSED"] {
+            assert_eq!(environment_registry_value(literal, None).vtype, REG_SZ);
+        }
+    }
+
+    #[test]
+    fn install_plan_exposes_action_kind_without_executable_payload() {
+        let temp = tempdir().unwrap();
+        let registry = PluginRegistry::builtin();
+        let descriptor = registry.get("node").unwrap();
+        let remote = RemoteVersion {
+            version: "24.0.0".to_string(),
+            channel: "stable".to_string(),
+            published_at: None,
+            architecture: "x64".to_string(),
+            download_url: Some(
+                "https://nodejs.org/dist/v24.0.0/node-v24.0.0-win-x64.zip".to_string(),
+            ),
+            checksum_algorithm: None,
+            checksum: None,
+            notes_url: None,
+        };
+        let mut plan = PlanService::new(temp.path().join("data"))
+            .preview_install(descriptor.descriptor(), &remote, temp.path().to_path_buf())
+            .unwrap();
+        let value = serde_json::to_value(&plan).unwrap();
+        assert_eq!(value["actionKind"], "install");
+        assert!(value.get("action").is_none());
+        assert!(value.get("environmentFingerprint").is_none());
+        assert!(plan.environment_diffs.is_empty());
+        assert!(
+            plan.warnings
+                .iter()
+                .any(|warning| warning.contains("配置用户 PATH"))
+        );
+        assert!(!temp.path().join("node").join("24.0.0").exists());
+
+        let restored: OperationPlan = serde_json::from_value(value).unwrap();
+        assert!(matches!(restored.action, PlannedAction::None));
+        let PlannedAction::Install(request) = plan.action else {
+            panic!("expected install request");
+        };
+        plan.action = PlannedAction::Repair(request);
+        assert_eq!(serde_json::to_value(&plan).unwrap()["actionKind"], "repair");
+    }
+
+    #[test]
+    fn adb_activation_rejects_incomplete_platform_tools() {
+        let temp = tempdir().unwrap();
+        let platform_tools = temp.path().join("platform-tools");
+        fs::create_dir_all(&platform_tools).unwrap();
+        fs::write(platform_tools.join("adb.exe"), b"test fixture").unwrap();
+        let registry = PluginRegistry::builtin();
+        let adb = registry.get("adb").unwrap();
+
+        let error = activation_for(adb.descriptor(), &platform_tools)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("AdbWinApi.dll"));
+        assert!(error.contains("AdbWinUsbApi.dll"));
+        assert!(error.contains(&platform_tools.display().to_string()));
+
+        for name in ["AdbWinApi.dll", "AdbWinUsbApi.dll"] {
+            fs::write(platform_tools.join(name), b"test DLL").unwrap();
+        }
+        let activation = activation_for(adb.descriptor(), &platform_tools).unwrap();
+        assert_eq!(activation.path_entries, vec![platform_tools]);
+    }
 
     #[test]
     fn selected_entries_are_added_first_and_old_tool_entries_removed() {
@@ -1745,6 +1893,8 @@ mod tests {
         fs::create_dir_all(&platform_tools).unwrap();
         fs::write(command_line.join("bin").join("sdkmanager.bat"), b"").unwrap();
         fs::write(platform_tools.join("adb.exe"), b"").unwrap();
+        fs::write(platform_tools.join("AdbWinApi.dll"), b"").unwrap();
+        fs::write(platform_tools.join("AdbWinUsbApi.dll"), b"").unwrap();
         let registry = PluginRegistry::builtin();
 
         let sdk_plugin = registry.get("android-sdk").unwrap();

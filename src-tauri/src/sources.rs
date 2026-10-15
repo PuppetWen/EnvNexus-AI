@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
-use chrono::Utc;
+use chrono::{DateTime, Duration, Utc};
 use futures_util::{StreamExt, stream};
 use regex::Regex;
 use serde::Deserialize;
@@ -82,30 +82,32 @@ fn catalog(
 }
 
 async fn checked_text(client: &reqwest::Client, url: &str) -> AppResult<String> {
-    let mut last_error = String::new();
     for attempt in 0..3 {
-        match checked_response(client, url, "text/plain, text/html;q=0.9, */*;q=0.8").await {
+        let (error, retryable) = match checked_response(client, url, "text/plain, text/html;q=0.9, */*;q=0.8").await {
             Ok(response) => match response.text().await {
                 Ok(text) if !text.is_empty() => return Ok(text),
-                Ok(_) => last_error = "响应体为空".to_string(),
-                Err(error) => last_error = format!("响应体读取中断：{error}"),
+                Ok(_) => (AppError::InvalidSource(format!("{url}：响应体为空")), true),
+                Err(error) => (AppError::Http(error), true),
             },
-            Err(error) => last_error = error.to_string(),
+            Err(error) => {
+                let retryable = retryable_source_error(&error);
+                (error, retryable)
+            }
+        };
+        if !retryable || attempt == 2 {
+            return Err(error);
         }
         retry_delay(attempt).await;
     }
-    Err(AppError::Message(format!(
-        "官方版本源响应读取失败（已重试 3 次）：{url}：{last_error}"
-    )))
+    unreachable!("the final source request returns its error")
 }
 
 async fn checked_json<T>(client: &reqwest::Client, url: &str) -> AppResult<T>
 where
     T: serde::de::DeserializeOwned,
 {
-    let mut last_error = String::new();
     for attempt in 0..3 {
-        match checked_response(client, url, "application/json").await {
+        let (error, retryable) = match checked_response(client, url, "application/json").await {
             Ok(response) => {
                 let content_type = response
                     .headers()
@@ -114,26 +116,28 @@ where
                     .unwrap_or("未知 Content-Type")
                     .to_string();
                 match response.bytes().await {
-                    Ok(bytes) if bytes.is_empty() => {
-                        last_error = "响应体为空".to_string();
-                    }
+                    Ok(bytes) if bytes.is_empty() => (AppError::InvalidSource(format!("{url}：响应体为空")), true),
                     Ok(bytes) => match serde_json::from_slice::<T>(&bytes) {
                         Ok(value) => return Ok(value),
                         Err(error) => {
-                            last_error =
-                                format!("JSON 数据不完整或格式已变化（{content_type}）：{error}");
+                            let retryable = error.is_eof();
+                            (AppError::InvalidSource(format!("{url}：JSON 数据不完整或格式已变化（{content_type}）：{error}")), retryable)
                         }
                     },
-                    Err(error) => last_error = format!("响应体读取中断：{error}"),
+                    Err(error) => (AppError::Http(error), true),
                 }
             }
-            Err(error) => last_error = error.to_string(),
+            Err(error) => {
+                let retryable = retryable_source_error(&error);
+                (error, retryable)
+            }
+        };
+        if !retryable || attempt == 2 {
+            return Err(error);
         }
         retry_delay(attempt).await;
     }
-    Err(AppError::InvalidSource(format!(
-        "{url}（已重试 3 次）：{last_error}"
-    )))
+    unreachable!("the final source request returns its error")
 }
 
 async fn checked_response(
@@ -141,13 +145,61 @@ async fn checked_response(
     url: &str,
     accept: &str,
 ) -> AppResult<reqwest::Response> {
-    client
+    let response = client
         .get(url)
         .header(reqwest::header::ACCEPT, accept)
         .send()
-        .await?
-        .error_for_status()
-        .map_err(AppError::from)
+        .await?;
+    if response.status().is_success() {
+        return Ok(response);
+    }
+    let status = response.status().as_u16();
+    let headers = response.headers();
+    let rate_limited = status == 429
+        || (status == 403
+            && (headers.get("x-ratelimit-remaining").is_some_and(|value| value == "0")
+                || headers.contains_key(reqwest::header::RETRY_AFTER)));
+    let retry_at = if rate_limited || headers.contains_key(reqwest::header::RETRY_AFTER) {
+        source_retry_time(headers, Utc::now())
+    } else {
+        None
+    };
+    let mut safe_url = response.url().clone();
+    let _ = safe_url.set_username("");
+    let _ = safe_url.set_password(None);
+    safe_url.set_query(None);
+    safe_url.set_fragment(None);
+    Err(AppError::SourceHttp { status, url: safe_url.to_string(), retry_at, rate_limited })
+}
+
+fn source_retry_time(headers: &reqwest::header::HeaderMap, now: DateTime<Utc>) -> Option<DateTime<Utc>> {
+    if let Some(value) = headers.get(reqwest::header::RETRY_AFTER).and_then(|value| value.to_str().ok()) {
+        if let Some(retry_at) = value.trim().parse::<i64>().ok()
+            .filter(|seconds| *seconds >= 0)
+            .and_then(Duration::try_seconds)
+            .and_then(|delay| now.checked_add_signed(delay))
+        {
+            return Some(retry_at);
+        }
+        if let Ok(date) = DateTime::parse_from_rfc2822(value) {
+            return Some(date.with_timezone(&Utc));
+        }
+    }
+    headers.get("x-ratelimit-reset")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<i64>().ok())
+        .and_then(|seconds| DateTime::from_timestamp(seconds, 0))
+}
+
+fn retryable_source_error(error: &AppError) -> bool {
+    match error {
+        AppError::Http(error) => error.is_timeout() || error.is_connect() || error.is_body(),
+        AppError::SourceHttp { status, rate_limited: false, retry_at, .. } => {
+            (*status == 408 || (500..=599).contains(status))
+                && retry_at.is_none_or(|at| at <= Utc::now())
+        }
+        _ => false,
+    }
 }
 
 async fn retry_delay(attempt: usize) {
@@ -405,35 +457,15 @@ struct NodeRelease {
 async fn fetch_node(client: &reqwest::Client, tool_id: &str) -> AppResult<VersionCatalog> {
     const SOURCE: &str = "https://nodejs.org/dist/index.json";
     let releases = checked_json::<Vec<NodeRelease>>(client, SOURCE).await?;
-    let candidates = releases
+    Ok(catalog(tool_id, "Node.js Releases", SOURCE, build_node_versions(releases)))
+}
+
+fn build_node_versions(releases: Vec<NodeRelease>) -> Vec<RemoteVersion> {
+    let mut versions = releases
         .into_iter()
         .filter(|release| release.files.iter().any(|file| file == "win-x64-zip"))
-        .collect::<Vec<_>>();
-    let client = client.clone();
-    let results = stream::iter(candidates.into_iter().enumerate())
-        .map(move |(index, release)| {
-            let client = client.clone();
-            async move {
+        .map(|release| {
                 let filename = format!("node-{}-win-x64.zip", release.version);
-                // Keep the complete history responsive: old releases remain installable,
-                // while checksum metadata is fetched only for the newest entries.
-                let checksum = if index < 30 {
-                    let checksum_url =
-                        format!("https://nodejs.org/dist/{}/SHASUMS256.txt", release.version);
-                    checked_text(&client, &checksum_url)
-                        .await
-                        .ok()
-                        .and_then(|text| {
-                            text.lines().find_map(|line| {
-                                let mut parts = line.split_whitespace();
-                                let hash = parts.next()?;
-                                let name = parts.next()?.trim_start_matches('*');
-                                (name == filename).then(|| hash.to_string())
-                            })
-                        })
-                } else {
-                    None
-                };
                 RemoteVersion {
                     version: release.version.trim_start_matches('v').to_string(),
                     channel: if release.lts.is_string() {
@@ -448,21 +480,64 @@ async fn fetch_node(client: &reqwest::Client, tool_id: &str) -> AppResult<Versio
                         "https://nodejs.org/dist/{}/{}",
                         release.version, filename
                     )),
-                    checksum_algorithm: checksum.as_ref().map(|_| "sha256".to_string()),
-                    checksum,
+                    // Fetch exactly the selected release's checksum before installation.
+                    checksum_algorithm: None,
+                    checksum: None,
                     notes_url: Some(format!(
                         "https://nodejs.org/en/blog/release/{}",
                         release.version
                     )),
                 }
-            }
         })
-        .buffer_unordered(5)
-        .collect::<Vec<_>>()
-        .await;
-    let mut versions = results;
+        .collect::<Vec<_>>();
     versions.sort_by(|left, right| right.published_at.cmp(&left.published_at));
-    Ok(catalog(tool_id, "Node.js Releases", SOURCE, versions))
+    versions
+}
+
+pub(crate) async fn ensure_install_metadata(
+    client: &reqwest::Client,
+    tool_id: &str,
+    remote: &mut RemoteVersion,
+) -> AppResult<()> {
+    if tool_id != "node" {
+        return Ok(());
+    }
+    let version = remote.version.trim_start_matches('v');
+    if version.is_empty() || !version.bytes().all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-')) {
+        return Err(AppError::InvalidSource("Node.js 版本号格式无效".to_string()));
+    }
+    let expected_url = format!("https://nodejs.org/dist/v{version}/node-v{version}-win-x64.zip");
+    if remote.download_url.as_deref() != Some(expected_url.as_str()) {
+        return Err(AppError::InvalidSource("Node.js 下载地址与所选版本的官方发行包不匹配".to_string()));
+    }
+    if remote.checksum_algorithm.as_deref().is_some_and(|value| value.eq_ignore_ascii_case("sha256"))
+        && remote.checksum.as_deref().is_some_and(valid_sha256)
+    {
+        return Ok(());
+    }
+    let checksum_url = format!("https://nodejs.org/dist/v{version}/SHASUMS256.txt");
+    fill_node_checksum(client, remote, &checksum_url).await
+}
+
+async fn fill_node_checksum(client: &reqwest::Client, remote: &mut RemoteVersion, checksum_url: &str) -> AppResult<()> {
+    let filename = format!("node-v{}-win-x64.zip", remote.version.trim_start_matches('v'));
+    let checksums = checked_text(client, checksum_url).await?;
+    let matching = checksums.lines().filter_map(|line| {
+        let mut parts = line.split_whitespace();
+        let hash = parts.next()?;
+        let name = parts.next()?.trim_start_matches('*');
+        (name == filename && parts.next().is_none()).then_some(hash)
+    }).collect::<Vec<_>>();
+    if matching.len() != 1 || !valid_sha256(matching[0]) {
+        return Err(AppError::InvalidSource(format!("Node.js 官方校验清单缺少唯一有效的 {filename} SHA-256，已停止安装")));
+    }
+    remote.checksum_algorithm = Some("sha256".to_string());
+    remote.checksum = Some(matching[0].to_ascii_lowercase());
+    Ok(())
+}
+
+fn valid_sha256(value: &str) -> bool {
+    value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 #[derive(Debug, Deserialize)]
@@ -660,11 +735,7 @@ async fn fetch_ruby(client: &reqwest::Client, tool_id: &str) -> AppResult<Versio
         .into_iter()
         .filter(|release| !release.draft)
         .filter_map(|release| {
-            let asset = release.assets.iter().find(|asset| {
-                asset.name.starts_with("rubyinstaller-")
-                    && asset.name.ends_with("-x64.7z")
-                    && !asset.name.contains("devkit")
-            })?;
+            let asset = select_ruby_archive(&release.assets)?;
             let version = asset
                 .name
                 .trim_start_matches("rubyinstaller-")
@@ -819,7 +890,25 @@ async fn checked_github_releases(
     let mut page = 1_u32;
     loop {
         let url = format!("{source_url}{separator}per_page=100&page={page}");
-        let mut current_page = checked_json::<Vec<GithubRelease>>(client, &url).await?;
+        let mut current_page = match checked_json::<Vec<GithubRelease>>(client, &url).await {
+            Ok(releases) => releases,
+            Err(error) if github_api_access_limited(&error) => {
+                // Keep already fetched history if the shared API quota runs out midway.
+                if !releases.is_empty() {
+                    return Ok(releases);
+                }
+                let Some(repository) = official_github_repository(source_url) else {
+                    return Err(error);
+                };
+                return match fetch_github_web_latest(client, repository).await {
+                    Ok(release) => Ok(vec![release]),
+                    Err(fallback_error) => Err(AppError::Message(format!(
+                        "{error}；官方发布页备用查询也失败：{fallback_error}"
+                    ))),
+                };
+            }
+            Err(error) => return Err(error),
+        };
         let page_len = current_page.len();
         releases.append(&mut current_page);
         if page_len < 100 {
@@ -828,6 +917,107 @@ async fn checked_github_releases(
         page += 1;
     }
     Ok(releases)
+}
+
+fn github_api_access_limited(error: &AppError) -> bool {
+    matches!(error, AppError::SourceHttp { status: 403 | 429, .. })
+}
+
+fn official_github_repository(source_url: &str) -> Option<&'static str> {
+    match source_url {
+        "https://api.github.com/repos/git-for-windows/git/releases" => Some("git-for-windows/git"),
+        "https://api.github.com/repos/Kitware/CMake/releases" => Some("Kitware/CMake"),
+        "https://api.github.com/repos/oneclick/rubyinstaller2/releases" => Some("oneclick/rubyinstaller2"),
+        _ => None,
+    }
+}
+
+async fn fetch_github_web_latest(client: &reqwest::Client, repository: &str) -> AppResult<GithubRelease> {
+    let latest_url = format!("https://github.com/{repository}/releases/latest");
+    let response = checked_response(client, &latest_url, "text/html").await?;
+    let release_url = response.url().clone();
+    let tag = official_github_release_tag(repository, &release_url)?;
+    // Only the redirect is needed. The expanded-assets fragment is much smaller
+    // than downloading the release page and does not consume the REST API quota.
+    drop(response);
+    let assets_url = format!("https://github.com/{repository}/releases/expanded_assets/{tag}");
+    let html = checked_text(client, &assets_url).await?;
+    parse_github_web_release(repository, &tag, release_url.as_str(), &html)
+}
+
+fn official_github_release_tag(repository: &str, release_url: &url::Url) -> AppResult<String> {
+    let prefix = format!("/{repository}/releases/tag/");
+    let tag = release_url.path().strip_prefix(&prefix).unwrap_or_default();
+    if release_url.scheme() != "https"
+        || release_url.host_str() != Some("github.com")
+        || release_url.port_or_known_default() != Some(443)
+        || !release_url.username().is_empty()
+        || release_url.password().is_some()
+        || release_url.query().is_some()
+        || release_url.fragment().is_some()
+        || tag.is_empty()
+        || !tag.bytes().all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_' | b'+'))
+    {
+        return Err(AppError::InvalidSource("GitHub 最新发布页跳转到了不匹配的官方仓库或版本".to_string()));
+    }
+    Ok(tag.to_string())
+}
+
+fn parse_github_web_release(repository: &str, tag: &str, release_url: &str, html: &str) -> AppResult<GithubRelease> {
+    let rows = Regex::new(r"(?is)<li\b[^>]*>(.*?)</li>")
+        .map_err(|error| AppError::Message(error.to_string()))?;
+    let links = Regex::new(r#"(?i)\bhref\s*=\s*["']([^"']+)["']"#)
+        .map_err(|error| AppError::Message(error.to_string()))?;
+    let digests = Regex::new(r"(?i)\bsha256:([0-9a-f]{64})\b")
+        .map_err(|error| AppError::Message(error.to_string()))?;
+    let base = url::Url::parse("https://github.com/")
+        .map_err(|error| AppError::Message(error.to_string()))?;
+    let prefix = format!("/{repository}/releases/download/{tag}/");
+    let mut assets = Vec::new();
+    let mut seen = HashSet::new();
+    for row in rows.captures_iter(html) {
+        let body = row.get(1).map(|capture| capture.as_str()).unwrap_or_default();
+        for link in links.captures_iter(body) {
+            let Some(href) = link.get(1) else { continue; };
+            let Ok(download_url) = base.join(href.as_str()) else { continue; };
+            if download_url.scheme() != "https"
+                || download_url.host_str() != Some("github.com")
+                || download_url.port_or_known_default() != Some(443)
+                || !download_url.username().is_empty()
+                || download_url.password().is_some()
+                || download_url.query().is_some()
+                || download_url.fragment().is_some()
+            {
+                continue;
+            }
+            let Some(name) = download_url.path().strip_prefix(&prefix) else { continue; };
+            if name.is_empty() || name.contains('/') || name.contains('%') || !seen.insert(name.to_string()) {
+                continue;
+            }
+            let hashes = digests.captures_iter(body)
+                .filter_map(|capture| capture.get(1).map(|value| value.as_str().to_ascii_lowercase()))
+                .collect::<HashSet<_>>();
+            if hashes.len() > 1 || (body.to_ascii_lowercase().contains("sha256:") && hashes.is_empty()) {
+                return Err(AppError::InvalidSource(format!("GitHub 官方发布页中 {name} 的 SHA-256 不明确或无效")));
+            }
+            assets.push(GithubAsset {
+                name: name.to_string(),
+                browser_download_url: download_url.to_string(),
+                digest: hashes.into_iter().next().map(|hash| format!("sha256:{hash}")),
+            });
+        }
+    }
+    if assets.is_empty() {
+        return Err(AppError::InvalidSource("GitHub 官方发布页没有返回该仓库的可下载发行包".to_string()));
+    }
+    Ok(GithubRelease {
+        tag_name: tag.to_string(),
+        html_url: release_url.to_string(),
+        published_at: None,
+        prerelease: false,
+        draft: false,
+        assets,
+    })
 }
 
 fn select_portable_git(assets: &[GithubAsset]) -> Option<&GithubAsset> {
@@ -841,6 +1031,14 @@ fn select_portable_git(assets: &[GithubAsset]) -> Option<&GithubAsset> {
 fn select_cmake_zip(assets: &[GithubAsset]) -> Option<&GithubAsset> {
     assets.iter().find(|asset| {
         asset.name.starts_with("cmake-") && asset.name.ends_with("-windows-x86_64.zip")
+    })
+}
+
+fn select_ruby_archive(assets: &[GithubAsset]) -> Option<&GithubAsset> {
+    assets.iter().find(|asset| {
+        asset.name.starts_with("rubyinstaller-")
+            && asset.name.ends_with("-x64.7z")
+            && !asset.name.contains("devkit")
     })
 }
 
@@ -967,11 +1165,210 @@ fn non_empty(value: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::{Read, Write};
+    use std::{
+        io::{Read, Write},
+        sync::{Arc, Mutex, mpsc},
+    };
+
+    struct MockSource {
+        url: String,
+        requests: Arc<Mutex<Vec<String>>>,
+        stop: mpsc::Sender<()>,
+        worker: Option<std::thread::JoinHandle<()>>,
+    }
+
+    impl MockSource {
+        fn new(responses: Vec<String>) -> Self {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let url = format!("http://{}", listener.local_addr().unwrap());
+            let requests = Arc::new(Mutex::new(Vec::new()));
+            let server_requests = requests.clone();
+            let (stop, stopped) = mpsc::channel();
+            let worker = std::thread::spawn(move || {
+                let mut index = 0;
+                while matches!(stopped.try_recv(), Err(mpsc::TryRecvError::Empty)) {
+                    match listener.accept() {
+                        Ok((mut stream, _)) => {
+                            stream.set_read_timeout(Some(std::time::Duration::from_secs(2))).unwrap();
+                            let mut request = [0_u8; 8192];
+                            let length = stream.read(&mut request).unwrap();
+                            server_requests.lock().unwrap().push(String::from_utf8_lossy(&request[..length]).to_string());
+                            let response = &responses[index.min(responses.len() - 1)];
+                            let _ = stream.write_all(response.as_bytes());
+                            index += 1;
+                        }
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            std::thread::sleep(std::time::Duration::from_millis(5));
+                        }
+                        Err(error) => panic!("mock source accept: {error}"),
+                    }
+                }
+            });
+            Self { url, requests, stop, worker: Some(worker) }
+        }
+
+        fn request_count(&self) -> usize {
+            self.requests.lock().unwrap().len()
+        }
+    }
+
+    impl Drop for MockSource {
+        fn drop(&mut self) {
+            let _ = self.stop.send(());
+            if let Some(worker) = self.worker.take() {
+                worker.join().unwrap();
+            }
+        }
+    }
+
+    fn http_response(status: &str, headers: &str, body: &str) -> String {
+        format!("HTTP/1.1 {status}\r\n{headers}Content-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len())
+    }
+
+    fn local_client() -> reqwest::Client {
+        reqwest::Client::builder().no_proxy().timeout(std::time::Duration::from_secs(3)).build().unwrap()
+    }
 
     #[derive(Debug, Deserialize)]
     struct RetryFixture {
         value: String,
+    }
+
+    #[test]
+    fn github_rate_limit_stops_after_one_request_and_reports_reset_time() {
+        let source = MockSource::new(vec![http_response(
+            "403 Forbidden", "X-RateLimit-Remaining: 0\r\nX-RateLimit-Reset: 1792022400\r\n", r#"{"message":"API rate limit exceeded"}"#,
+        )]);
+        let error = tokio::runtime::Runtime::new().unwrap().block_on(checked_json::<RetryFixture>(&local_client(), &source.url)).unwrap_err();
+        assert_eq!(source.request_count(), 1);
+        assert!(matches!(error, AppError::SourceHttp { status: 403, rate_limited: true, .. }));
+        let message = error.to_string();
+        assert!(message.contains("请求限额已用尽"));
+        assert!(message.contains("UTC"));
+        assert!(!message.contains("无法识别的数据"));
+    }
+
+    #[test]
+    fn text_rate_limit_and_missing_json_are_not_retried() {
+        let source = MockSource::new(vec![http_response("429 Too Many Requests", "Retry-After: 120\r\n", "slow down")]);
+        let error = tokio::runtime::Runtime::new().unwrap().block_on(checked_text(&local_client(), &source.url)).unwrap_err();
+        assert!(matches!(error, AppError::SourceHttp { status: 429, rate_limited: true, retry_at: Some(_), .. }));
+        assert_eq!(source.request_count(), 1);
+        let missing = MockSource::new(vec![http_response("404 Not Found", "", "missing")]);
+        let error = tokio::runtime::Runtime::new().unwrap().block_on(checked_json::<RetryFixture>(&local_client(), &missing.url)).unwrap_err();
+        assert!(matches!(error, AppError::SourceHttp { status: 404, .. }));
+        assert_eq!(missing.request_count(), 1);
+    }
+
+    #[test]
+    fn source_retry_time_accepts_http_date_and_ignores_overflow() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(reqwest::header::RETRY_AFTER, "Wed, 14 Oct 2026 16:00:00 GMT".parse().unwrap());
+        assert_eq!(source_retry_time(&headers, Utc::now()).unwrap().to_rfc3339(), "2026-10-14T16:00:00+00:00");
+        headers.insert(reqwest::header::RETRY_AFTER, i64::MAX.to_string().parse().unwrap());
+        assert!(source_retry_time(&headers, Utc::now()).is_none());
+    }
+
+    #[test]
+    fn temporary_source_failure_retries_and_schema_errors_do_not() {
+        let source = MockSource::new(vec![http_response("503 Service Unavailable", "", "temporary"), http_response("200 OK", "Content-Type: application/json\r\n", r#"{"value":"ready"}"#)]);
+        let parsed = tokio::runtime::Runtime::new().unwrap().block_on(checked_json::<RetryFixture>(&local_client(), &source.url)).unwrap();
+        assert_eq!(parsed.value, "ready");
+        assert_eq!(source.request_count(), 2);
+        let malformed = MockSource::new(vec![http_response("200 OK", "Content-Type: application/json\r\n", r#"{"wrong":true}"#)]);
+        let error = tokio::runtime::Runtime::new().unwrap().block_on(checked_json::<RetryFixture>(&local_client(), &malformed.url)).unwrap_err();
+        assert!(matches!(error, AppError::InvalidSource(_)));
+        assert_eq!(malformed.request_count(), 1);
+    }
+
+    #[test]
+    fn server_retry_after_does_not_trigger_an_immediate_retry() {
+        let source = MockSource::new(vec![http_response("503 Service Unavailable", "Retry-After: 120\r\n", "temporary")]);
+        let error = tokio::runtime::Runtime::new().unwrap().block_on(checked_text(&local_client(), &source.url)).unwrap_err();
+        assert!(matches!(error, AppError::SourceHttp { status: 503, retry_at: Some(_), .. }));
+        assert_eq!(source.request_count(), 1);
+    }
+
+    #[test]
+    fn github_history_remains_available_when_a_later_page_hits_the_limit() {
+        let release = serde_json::json!({
+            "tag_name": "v2.50.1", "html_url": "https://github.com/git-for-windows/git/releases/tag/v2.50.1",
+            "published_at": null, "prerelease": false, "draft": false, "assets": []
+        });
+        let page = serde_json::to_string(&vec![release; 100]).unwrap();
+        let source = MockSource::new(vec![http_response("200 OK", "Content-Type: application/json\r\n", &page), http_response("403 Forbidden", "X-RateLimit-Remaining: 0\r\n", "limited")]);
+        let releases = tokio::runtime::Runtime::new().unwrap().block_on(checked_github_releases(&local_client(), &source.url)).unwrap();
+        assert_eq!(releases.len(), 100);
+        assert_eq!(source.request_count(), 2);
+        let requests = source.requests.lock().unwrap();
+        assert!(requests[0].contains("per_page=100&page=1"));
+        assert!(requests[1].contains("per_page=100&page=2"));
+    }
+
+    fn node_release(version: &str) -> NodeRelease {
+        NodeRelease { version: version.to_string(), date: "2026-10-14".to_string(), files: vec!["win-x64-zip".to_string()], lts: serde_json::Value::Bool(false) }
+    }
+
+    #[test]
+    fn node_history_is_complete_and_selected_checksum_is_fetched_once() {
+        let versions = build_node_versions((0..80).map(|index| node_release(&format!("v20.0.{index}"))).collect());
+        assert_eq!(versions.len(), 80);
+        assert!(versions.iter().all(|version| version.checksum.is_none()));
+        let mut selected = versions[75].clone();
+        let filename = format!("node-v{}-win-x64.zip", selected.version);
+        let checksum = "a".repeat(64);
+        let source = MockSource::new(vec![http_response("200 OK", "", &format!("{}  unrelated.zip\n{checksum}  {filename}\n", "b".repeat(64)))]);
+        tokio::runtime::Runtime::new().unwrap().block_on(fill_node_checksum(&local_client(), &mut selected, &source.url)).unwrap();
+        assert_eq!(source.request_count(), 1);
+        assert_eq!(selected.checksum.as_deref(), Some(checksum.as_str()));
+        assert_eq!(selected.checksum_algorithm.as_deref(), Some("sha256"));
+    }
+
+    #[test]
+    fn selected_node_metadata_rejects_missing_invalid_or_ambiguous_checksums() {
+        for body in ["abcd  node-v20.0.1-win-x64.zip\n".to_string(), format!("{}  node-v20.0.1-win-x64.zip\n{}  node-v20.0.1-win-x64.zip\n", "a".repeat(64), "b".repeat(64)), format!("{}  node-v20.0.2-win-x64.zip\n", "a".repeat(64))] {
+            let mut selected = build_node_versions(vec![node_release("v20.0.1")]).remove(0);
+            let source = MockSource::new(vec![http_response("200 OK", "", &body)]);
+            assert!(tokio::runtime::Runtime::new().unwrap().block_on(fill_node_checksum(&local_client(), &mut selected, &source.url)).is_err());
+            assert!(selected.checksum.is_none());
+        }
+    }
+
+    #[test]
+    fn selected_node_metadata_reuses_valid_checksum_and_rejects_untrusted_url() {
+        let mut selected = build_node_versions(vec![node_release("v20.0.1")]).remove(0);
+        selected.checksum_algorithm = Some("sha256".to_string());
+        selected.checksum = Some("a".repeat(64));
+        tokio::runtime::Runtime::new().unwrap().block_on(ensure_install_metadata(&local_client(), "node", &mut selected)).unwrap();
+        selected.download_url = Some("https://nodejs.org.evil.invalid/dist/node.zip".to_string());
+        assert!(tokio::runtime::Runtime::new().unwrap().block_on(ensure_install_metadata(&local_client(), "node", &mut selected)).is_err());
+    }
+
+    #[test]
+    fn github_web_fallback_keeps_official_asset_digests_and_rejects_foreign_links() {
+        let checksum = "a".repeat(64);
+        for (repository, tag, filename, selector) in [
+            ("git-for-windows/git", "v2.50.1.windows.1", "PortableGit-2.50.1-64-bit.7z.exe", select_portable_git as AssetSelector),
+            ("Kitware/CMake", "v4.0.1", "cmake-4.0.1-windows-x86_64.zip", select_cmake_zip as AssetSelector),
+            ("oneclick/rubyinstaller2", "RubyInstaller-3.4.1-1", "rubyinstaller-3.4.1-1-x64.7z", select_ruby_archive as AssetSelector),
+        ] {
+            let fixture = format!(r#"<ul><li><a href="/{repository}/releases/download/{tag}/{filename}">download</a><clipboard-copy value="sha256:{checksum}"></clipboard-copy></li><li><a href="https://evil.invalid/{filename}">fake</a></li><li><a href="/someone/else/releases/download/{tag}/{filename}">fake</a></li></ul>"#);
+            let page = format!("https://github.com/{repository}/releases/tag/{tag}");
+            let release = parse_github_web_release(repository, tag, &page, &fixture).unwrap();
+            assert_eq!(release.assets.len(), 1);
+            let selected = selector(&release.assets).unwrap();
+            assert_eq!(selected.name, filename);
+            assert_eq!(selected.digest.as_deref(), Some(format!("sha256:{checksum}").as_str()));
+            assert_eq!(official_github_release_tag(repository, &url::Url::parse(&page).unwrap()).unwrap(), tag);
+            assert!(official_github_release_tag(repository, &url::Url::parse(&page.replace("github.com", "github.com.evil.invalid")).unwrap()).is_err());
+        }
+    }
+
+    #[test]
+    fn github_web_fallback_rejects_conflicting_digests() {
+        let fixture = format!(r#"<li><a href="/git-for-windows/git/releases/download/v2.50.1/PortableGit-2.50.1-64-bit.7z.exe">download</a>sha256:{} sha256:{}</li>"#, "a".repeat(64), "b".repeat(64));
+        assert!(parse_github_web_release("git-for-windows/git", "v2.50.1", "https://github.com/git-for-windows/git/releases/tag/v2.50.1", &fixture).is_err());
     }
 
     #[test]
@@ -995,6 +1392,7 @@ mod tests {
             }
         });
         let client = reqwest::Client::builder()
+            .no_proxy()
             .timeout(std::time::Duration::from_secs(2))
             .build()
             .unwrap();

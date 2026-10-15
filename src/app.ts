@@ -8,6 +8,8 @@ import {
   restoreMainScrollPosition,
 } from "./scroll-state";
 import { backend } from "./bridge";
+import { latestCatalog } from "./catalog-state";
+import { previewInstallationEnvironment } from "./install-followup";
 import { aiProviderIcon } from "./ai-icons";
 import { toolBrandIcon } from "./brand-icons";
 import { localizeUi } from "./i18n";
@@ -96,6 +98,7 @@ const state: {
   error?: string;
   selectedToolId?: string;
   pendingPlan?: OperationPlan;
+  installationActivationPlanId?: string;
   applying: boolean;
   operationPanelMinimized: boolean;
   progress?: OperationProgress;
@@ -691,9 +694,10 @@ function renderToolDetail(): string {
               <button class="text-button" data-fetch-versions="${escapeHtml(tool.id)}" ${fetchingCatalog ? "disabled" : ""}>${fetchingCatalog ? `${icon("LoaderCircle", 14)} 查询中…` : catalog ? "刷新版本" : "查询官方源"}</button>
             </div>
           </div>
+          <p class="catalog-install-note">安装完成后会显示默认版本计划；确认后配置 PATH 和相关环境变量，也可选择仅保留安装。</p>
           ${
             catalog
-              ? `<div class="source-proof ${catalog.cached ? "cached" : ""}">${icon(catalog.cached ? "CloudOff" : "BadgeCheck", 15)}<span>${escapeHtml(catalog.sourceName)}${catalog.cached ? " · 网络不可用，显示上次成功结果" : ""}</span><time>${new Date(catalog.fetchedAt).toLocaleString(state.appPreferences?.language ?? "zh-CN")}</time></div>
+              ? `<div class="source-proof ${catalog.cached ? "cached" : ""}">${icon(catalog.cached ? "Database" : "BadgeCheck", 15)}<span>${escapeHtml(catalog.sourceName)}${catalog.cached ? " · 本地缓存，过期后后台更新" : ""}</span><time>${new Date(catalog.fetchedAt).toLocaleString(state.appPreferences?.language ?? "zh-CN")}</time></div>
                  <div class="version-stack remote-stack">
                    ${catalog.versions
                      .map(
@@ -1372,6 +1376,7 @@ function renderAiAnalysisModal(analysis: AiDiagnosticAnalysis): string {
 }
 
 function renderPlanModal(plan: OperationPlan): string {
+  const installationActivation = state.installationActivationPlanId === plan.id;
   return `
     <div class="overlay plan-overlay">
       <section class="plan-modal panel" role="dialog" aria-modal="true" aria-label="变更确认">
@@ -1388,6 +1393,7 @@ function renderPlanModal(plan: OperationPlan): string {
                  <small data-operation-percent>${operationPercentLabel()}</small>
                </div>`
             : `<div class="plan-body">
+                 ${installationActivation ? `<div class="plan-warnings"><p>${icon("Info", 15)}<span>安装已完成。确认本计划后配置 PATH 和相关环境变量；选择“仅保留安装”可稍后配置。</span></p></div>` : ""}
                  ${plan.requiresElevation ? `<div class="plan-blocker">${icon("ShieldAlert", 19)}<div><strong>当前计划被安全边界阻止</strong><p>系统 PATH 会遮蔽用户版本；本版本不擅自修改系统级配置。</p></div></div>` : ""}
                  ${
                    plan.warnings.length
@@ -1403,7 +1409,7 @@ function renderPlanModal(plan: OperationPlan): string {
         <footer class="plan-footer">
           ${
             !state.applying
-              ? `<span>${icon("LockKeyhole", 14)} 计划将在 ${new Date(plan.expiresAt).toLocaleTimeString("zh-CN")} 过期</span><div><button class="secondary-button" id="cancel-plan">取消</button><button class="primary-button" id="confirm-plan" ${plan.requiresElevation ? "disabled" : ""}>${icon("ShieldCheck", 16)} 确认并执行</button></div>`
+              ? `<span>${icon("LockKeyhole", 14)} 计划将在 ${new Date(plan.expiresAt).toLocaleTimeString("zh-CN")} 过期</span><div><button class="secondary-button" id="cancel-plan">${installationActivation ? "仅保留安装" : "取消"}</button><button class="primary-button" id="confirm-plan" ${plan.requiresElevation ? "disabled" : ""}>${icon("ShieldCheck", 16)} 确认并执行</button></div>`
               : `<span>${icon("Info", 14)} 可继续使用应用或最小化到托盘；退出应用会中止任务</span><div><button class="primary-button" id="minimize-operation">${icon("Minimize2", 16)} 后台运行</button></div>`
           }
         </footer>
@@ -2001,7 +2007,8 @@ function bindEvents(root: HTMLElement): void {
       state.error = undefined;
       render();
       try {
-        state.catalogs.set(toolId, await backend.fetchVersions(toolId));
+        const catalog = await backend.fetchVersions(toolId, state.catalogs.has(toolId));
+        state.catalogs.set(toolId, latestCatalog(state.catalogs.get(toolId), catalog));
         state.error = undefined;
       } catch (error) {
         state.error = `官方版本查询失败：${String(error)}`;
@@ -2077,6 +2084,10 @@ function bindEvents(root: HTMLElement): void {
   });
   root.querySelectorAll("#cancel-plan").forEach((element) => {
     element.addEventListener("click", () => {
+      if (state.installationActivationPlanId === state.pendingPlan?.id) {
+        state.notice = "安装已完成；尚未应用环境变量。需要启用时，请在已安装版本中点击“切换默认”。";
+      }
+      state.installationActivationPlanId = undefined;
       state.pendingPlan = undefined;
       state.progress = undefined;
       render();
@@ -2309,6 +2320,7 @@ async function applyPendingPlan(): Promise<void> {
   const plan = state.pendingPlan;
   if (!plan || state.applying) return;
   state.applying = true;
+  state.installationActivationPlanId = undefined;
   state.operationPanelMinimized = true;
   state.progress = {
     operationId: plan.id,
@@ -2322,8 +2334,15 @@ async function applyPendingPlan(): Promise<void> {
   try {
     const result = await backend.applyPlan(plan.id, plan.confirmationToken);
     state.notice = result.message;
-    state.pendingPlan = undefined;
-    state.progress = undefined;
+    state.progress = {
+      operationId: plan.id,
+      phase: "refresh",
+      message: "操作已完成，正在刷新本机状态并准备后续计划…",
+      receivedBytes: state.progress?.receivedBytes ?? 0,
+      totalBytes: state.progress?.totalBytes,
+      percent: 100,
+    };
+    updateOperationProgressUi();
     try {
       const [scan, preferences] = await Promise.all([
         backend.refreshEnvironmentScan(),
@@ -2341,6 +2360,11 @@ async function applyPendingPlan(): Promise<void> {
     } catch {
       // 操作已提交，终端命令状态可在命令说明页重新读取。
     }
+    const followup = await previewInstallationEnvironment(plan, result, backend.previewSwitch);
+    state.notice = followup.notice;
+    state.pendingPlan = followup.pendingPlan;
+    state.progress = undefined;
+    state.installationActivationPlanId = followup.pendingPlan?.id;
   } catch (error) {
     state.error = `操作失败：${String(error)}`;
     state.pendingPlan = undefined;
@@ -2597,6 +2621,11 @@ async function handleTrayAction(action: TrayAction): Promise<void> {
 export async function startApp(): Promise<void> {
   applyTheme(getStoredTheme());
   try {
+    await listen<VersionCatalog>("version-catalog-updated", (event) => {
+      const current = state.catalogs.get(event.payload.toolId);
+      state.catalogs.set(event.payload.toolId, latestCatalog(current, event.payload));
+      if (state.selectedToolId === event.payload.toolId && !state.applying) render();
+    });
     await listen<OperationProgress>("operation-progress", (event) => {
       if (!state.applying) return;
       const currentOperationId = state.pendingPlan?.id;

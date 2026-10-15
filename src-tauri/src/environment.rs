@@ -47,6 +47,104 @@ pub fn read_environment(_scope: EnvironmentScope) -> AppResult<EnvironmentMap> {
     Ok(std::env::vars().collect())
 }
 
+/// Fresh overrides for a child process; process-only variables remain inherited.
+pub fn current_process_environment() -> AppResult<EnvironmentMap> {
+    #[cfg(windows)]
+    {
+        let inherited = std::env::vars().collect();
+        let user = read_environment(EnvironmentScope::User)?;
+        let system = read_environment(EnvironmentScope::System)?;
+        Ok(process_environment_from_snapshots(
+            &inherited, &user, &system,
+        ))
+    }
+    #[cfg(not(windows))]
+    {
+        Ok(std::env::vars().collect())
+    }
+}
+
+#[cfg(any(windows, test))]
+fn process_environment_from_snapshots(
+    inherited: &EnvironmentMap,
+    user: &EnvironmentMap,
+    system: &EnvironmentMap,
+) -> EnvironmentMap {
+    let mut values = system
+        .iter()
+        .chain(user.iter())
+        .map(|(name, value)| (name.to_ascii_uppercase(), value.clone()))
+        .collect::<EnvironmentMap>();
+    let system_path = get_case_insensitive(system, "PATH");
+    let user_path = get_case_insensitive(user, "PATH");
+    if system_path.is_some() || user_path.is_some() {
+        let path = [system_path, user_path]
+            .into_iter()
+            .flatten()
+            .filter(|value| !value.is_empty())
+            .map(String::as_str)
+            .collect::<Vec<_>>()
+            .join(";");
+        values.insert("PATH".to_string(), path);
+    }
+    let mut lookup = inherited
+        .iter()
+        .map(|(name, value)| (name.to_ascii_uppercase(), value.clone()))
+        .collect::<EnvironmentMap>();
+    lookup.extend(values.clone());
+    values
+        .into_iter()
+        .map(|(name, value)| {
+            let mut visiting = HashSet::from([name.clone()]);
+            let expanded = expand_environment_value(&value, &lookup, &mut visiting, 0);
+            (name, expanded)
+        })
+        .collect()
+}
+
+#[cfg(any(windows, test))]
+fn expand_environment_value(
+    value: &str,
+    lookup: &EnvironmentMap,
+    visiting: &mut HashSet<String>,
+    depth: usize,
+) -> String {
+    // Keep cycles and excessively deep chains literal instead of recursing forever.
+    if depth >= 16 {
+        return value.to_string();
+    }
+    let mut expanded = String::new();
+    let mut remaining = value;
+    while let Some(start) = remaining.find('%') {
+        expanded.push_str(&remaining[..start]);
+        let after_start = &remaining[start + 1..];
+        let Some(end) = after_start.find('%') else {
+            expanded.push_str(&remaining[start..]);
+            return expanded;
+        };
+        let name = after_start[..end].to_ascii_uppercase();
+        let reference = &remaining[start..start + end + 2];
+        if let Some(replacement) = lookup
+            .get(&name)
+            .filter(|_| !name.is_empty() && !visiting.contains(&name))
+        {
+            visiting.insert(name.clone());
+            expanded.push_str(&expand_environment_value(
+                replacement,
+                lookup,
+                visiting,
+                depth + 1,
+            ));
+            visiting.remove(&name);
+        } else {
+            expanded.push_str(reference);
+        }
+        remaining = &after_start[end + 1..];
+    }
+    expanded.push_str(remaining);
+    expanded
+}
+
 pub fn get_case_insensitive<'a>(map: &'a EnvironmentMap, name: &str) -> Option<&'a String> {
     map.iter()
         .find(|(key, _)| key.eq_ignore_ascii_case(name))
@@ -441,6 +539,68 @@ pub fn collect_candidate_roots(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn child_environment_uses_fresh_registry_values_and_combined_path() {
+        let inherited = EnvironmentMap::from([
+            ("JAVA_HOME".to_string(), r"E:\OldJava".to_string()),
+            ("Path".to_string(), r"E:\StalePath".to_string()),
+            ("USERPROFILE".to_string(), r"C:\Users\测试".to_string()),
+            ("SystemRoot".to_string(), r"C:\Windows".to_string()),
+            ("PROCESS_ONLY".to_string(), "inherited".to_string()),
+        ]);
+        let system = EnvironmentMap::from([
+            ("JAVA_HOME".to_string(), r"C:\SystemJava".to_string()),
+            ("Path".to_string(), r"%systemroot%\System32".to_string()),
+        ]);
+        let user = EnvironmentMap::from([
+            (
+                "java_home".to_string(),
+                r"E:\Environment\java\21".to_string(),
+            ),
+            ("JDK_HOME".to_string(), "%JaVa_HoMe%".to_string()),
+            (
+                "PATH".to_string(),
+                r"%jdk_home%\bin;%USERPROFILE%\AppData\Local\Microsoft\WindowsApps".to_string(),
+            ),
+        ]);
+
+        let overrides = process_environment_from_snapshots(&inherited, &user, &system);
+
+        assert_eq!(overrides["JAVA_HOME"], r"E:\Environment\java\21");
+        assert_eq!(overrides["JDK_HOME"], r"E:\Environment\java\21");
+        assert_eq!(
+            overrides["PATH"],
+            r"C:\Windows\System32;E:\Environment\java\21\bin;C:\Users\测试\AppData\Local\Microsoft\WindowsApps"
+        );
+        assert!(!overrides.contains_key("PROCESS_ONLY"));
+        assert!(!overrides["PATH"].contains("StalePath"));
+    }
+
+    #[test]
+    fn child_environment_preserves_unknown_references_and_bounds_cycles() {
+        let user = EnvironmentMap::from([
+            ("FIRST".to_string(), "%SECOND%".to_string()),
+            ("SECOND".to_string(), "%FIRST%".to_string()),
+            ("SELF".to_string(), "%SELF%".to_string()),
+            (
+                "LITERAL".to_string(),
+                "未知 %MISSING% 100% complete".to_string(),
+            ),
+            ("Path".to_string(), r"E:\Environment\工具\bin".to_string()),
+        ]);
+        let overrides = process_environment_from_snapshots(
+            &EnvironmentMap::new(),
+            &user,
+            &EnvironmentMap::new(),
+        );
+
+        assert_eq!(overrides["FIRST"], "%FIRST%");
+        assert_eq!(overrides["SECOND"], "%SECOND%");
+        assert_eq!(overrides["SELF"], "%SELF%");
+        assert_eq!(overrides["LITERAL"], "未知 %MISSING% 100% complete");
+        assert_eq!(overrides["PATH"], r"E:\Environment\工具\bin");
+    }
 
     #[test]
     fn detects_duplicate_relative_missing_and_empty_path_entries() {

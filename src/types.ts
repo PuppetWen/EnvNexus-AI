@@ -221,6 +221,14 @@ export interface OperationLogEntry {
 export interface OperationPlan {
   id: string;
   toolId: string;
+  actionKind?:
+    | "switch"
+    | "install"
+    | "repair"
+    | "uninstall"
+    | "restoreEnvironment"
+    | "updateUserEnvironment"
+    | "none";
   title: string;
   summary: string;
   createdAt: string;

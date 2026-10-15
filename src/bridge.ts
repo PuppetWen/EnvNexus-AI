@@ -133,8 +133,8 @@ export const backend = {
     return invoke("recent_operation_logs");
   },
 
-  fetchVersions(toolId: string): Promise<VersionCatalog> {
-    return invoke("fetch_versions", { toolId });
+  fetchVersions(toolId: string, refresh = false): Promise<VersionCatalog> {
+    return invoke("fetch_versions", { toolId, refresh });
   },
 
   previewSwitch(toolId: string, installationPath: string): Promise<OperationPlan> {

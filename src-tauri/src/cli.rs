@@ -15,6 +15,7 @@ use crate::{
 };
 
 pub fn main() -> ExitCode {
+    crate::process::initialize_error_mode();
     let runtime = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -37,6 +38,7 @@ pub fn main() -> ExitCode {
 async fn run(mut args: Vec<String>) -> AppResult<()> {
     let json = remove_flag(&mut args, "--json");
     let confirmed = remove_flag(&mut args, "--yes");
+    let refresh = remove_flag(&mut args, "--refresh");
     let data_root = crate::resolve_data_root();
     crate::ensure_data_layout(&data_root)?;
     let registry = PluginRegistry::builtin();
@@ -72,13 +74,9 @@ async fn run(mut args: Vec<String>) -> AppResult<()> {
             let tool_id = normalize_tool_id(required_arg(
                 &args,
                 1,
-                "用法：EnvNexus-AI.exe versions <tool>",
+                "用法：EnvNexus-AI.exe versions <tool> [--refresh]",
             )?);
-            let client = http_client()?;
-            let catalog = registry
-                .get(tool_id)?
-                .fetch_available_versions(&client)
-                .await?;
+            let catalog = crate::catalogs::CatalogService::default().load(&registry, &data_root, tool_id, refresh).await?;
             if json {
                 print_json(&catalog)
             } else {
@@ -443,15 +441,9 @@ async fn install(
             "尚未设置 {tool_id} 安装根目录；先运行 {tool_id}-root set <path>"
         ))
     })?;
-    let client = http_client()?;
-    let catalog = plugin.fetch_available_versions(&client).await?;
-    let remote = catalog
-        .versions
-        .iter()
-        .find(|remote| remote.version == version)
-        .ok_or_else(|| AppError::Message("官方版本清单中不存在指定版本".to_string()))?;
+    let remote = crate::catalogs::CatalogService::default().selected_version(registry, data_root, tool_id, version).await?;
     let plans = PlanService::new(data_root.to_path_buf());
-    let plan = plans.preview_install(plugin.descriptor(), remote, root)?;
+    let plan = plans.preview_install(plugin.descriptor(), &remote, root)?;
     apply_or_preview(registry, data_root, &plans, plan, confirmed, json).await
 }
 
@@ -464,7 +456,7 @@ async fn repair(
     json: bool,
 ) -> AppResult<()> {
     let plugin = registry.get(tool_id)?;
-    let client = http_client()?;
+    let client = crate::download_http_client()?;
     let installer = Installer::new(client.clone(), data_root.to_path_buf());
     let manifest = installer.load_manifest(&installation_path)?;
     if manifest.tool_id != tool_id {
@@ -472,16 +464,11 @@ async fn repair(
             "受管安装清单与工具 ID 不匹配".to_string(),
         ));
     }
-    let catalog = plugin.fetch_available_versions(&client).await?;
-    let remote = catalog
-        .versions
-        .iter()
-        .find(|remote| remote.version == manifest.version)
-        .ok_or_else(|| AppError::Message("官方清单中已找不到该版本".to_string()))?;
+    let remote = crate::catalogs::CatalogService::default().selected_version(registry, data_root, tool_id, &manifest.version).await?;
     let plans = PlanService::new(data_root.to_path_buf());
     let plan = plans.preview_repair(
         plugin.descriptor(),
-        remote,
+        &remote,
         manifest.managed_root,
         manifest.installation_path,
     )?;
@@ -511,9 +498,8 @@ async fn apply_or_preview(
         println!("已收到 --yes，开始执行。");
     }
     let plan = plans.take_confirmed(&plan.id, &plan.confirmation_token)?;
-    let client = http_client()?;
-    let installer = Installer::new(client, data_root.to_path_buf());
-    let result = match &plan.action {
+    let installer = Installer::new(crate::download_http_client()?, data_root.to_path_buf());
+    let mut result = match &plan.action {
         PlannedAction::Switch { .. }
         | PlannedAction::RestoreEnvironment { .. }
         | PlannedAction::UpdateUserEnvironment { .. } => {
@@ -547,6 +533,15 @@ async fn apply_or_preview(
             installation_path: None,
         },
     };
+    if matches!(plan.action, PlannedAction::Install(_))
+        && let Some(path) = &result.installation_path
+    {
+        result.message.push_str(&format!(
+            "；配置环境请执行 EnvNexus-AI.exe use {} \"{}\" --yes",
+            plan.tool_id,
+            path.display()
+        ));
+    }
     if result.status == "committed"
         && let Ok(scan) = scanner::refresh(registry, data_root)
     {
@@ -586,18 +581,6 @@ fn print_plan(plan: &OperationPlan) {
             step.description
         );
     }
-}
-
-fn http_client() -> AppResult<reqwest::Client> {
-    reqwest::Client::builder()
-        .user_agent(format!(
-            "EnvNexus-AI-commands/{}",
-            env!("CARGO_PKG_VERSION")
-        ))
-        .https_only(true)
-        .timeout(std::time::Duration::from_secs(60))
-        .build()
-        .map_err(AppError::from)
 }
 
 fn normalize_tool_id(value: &str) -> &str {
@@ -649,7 +632,7 @@ list/diagnose 默认读取桌面 App 保存的上次快照。
   env-refresh [--json]
   EnvNexus-AI.exe command-scripts prepare [--json]
   jdk-list [--json]
-  jdk-versions [--json]
+  jdk-versions [--refresh] [--json]
   jdk-root get
   jdk-root set <absolute-path>
   jdk-install <version> [--yes] [--json]

@@ -1,5 +1,7 @@
 param(
-    [switch]$Release
+    [switch]$Release,
+    [string]$LlvmBin,
+    [string]$ResourceCompiler
 )
 
 $ErrorActionPreference = "Stop"
@@ -15,13 +17,17 @@ try {
     & ".\node_modules\.bin\vite.cmd" build
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-    & ".\scripts\Invoke-Rust.ps1" -Task fmt
+    $RustOptions = @{}
+    if ($LlvmBin) { $RustOptions.LlvmBin = $LlvmBin }
+    if ($ResourceCompiler) { $RustOptions.ResourceCompiler = $ResourceCompiler }
+
+    & ".\scripts\Invoke-Rust.ps1" -Task fmt @RustOptions
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-    & ".\scripts\Invoke-Rust.ps1" -Task test -Release:$Release
+    & ".\scripts\Invoke-Rust.ps1" -Task test -Release:$Release @RustOptions
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-    & ".\scripts\Invoke-Rust.ps1" -Task clippy -Release:$Release
+    & ".\scripts\Invoke-Rust.ps1" -Task clippy -Release:$Release @RustOptions
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 }
 finally {
