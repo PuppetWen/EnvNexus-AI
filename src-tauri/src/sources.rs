@@ -1218,6 +1218,7 @@ mod tests {
     struct MockSource {
         url: String,
         requests: Arc<Mutex<Vec<String>>>,
+        failures: Arc<Mutex<Vec<String>>>,
         stop: mpsc::Sender<()>,
         worker: Option<std::thread::JoinHandle<()>>,
     }
@@ -1229,31 +1230,64 @@ mod tests {
             let url = format!("http://{}", listener.local_addr().unwrap());
             let requests = Arc::new(Mutex::new(Vec::new()));
             let server_requests = requests.clone();
+            let failures = Arc::new(Mutex::new(Vec::new()));
+            let server_failures = failures.clone();
             let (stop, stopped) = mpsc::channel();
             let worker = std::thread::spawn(move || {
                 let mut index = 0;
                 while matches!(stopped.try_recv(), Err(mpsc::TryRecvError::Empty)) {
                     match listener.accept() {
                         Ok((mut stream, _)) => {
-                            stream.set_read_timeout(Some(std::time::Duration::from_secs(2))).unwrap();
-                            let mut request = [0_u8; 8192];
-                            let length = stream.read(&mut request).unwrap();
-                            server_requests.lock().unwrap().push(String::from_utf8_lossy(&request[..length]).to_string());
+                            let request = (|| -> std::io::Result<String> {
+                                // Winsock accept inherits the listener's nonblocking mode.
+                                // Reset it before waiting for a client's request bytes.
+                                stream.set_nonblocking(false)?;
+                                stream.set_read_timeout(Some(std::time::Duration::from_secs(2)))?;
+                                stream.set_write_timeout(Some(std::time::Duration::from_secs(2)))?;
+                                let mut request = Vec::new();
+                                let mut buffer = [0_u8; 2048];
+                                while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                                    match stream.read(&mut buffer) {
+                                        Ok(0) => return Err(std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "mock client closed before sending its request headers")),
+                                        Ok(length) => request.extend_from_slice(&buffer[..length]),
+                                        Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                                        Err(error) => return Err(error),
+                                    }
+                                    if request.len() > 64 * 1024 {
+                                        return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "mock request headers exceed the limit"));
+                                    }
+                                }
+                                String::from_utf8(request).map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
+                            })();
+                            let request = match request {
+                                Ok(request) => request,
+                                Err(error) => {
+                                    server_failures.lock().unwrap().push(error.to_string());
+                                    continue;
+                                }
+                            };
+                            server_requests.lock().unwrap().push(request);
                             let response = &responses[index.min(responses.len() - 1)];
+                            // Status-error tests may close the response without reading its body.
                             let _ = stream.write_all(response.as_bytes());
                             index += 1;
                         }
                         Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                             std::thread::sleep(std::time::Duration::from_millis(5));
                         }
-                        Err(error) => panic!("mock source accept: {error}"),
+                        Err(error) => {
+                            server_failures.lock().unwrap().push(format!("mock source accept: {error}"));
+                            break;
+                        }
                     }
                 }
             });
-            Self { url, requests, stop, worker: Some(worker) }
+            Self { url, requests, failures, stop, worker: Some(worker) }
         }
 
         fn request_count(&self) -> usize {
+            let failures = self.failures.lock().unwrap();
+            assert!(failures.is_empty(), "mock source failed: {}", failures.join("; "));
             self.requests.lock().unwrap().len()
         }
     }
@@ -1262,7 +1296,11 @@ mod tests {
         fn drop(&mut self) {
             let _ = self.stop.send(());
             if let Some(worker) = self.worker.take() {
-                worker.join().unwrap();
+                // A destructor must not panic while the test is already unwinding:
+                // that aborts the entire harness and hides all earlier failures.
+                if worker.join().is_err() {
+                    let _ = writeln!(std::io::stderr(), "mock source worker panicked during cleanup");
+                }
             }
         }
     }
@@ -1278,6 +1316,23 @@ mod tests {
     #[derive(Debug, Deserialize)]
     struct RetryFixture {
         value: String,
+    }
+
+    #[test]
+    fn mock_source_waits_for_delayed_and_fragmented_request_headers() {
+        let source = MockSource::new(vec![http_response("200 OK", "", "ready")]);
+        let address = source.url.strip_prefix("http://").unwrap();
+        let mut stream = std::net::TcpStream::connect(address).unwrap();
+        stream.set_read_timeout(Some(std::time::Duration::from_secs(3))).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        stream.write_all(b"GET / HTTP/1.1\r\nHost: local").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        stream.write_all(b"host\r\nConnection: close\r\n\r\n").unwrap();
+        let mut response = String::new();
+        stream.read_to_string(&mut response).unwrap();
+        assert!(response.ends_with("ready"));
+        assert_eq!(source.request_count(), 1);
+        assert!(source.requests.lock().unwrap()[0].contains("Host: localhost\r\n"));
     }
 
     #[test]
@@ -1381,6 +1436,7 @@ mod tests {
             let mut selected = build_node_versions(vec![node_release("v20.0.1")]).remove(0);
             let source = MockSource::new(vec![http_response("200 OK", "", &body)]);
             assert!(tokio::runtime::Runtime::new().unwrap().block_on(fill_node_checksum(&local_client(), &mut selected, &source.url)).is_err());
+            assert_eq!(source.request_count(), 1);
             assert!(selected.checksum.is_none());
         }
     }

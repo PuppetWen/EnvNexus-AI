@@ -182,6 +182,7 @@ $CargoArguments = @($CargoTask, "--manifest-path", $ManifestPath)
 if ($Release -and $CargoTask -in @("build", "test", "clippy")) { $CargoArguments += "--release" }
 if ($Task -eq "build") { $CargoArguments += @("--features", "tauri/custom-protocol") }
 if ($Task -eq "clippy") { $CargoArguments += @("--all-targets", "--", "-D", "warnings") }
+if ($Task -eq "test") { $CargoArguments += @("--", "--nocapture") }
 $LiveTests = @{
     "live-sources" = "live_official_catalogs_return_windows_downloads"
     "live-added-sources" = "live_added_catalogs_return_windows_downloads"

@@ -4,7 +4,7 @@ use std::{
     io::{BufReader, Read, Write},
     path::{Component, Path, PathBuf},
     process::Stdio,
-    sync::{Mutex, atomic::{AtomicBool, AtomicU64, Ordering}},
+    sync::{Mutex, atomic::{AtomicU64, Ordering}},
     time::{Duration, Instant},
 };
 
@@ -18,6 +18,7 @@ use tauri::{AppHandle, Emitter};
 use tokio::{
     fs::{File as AsyncFile, OpenOptions},
     io::{AsyncWriteExt, BufWriter as AsyncBufWriter},
+    sync::watch,
 };
 
 use crate::{
@@ -526,20 +527,25 @@ impl Installer {
     ) -> AppResult<bool> {
         let parts = DownloadParts::create(partial)?;
         let progress = DownloadProgress::new(app, operation_id, Some(metadata.total), 0);
-        let cancelled = AtomicBool::new(false);
+        let (cancel, cancellation) = watch::channel(false);
         let segment_size = metadata.total.div_ceil(PARALLEL_DOWNLOAD_STREAMS);
         let downloads = parts.paths.iter().enumerate().map(|(index, path)| {
             let start = index as u64 * segment_size;
             let end = start.saturating_add(segment_size).min(metadata.total) - 1;
             let progress = &progress;
-            let cancelled = &cancelled;
+            let cancel = &cancel;
+            let mut cancellation = cancellation.clone();
             async move {
                 let result = async {
                 let response = self.client.get(&request.download_url)
                     .header(header::ACCEPT_ENCODING, "identity")
                     .header(header::RANGE, format!("bytes={start}-{end}"))
                     .header(header::IF_RANGE, metadata.validator.value())
-                    .send().await?;
+                    .send();
+                let Some(response) = unless_download_cancelled(&mut cancellation, response).await else {
+                    return Ok(false);
+                };
+                let response = response?;
                 validate_final_download_host(response.url().host_str().unwrap_or_default())?;
                 if response.status() == StatusCode::OK {
                     return Ok(false);
@@ -568,10 +574,12 @@ impl Installer {
                 let mut stream = response.bytes_stream();
                 let mut received = 0_u64;
                 let streamed = async {
-                while let Some(chunk) = stream.next().await {
-                    if cancelled.load(Ordering::Relaxed) {
-                        return Ok(false);
-                    }
+                loop {
+                    let chunk = match unless_download_cancelled(&mut cancellation, stream.next()).await {
+                        Some(Some(chunk)) => chunk,
+                        Some(None) => break,
+                        None => return Ok(false),
+                    };
                     let chunk = chunk?;
                     if chunk.len() as u64 > expected_range.length().saturating_sub(received) {
                         return Err(AppError::InvalidSource("下载分片超出声明长度，已停止以避免文件损坏".to_string()));
@@ -586,7 +594,7 @@ impl Installer {
                 Ok(true)
                 }.await;
                 if !matches!(streamed, Ok(true)) {
-                    cancelled.store(true, Ordering::Relaxed);
+                    cancel.send_replace(true);
                 }
                 let flushed = finish_download_file(file).await;
                 // Keep the original network/range error even if flushing also fails.
@@ -597,7 +605,7 @@ impl Installer {
                 Ok(complete)
                 }.await;
                 if !matches!(result, Ok(true)) {
-                    cancelled.store(true, Ordering::Relaxed);
+                    cancel.send_replace(true);
                 }
                 result
             }
@@ -855,6 +863,21 @@ impl Installer {
         {
             let _ = writeln!(file, "{value}");
         }
+    }
+}
+
+async fn unless_download_cancelled<F: std::future::Future>(
+    cancellation: &mut watch::Receiver<bool>,
+    future: F,
+) -> Option<F::Output> {
+    if *cancellation.borrow() {
+        return None;
+    }
+    let changed = cancellation.changed();
+    futures_util::pin_mut!(changed, future);
+    match futures_util::future::select(changed, future).await {
+        futures_util::future::Either::Left(_) => None,
+        futures_util::future::Either::Right((output, _)) => Some(output),
     }
 }
 
@@ -1782,7 +1805,7 @@ mod tests {
     }
 
     fn check_parallel_download(fixture: RangeFixture) {
-        use std::sync::atomic::AtomicUsize;
+        use std::sync::atomic::{AtomicBool, AtomicUsize};
 
         let temp = tempdir().unwrap();
         let data_root = temp.path().join("data");
@@ -1796,10 +1819,14 @@ mod tests {
         let active = Arc::new(AtomicUsize::new(0));
         let max_active = Arc::new(AtomicUsize::new(0));
         let trigger_cancellation = Arc::new(AtomicBool::new(false));
+        let download_finished = Arc::new(AtomicBool::new(false));
+        let cancellation_started = Arc::new(Mutex::new(None));
         let server_data_root = data_root.clone();
         let server_ranges = ranges.clone();
         let server_payload = payload.clone();
         let server_max_active = max_active.clone();
+        let server_finished = download_finished.clone();
+        let server_cancellation_started = cancellation_started.clone();
         let request_count = if matches!(fixture, RangeFixture::Unsupported | RangeFixture::MissingLastModified) { 6 } else { 5 };
         let server = std::thread::spawn(move || {
             let deadline = Instant::now() + Duration::from_secs(10);
@@ -1814,12 +1841,18 @@ mod tests {
                     }
                     Err(error) => panic!("test HTTP server failed: {error}"),
                 };
+                // Windows accepted sockets inherit a nonblocking listener's mode.
+                // These synchronous fixture workers require blocking read/write_all.
+                stream.set_nonblocking(false).unwrap();
+                stream.set_write_timeout(Some(Duration::from_secs(5))).unwrap();
                 let payload = server_payload.clone();
                 let ranges = server_ranges.clone();
                 let full_requests = full_requests.clone();
                 let active = active.clone();
                 let max_active = server_max_active.clone();
                 let trigger_cancellation = trigger_cancellation.clone();
+                let download_finished = server_finished.clone();
+                let cancellation_started = server_cancellation_started.clone();
                 let data_root = server_data_root.clone();
                 workers.push(std::thread::spawn(move || {
                     stream.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
@@ -1841,7 +1874,13 @@ mod tests {
                         ranges.lock().unwrap().push(range.to_string());
                         let concurrent = active.fetch_add(1, Ordering::SeqCst) + 1;
                         max_active.fetch_max(concurrent, Ordering::SeqCst);
-                        std::thread::sleep(Duration::from_millis(50));
+                        // Every request must be in flight before a response can cancel
+                        // its siblings; sleeping here would race on a busy CI runner.
+                        let deadline = Instant::now() + Duration::from_secs(5);
+                        while ranges.lock().unwrap().len() < PARALLEL_DOWNLOAD_STREAMS as usize {
+                            assert!(Instant::now() < deadline, "all range requests must arrive before responding");
+                            std::thread::sleep(Duration::from_millis(5));
+                        }
                         if matches!(fixture, RangeFixture::Unsupported) {
                             let _ = write!(stream, "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", payload.len());
                         } else {
@@ -1851,13 +1890,20 @@ mod tests {
                             let response_start = if matches!(fixture, RangeFixture::WrongRange) { start + 1 } else { start };
                             let cancel_after_write = matches!(fixture, RangeFixture::CancelledAfterWrite) && end + 1 == payload.len();
                             if cancel_after_write {
-                                let deadline = Instant::now() + Duration::from_secs(3);
+                                let deadline = Instant::now() + Duration::from_secs(10);
                                 loop {
                                     let written = fs::read_dir(data_root.join("downloads/python")).unwrap()
                                         .filter_map(Result::ok).filter(|entry| entry.path().is_dir())
                                         .flat_map(|entry| fs::read_dir(entry.path()).unwrap())
                                         .filter_map(Result::ok)
-                                        .filter(|entry| entry.metadata().is_ok_and(|metadata| metadata.len() >= DOWNLOAD_BUFFER_BYTES as u64))
+                                        .filter(|entry| {
+                                            // Observe actual bytes, not directory metadata
+                                            // for another worker's still-open Windows file.
+                                            let mut bytes = vec![0; DOWNLOAD_BUFFER_BYTES];
+                                            File::open(entry.path())
+                                                .and_then(|mut file| file.read_exact(&mut bytes))
+                                                .is_ok()
+                                        })
                                         .count();
                                     if written >= 3 { break; }
                                     assert!(Instant::now() < deadline, "other workers must write before cancellation");
@@ -1867,19 +1913,28 @@ mod tests {
                             let etag = if matches!(fixture, RangeFixture::ChangedEntity) || cancel_after_write { "changed" } else { "fixture" };
                             let validator = if matches!(fixture, RangeFixture::MissingLastModified) { String::new() } else { format!("ETag: \"{etag}\"\r\n") };
                             let headers = format!("HTTP/1.1 206 Partial Content\r\nContent-Length: {}\r\nContent-Range: bytes {}-{}/{}\r\n{validator}Connection: close\r\n\r\n", end - start + 1, response_start, end, payload.len());
+                            if cancel_after_write {
+                                *cancellation_started.lock().unwrap() = Some(Instant::now());
+                            }
                             let _ = stream.write_all(headers.as_bytes());
                             if cancel_after_write {
                                 trigger_cancellation.store(true, Ordering::SeqCst);
                             } else if matches!(fixture, RangeFixture::CancelledAfterWrite) {
                                 let first_end = start + 2 * DOWNLOAD_BUFFER_BYTES;
                                 stream.write_all(&payload[start..first_end]).unwrap();
-                                let deadline = Instant::now() + Duration::from_secs(4);
+                                let deadline = Instant::now() + Duration::from_secs(10);
                                 while !trigger_cancellation.load(Ordering::SeqCst) {
                                     assert!(Instant::now() < deadline, "last worker must trigger cancellation");
                                     std::thread::sleep(Duration::from_millis(5));
                                 }
-                                std::thread::sleep(Duration::from_millis(20));
-                                let _ = stream.write_all(&payload[first_end..=end]);
+                                // Keep the body idle and the socket open. Cancellation
+                                // must wake a pending body read without waiting for the
+                                // client read timeout or another network byte.
+                                let deadline = Instant::now() + Duration::from_secs(3);
+                                while !download_finished.load(Ordering::SeqCst) {
+                                    assert!(Instant::now() < deadline, "cancelled workers must wake while response bodies remain idle");
+                                    std::thread::sleep(Duration::from_millis(5));
+                                }
                             }
                             if matches!(fixture, RangeFixture::Supported) {
                                 let _ = stream.write_all(&payload[start..=end]);
@@ -1909,7 +1964,12 @@ mod tests {
             .read_timeout(Duration::from_secs(5)).build().unwrap();
         let installer = Installer::new(client, data_root.clone());
         let result = tokio::runtime::Runtime::new().unwrap().block_on(installer.download("parallel-test", &request, None));
+        let cancellation_elapsed = cancellation_started.lock().unwrap().map(|started| started.elapsed());
+        download_finished.store(true, Ordering::SeqCst);
         server.join().unwrap();
+        if matches!(fixture, RangeFixture::CancelledAfterWrite) {
+            assert!(cancellation_elapsed.is_some_and(|elapsed| elapsed < Duration::from_secs(3)), "cancellation must not wait for the 5-second response read timeout: {cancellation_elapsed:?}");
+        }
         match fixture {
             RangeFixture::Supported | RangeFixture::Unsupported | RangeFixture::MissingLastModified => assert_eq!(fs::read(result.unwrap()).unwrap(), *payload),
             RangeFixture::WrongRange => assert!(result.unwrap_err().to_string().contains("分片范围")),

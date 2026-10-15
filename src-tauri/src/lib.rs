@@ -1,7 +1,7 @@
 mod ai;
 mod app_preferences;
-mod catalogs;
 pub mod application_update;
+mod catalogs;
 pub mod cli;
 mod diagnostics;
 mod environment;
@@ -656,18 +656,32 @@ async fn fetch_versions(
 ) -> Result<VersionCatalog, String> {
     state.registry.get(&tool_id).map_err(error::command_error)?;
     if !refresh.unwrap_or(false)
-        && let Ok(Some(catalog)) = read_version_catalog_cache(&state.data_root, &tool_id) {
+        && let Ok(Some(catalog)) = read_version_catalog_cache(&state.data_root, &tool_id)
+    {
         if catalogs::needs_refresh(&catalog) {
             let background = state.inner().clone();
             tauri::async_runtime::spawn(async move {
-                if let Ok(catalog) = background.catalogs.load(&background.registry, &background.data_root, &tool_id, false).await {
+                if let Ok(catalog) = background
+                    .catalogs
+                    .load(&background.registry, &background.data_root, &tool_id, false)
+                    .await
+                {
                     let _ = app.emit("version-catalog-updated", &catalog);
                 }
             });
         }
         return Ok(catalog);
     }
-    state.catalogs.load(&state.registry, &state.data_root, &tool_id, refresh.unwrap_or(false)).await.map_err(error::command_error)
+    state
+        .catalogs
+        .load(
+            &state.registry,
+            &state.data_root,
+            &tool_id,
+            refresh.unwrap_or(false),
+        )
+        .await
+        .map_err(error::command_error)
 }
 
 #[tauri::command]
@@ -690,7 +704,11 @@ async fn preview_install(
     state: State<'_, Arc<AppState>>,
 ) -> Result<OperationPlan, String> {
     let plugin = state.registry.get(&tool_id).map_err(error::command_error)?;
-    let remote = state.catalogs.selected_version(&state.registry, &state.data_root, &tool_id, &version).await.map_err(error::command_error)?;
+    let remote = state
+        .catalogs
+        .selected_version(&state.registry, &state.data_root, &tool_id, &version)
+        .await
+        .map_err(error::command_error)?;
     state
         .plans
         .preview_install(plugin.descriptor(), &remote, root)
@@ -711,7 +729,16 @@ async fn preview_repair(
     if manifest.tool_id != tool_id {
         return Err("受管安装清单与工具 ID 不匹配".to_string());
     }
-    let remote = state.catalogs.selected_version(&state.registry, &state.data_root, &tool_id, &manifest.version).await.map_err(error::command_error)?;
+    let remote = state
+        .catalogs
+        .selected_version(
+            &state.registry,
+            &state.data_root,
+            &tool_id,
+            &manifest.version,
+        )
+        .await
+        .map_err(error::command_error)?;
     state
         .plans
         .preview_repair(
@@ -843,8 +870,13 @@ async fn apply_plan(
                 }
             }
         }
-        _ => Installer::new(download_http_client().map_err(error::command_error)?, state.data_root.clone())
-            .execute(&plan.id, &plan.action, &app).await.map_err(error::command_error),
+        _ => Installer::new(
+            download_http_client().map_err(error::command_error)?,
+            state.data_root.clone(),
+        )
+        .execute(&plan.id, &plan.action, &app)
+        .await
+        .map_err(error::command_error),
     }
 }
 
@@ -1876,6 +1908,7 @@ fn version_catalog_cache_path(root: &Path, tool_id: &str) -> PathBuf {
 }
 
 fn write_version_catalog_cache(root: &Path, catalog: &VersionCatalog) -> std::io::Result<()> {
+    fs::create_dir_all(root.join("cache").join("version-sources"))?;
     let path = version_catalog_cache_path(root, &catalog.tool_id);
     let bytes = serde_json::to_vec_pretty(catalog).map_err(std::io::Error::other)?;
     write_bytes_atomic(&path, &bytes)

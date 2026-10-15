@@ -76,7 +76,9 @@ async fn run(mut args: Vec<String>) -> AppResult<()> {
                 1,
                 "用法：EnvNexus-AI.exe versions <tool> [--refresh]",
             )?);
-            let catalog = crate::catalogs::CatalogService::default().load(&registry, &data_root, tool_id, refresh).await?;
+            let catalog = crate::catalogs::CatalogService::default()
+                .load(&registry, &data_root, tool_id, refresh)
+                .await?;
             if json {
                 print_json(&catalog)
             } else {
@@ -441,7 +443,9 @@ async fn install(
             "尚未设置 {tool_id} 安装根目录；先运行 {tool_id}-root set <path>"
         ))
     })?;
-    let remote = crate::catalogs::CatalogService::default().selected_version(registry, data_root, tool_id, version).await?;
+    let remote = crate::catalogs::CatalogService::default()
+        .selected_version(registry, data_root, tool_id, version)
+        .await?;
     let plans = PlanService::new(data_root.to_path_buf());
     let plan = plans.preview_install(plugin.descriptor(), &remote, root)?;
     apply_or_preview(registry, data_root, &plans, plan, confirmed, json).await
@@ -464,7 +468,9 @@ async fn repair(
             "受管安装清单与工具 ID 不匹配".to_string(),
         ));
     }
-    let remote = crate::catalogs::CatalogService::default().selected_version(registry, data_root, tool_id, &manifest.version).await?;
+    let remote = crate::catalogs::CatalogService::default()
+        .selected_version(registry, data_root, tool_id, &manifest.version)
+        .await?;
     let plans = PlanService::new(data_root.to_path_buf());
     let plan = plans.preview_repair(
         plugin.descriptor(),

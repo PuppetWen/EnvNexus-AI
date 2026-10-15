@@ -14,7 +14,20 @@ use std::{
 use crate::error::{AppError, AppResult};
 
 #[cfg(windows)]
-use std::os::windows::process::CommandExt;
+use std::os::windows::{
+    io::{AsHandle, AsRawHandle, OwnedHandle},
+    process::CommandExt,
+};
+
+#[cfg(windows)]
+trait CapturePipe: Read + Send + AsHandle {}
+#[cfg(windows)]
+impl<T: Read + Send + AsHandle> CapturePipe for T {}
+
+#[cfg(not(windows))]
+trait CapturePipe: Read + Send {}
+#[cfg(not(windows))]
+impl<T: Read + Send> CapturePipe for T {}
 
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
@@ -26,10 +39,14 @@ const READER_CANCEL_GRACE: Duration = Duration::from_millis(250);
 struct OutputReader {
     thread: Option<thread::JoinHandle<io::Result<Vec<u8>>>>,
     stop: Arc<AtomicBool>,
+    #[cfg(windows)]
+    cancellation_pipe: OwnedHandle,
 }
 
 impl OutputReader {
-    fn spawn(mut pipe: impl Read + Send + 'static, name: &str) -> io::Result<Self> {
+    fn spawn(mut pipe: impl CapturePipe + 'static, name: &str) -> io::Result<Self> {
+        #[cfg(windows)]
+        let cancellation_pipe = pipe.as_handle().try_clone_to_owned()?;
         let stop = Arc::new(AtomicBool::new(false));
         let reader_stop = Arc::clone(&stop);
         let thread = thread::Builder::new().name(name.to_string()).spawn(move || {
@@ -54,6 +71,8 @@ impl OutputReader {
         Ok(Self {
             thread: Some(thread),
             stop,
+            #[cfg(windows)]
+            cancellation_pipe,
         })
     }
 
@@ -61,10 +80,15 @@ impl OutputReader {
         self.stop.store(true, Ordering::Release);
         #[cfg(windows)]
         if let Some(thread) = &self.thread {
-            use std::os::windows::io::AsRawHandle;
-            // The JoinHandle owns a valid thread handle until it is joined or
-            // dropped. Cancel synchronous pipe reads; never terminate the thread.
+            // Rust's ChildStdout/ChildStderr use overlapped ReadFileEx operations.
+            // The duplicate owns the same pipe object and stays valid even if the
+            // reader finishes concurrently. CancelIoEx wakes its alertable wait;
+            // thread cancellation also covers synchronous pipe implementations.
             unsafe {
+                windows_sys::Win32::System::IO::CancelIoEx(
+                    self.cancellation_pipe.as_raw_handle(),
+                    std::ptr::null(),
+                );
                 windows_sys::Win32::System::IO::CancelSynchronousIo(thread.as_raw_handle());
             }
         }
@@ -280,6 +304,7 @@ mod tests {
                     .spawn()
                     .unwrap();
                 println!("PIPE_HOLDER_PID={}", holder.id());
+                eprintln!("PIPE_HOLDER_STDERR_READY");
             }
             Ok("sleep") => thread::sleep(Duration::from_secs(30)),
             _ => {}
@@ -334,6 +359,7 @@ mod tests {
         };
         assert_ne!(terminated, 0);
         assert!(output.status.success());
+        assert!(String::from_utf8_lossy(&output.stderr).contains("PIPE_HOLDER_STDERR_READY"));
         assert!(elapsed < Duration::from_secs(6), "capture took {elapsed:?}");
     }
 
