@@ -2064,7 +2064,10 @@ mod tests {
         assert!(!index.executables.contains_key("node"));
         assert!(should_scan_disk_entry(drive.path(), &devtools));
         for relative in ["cargo/registry-tools", "pnpm-store-tools", "cache-tools"] {
-            assert!(should_scan_disk_entry(drive.path(), &devtools.join(relative)));
+            assert!(should_scan_disk_entry(
+                drive.path(),
+                &devtools.join(relative)
+            ));
         }
     }
 

@@ -1,10 +1,87 @@
-# EnvNexus AI 0.1.4 测试报告
+# EnvNexus AI 测试报告
+
+## 0.1.5 验证记录（2026-10-15 UTC）
+
+本节记录 0.1.5 的新验证结果；后文保留 0.1.4 及更早版本的日期、数据和历史失败，不能把旧版 GUI 结果视为本版复测。
+
+执行环境：GitHub Actions `windows-latest`、Windows x64 MSVC、Rust stable、Node.js 24、pnpm 11。本节以 CI7 提交 `79c50cc` 的完整测试报告为最终证据，运行记录为 [38689901318](https://github.com/PuppetWen/EnvNexus-AI/actions/runs/38689901318)，最终结论 `success`：全部测试和打包步骤通过，包括命令模式全盘扫描、15 类工具真实安装、ADB 实际激活与用户环境恢复。此前 CI6 提交 `a8526f2` 的 15 类安装检查也已通过。
+
+### 自动检查与构建
+
+| 项目 | 执行与结果 |
+| --- | --- |
+| TypeScript | `tsc --noEmit` 通过 |
+| 前端单元测试 | Vitest 16 个测试文件、49/49 通过；包括安装完成后打开环境计划、单独确认写入以及仅保留安装的交互测试 |
+| 前端生产构建 | Vite 构建通过，1794 modules；主 JavaScript chunk 仍有超过 500 kB 的体积警告 |
+| Rust 格式与静态检查 | 格式检查及 `cargo clippy --all-targets -- -D warnings` 通过 |
+| Rust 单元测试 | 124 通过、0 失败；4 项发布产物或联网测试在默认单元测试中显式忽略，联网覆盖另见下文 |
+| 便携包准备脚本 | CI7 的 4 项 Node 纯 JavaScript 测试通过：NSIS 运行标记匹配、非 PE 拒绝、缺失/歧义标记拒绝、拒绝破坏已有 Authenticode 签名 |
+| 15 官方源实时查询 | CI6、CI7 均通过；每一类均返回可用的 HTTPS Windows 发行包 |
+| Python 实际安装事务 | CI6、CI7 均通过；官方嵌入式 ZIP 下载、SHA-256 校验、安全解压、暂存提交、安装清单和版本探测成功 |
+| Release 与 NSIS | CI7 生成 `EnvNexus-AI_0.1.5_x64-portable.exe` 和 `EnvNexus-AI_0.1.5_x64-setup.exe`；隔离静默安装后，主程序 SHA-256 与便携包一致，安装后的 `tools --json` 返回 15 类工具 |
+
+以上 CI 构建没有使用云端私钥。新安装包和便携包已在本机使用原有长期密钥签名；本机 Node 验证器通过旧版两个包和本版两个包的签名校验，并确认篡改内容会被拒绝。两个包、签名侧文件、`latest.json` 和 `SHA256SUMS.txt` 仍需由独立 `verify-signed-release.yml` 读取发行资产，使用应用内公钥完成 Rust 验证；本节尚未将该独立发布验证记为完成。
+
+### 15 类工具实际安装
+
+CI7 的 `Smoke-Installability.ps1` 在全新隔离目录逐一选择当时最高稳定版本，使用正式 CLI 安装流程实际下载和安装，15/15 通过、0 失败；与 CI6 实测版本一致：
+
+| 工具 | 实测版本 |
+| --- | --- |
+| Python | `3.15.0` |
+| Java | `27+35` |
+| Go | `1.27.2` |
+| Rust | `1.99.0` |
+| Node.js | `26.12.0` |
+| Git | `2.56.0.windows.2` |
+| Android SDK Command-line Tools | `23.0` |
+| Android NDK | `30.0.16248370` |
+| Gradle | `9.8.1` |
+| CMake | `4.4.4` |
+| ADB / Platform Tools | `37.0.1` |
+| Maven | `3.10.0` |
+| .NET SDK | `10.0.402` |
+| Ruby | `4.0.7-1` |
+| PHP | `8.5.11` |
+
+每一项都确认安装事务 `committed`、受管目录与安装清单一致、版本可探测、切换计划包含环境差异、官方清单可从持久化缓存回读，以及本轮工具目录/下载缓存可安全清理。Rust 的文件符号链接只解除链接本身，目录链接和越界目录仍被拒绝；PHP 的官方重定向下载及校验通过。逐项失败会独立记录，整轮汇总必须全部成功才算通过。
+
+CI7 除下文单独验证的 ADB 外，没有应用其余工具的切换计划；ADB 恢复后，整轮用户环境前后指纹一致。已有系统 PATH 遮蔽的工具在计划中明确要求管理员介入；安装和预览通过不表示已越过系统 PATH 或已成为默认版本。Python 测试对象是官方嵌入式 ZIP，不包含完整安装器、pip 或所有第三方扩展场景；Android SDK 项目仅覆盖 Command-line Tools，不代表已安装平台镜像、模拟器或 Android Studio。SDK、Gradle、Maven 的版本探测使用 runner 已提供的 Java。
+
+最终原始证据保存在 CI7 报告 artifact：`installability-53c74578aee04007a357458d8d1810f8/summary.json` 及其 `reports/<tool>/` 中的 catalog、安装清单、安装结果和环境计划。汇总为 `complete: true`、`passedCount: 15`、`failedCount: 0`、`userEnvironment: unchanged`。此前 CI6 证据为 `installability-f28502d8649f42ada6b6bd05a70e4558/summary.json`。
+
+### 命令模式与真实环境写入
+
+CI7 的 `Smoke-Cli.ps1` 通过：15 类工具、110 个 CMD 脚本、JDK 别名、目录持久化、生成脚本读取后续保存的新根目录、显式全盘扫描、增量刷新和无 `--yes` 的预览保护。没有扫描快照时，只读命令不触发全盘扫描；预览环境修复不改变用户环境。最终证据为 `smoke/cli-5eae2507a7a84430bfaddd623d6a30d4/summary.json`；此前 CI6 同项也通过。
+
+CI7 的 ADB 实际激活测试通过：在隔离 GitHub runner 中执行 `use --yes`，回读 HKCU `Path`、`ANDROID_HOME`、`ANDROID_SDK_ROOT` 与计划一致，刷新后确认默认 ADB 可执行文件等于刚安装的文件。执行前快照每个计划涉及值的原始未展开内容、类型和不存在状态，结束时在 `finally` 中精确恢复；结果如下：
+
+| 断言 | CI7 结果 |
+| --- | --- |
+| 实际写入 `activationApplied` | `passed` |
+| 默认版本与变量回读 `activationDefaultVerified` | `passed` |
+| 原值、类型与不存在状态恢复 `userEnvironmentRestored` | `passed` |
+| 整轮用户环境指纹 | `unchanged` |
+
+本次 ADB 计划不需要提升权限。脚本仍拒绝需要提升权限的计划，不绕过系统 PATH；其余 14 类工具没有执行真实环境切换。
+
+### 回归范围、缓存与速度边界
+
+本版已通过的单元测试覆盖 GitHub 限流只请求一次并报告重置时间、官方发布页备用解析和摘要冲突拒绝、Node 所选发行包按需读取校验值、清单缓存回读；也覆盖并发 Range 下载的范围与实体校验、服务器不支持时回退单连接、续传、取消及临时分块清理。进程测试确认并发排空 stdout/stderr、防止解压输出塞满管道、超时有界，以及缺少原生 DLL 时返回错误而不弹出加载器窗口；ADB 两个伴随 DLL 的完整性检查通过。
+
+源码验证脚本和 CI 使用 `Use-ProjectCache.ps1`，把项目 Cargo/Rustup、编译产物、pnpm/npm 和编译临时缓存放在项目目录内；本开发机为 E 盘，CI 为 runner 的 D 盘工作区。真实安装测试的 Gradle、.NET、Android、NuGet、Go 及 TEMP/TMP 缓存另隔离于本轮目录，完成后恢复进程环境。
+
+2026-10-15 UTC 的本机代理样本只请求同一 Java 官方包的前 4 MiB：单连接约 6.56 秒；四路请求约 9.85 秒且只有三路成功。因此该样本没有证明下载提速，不能承诺“4 倍速度”。清单缓存可避免重复联网，并发下载的收益仍取决于代理、上游限速和链路质量；CI 安装耗时也不能代表用户本机带宽。
+
+本机 Windows 应用程序控制阻止了当前 Rust 工具链、部分 Node 原生模块，以及 CI7 新便携包的普通 `tools --json` 启动；未绕过该策略。新便携包仅在本机静态确认 PE FileVersion 为 `0.1.5`，SHA-256 为 `e1a9214944a7cb357d55888ae5ffe4e9cfe31e03bda8f81dc07ce63f40a843c5`。本版原生构建、集成测试和安装包安装验证由 CI 完成；本机没有运行新的真实 HKCU 写入，也没有完成本版新 EXE、GUI 或托盘交互复测。尚未验证每种工具的编译项目、包管理器生态、多版本实际切换、卸载恢复，以及真实 AI 账号在线推理；这些边界不因 15 类安装通过而消失。
+
+## 0.1.4 历史测试报告
 
 测试日期：2026-07-31
 系统：Windows 11 Home China `10.0.26200` x64  
 构建工具链：Rust `1.97.1`、Tauri `2.11.5`、Node.js `25.2.1`、pnpm `11.9.0`
 
-## 自动测试
+### 自动测试
 
 | 项目 | 命令 | 结果 |
 | --- | --- | --- |
@@ -18,7 +95,7 @@
 | 新增四源联网测试 | `Invoke-Rust.ps1 -Task live-added-sources` | 1/1 通过；Maven 1、.NET 18、Ruby 24、PHP 6 个 Windows 下载 |
 | Python 实际安装事务 | `Invoke-Rust.ps1 -Task live-install` | 通过 |
 
-## 2026-07-31 全机扫描与性能复测
+### 2026-07-31 全机扫描与性能复测
 
 - 完整扫描遍历本机 C、D、E、F 四个固定磁盘，索引覆盖 15 类工具；测试快照包含 161 个已验证安装版本。
 - 同一全机索引首次执行增量探测用时 33.188 秒；生成 `tool-version-probes.json` 后，两次缓存刷新分别用时 2.478 秒和 2.379 秒。
@@ -29,7 +106,7 @@
 - 同一采样窗口内，两版均未观察到可计量的空闲 CPU 增长。0.1.4 平均私有提交量为 401.2 MiB，与 0.1.3 的 400.1 MiB 基本一致，因此不将此次优化表述为虚拟提交量下降。
 - 最终便携包的 CLI 冒烟通过：全机扫描、增量刷新、15 类工具、110 个脚本、JDK 别名、根目录动态读取和无确认令牌的预览保护均成功。托盘冒烟通过关闭到托盘、页面恢复、启动隐藏、开机启动、语言切换和正常退出。
 
-## 2026-07-24 EnvNexus AI 改名与更新器复测
+### 2026-07-24 EnvNexus AI 改名与更新器复测
 
 - `.\scripts\Verify.ps1 -Release` 完整通过：TypeScript、Rust fmt、38 项 Rust 测试和严格 Clippy 均成功；3 项显式联网测试按设计忽略。随后针对设置页修复新增测试，TypeScript、19 项 Vitest 与 Vite 生产构建再次通过。
 - Tauri 生成 `envnexus-ai.exe` 和 current-user NSIS 安装包；安装包使用项目长期 updater 密钥生成 424 字节 minisign 签名。
@@ -67,7 +144,7 @@ Rust 单元测试覆盖：
 - 应用行为默认值、五种语言、开机自启设置和 `<data-root>\config\app-preferences.json` 持久化往返。
 - Windows 当前用户 `Run` 启动命令的引号规则。
 
-## 实时官方源
+### 实时官方源
 
 同一联网测试实际请求并解析：
 
@@ -78,7 +155,7 @@ android-sdk, android-ndk, gradle, cmake, adb
 
 测试要求每个 catalog 非空，且至少包含一个 HTTPS Windows 下载 URL。2026-07-23 的完整聚合复测运行两次，均在 `https://go.dev/dl/?mode=json&include=all` 连接超时后失败（约 81 秒与 115 秒）；这项结果记录为失败。新增四源独立复测通过，用时 17.90 秒：Maven 1、.NET SDK 18、Ruby 24、PHP 6。
 
-## 实际下载、校验和安装
+### 实际下载、校验和安装
 
 实际使用：
 
@@ -97,7 +174,7 @@ SHA-256 90b4e5b9898b72d744650524bff92377c367f44bd5fbd09e3148656c080ad907
 
 结果：通过，用时约 11.60 秒。临时目录随后删除；没有修改 PATH、注册表或现有 Python。
 
-## Release 构建与打包
+### Release 构建与打包
 
 Tauri Release 和 NSIS 均已成功：
 
@@ -112,7 +189,7 @@ Tauri Release 和 NSIS 均已成功：
 
 当前开发机链接时出现 `LNK4099`：项目内 xwin SDK 静态运行库没有调试 PDB。链接仍成功，Release 可启动；该警告已记录，不解释为测试失败。前端构建还提示主 JavaScript chunk 为 531.77 kB，超过默认 500 kB 警告阈值；gzip 后为 137.11 kB，构建成功，后续可通过页面级拆包继续优化。
 
-## 运行冒烟
+### 运行冒烟
 
 历史完整 GUI 冒烟使用：
 
@@ -216,7 +293,7 @@ artifacts\smoke\cli-c9fc0587c08742c5909d51cab1d856be
 - `artifacts/smoke/manual-scan-4ef45dfc04c846bf841a03247e9a1abc/11-game-hud-dashboard.png`
 - `artifacts/smoke/manual-scan-4ef45dfc04c846bf841a03247e9a1abc/05-restart-reuses-snapshot.png`
 
-## 未执行的高影响测试
+### 未执行的高影响测试
 
 - 没有修改现有 HKCU/HKLM/PATH；
 - 没有申请管理员权限；
