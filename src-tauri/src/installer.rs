@@ -1669,7 +1669,7 @@ fn run_python_setup_module(
     let mut command = vec![
         "-I",
         "-c",
-        "import os,runpy,sys; os.environ.pop('ENSUREPIP_OPTIONS',None); module=sys.argv.pop(1); sys.argv[0]=module; runpy.run_module(module,run_name='__main__')",
+        "import os,runpy,sys; os.environ.pop('ENSUREPIP_OPTIONS',None); module=sys.argv.pop(1); runpy.run_module(module,run_name='__main__',alter_sys=True)",
         module,
     ];
     command.extend_from_slice(args);
