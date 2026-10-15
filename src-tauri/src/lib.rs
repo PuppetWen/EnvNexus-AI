@@ -2007,7 +2007,10 @@ mod tests {
                 channel: "stable".to_string(),
                 published_at: None,
                 architecture: "x86_64".to_string(),
-                download_url: Some("https://www.python.org/ftp/python/3.13.14/python-3.13.14-amd64.zip".to_string()),
+                download_url: Some(
+                    "https://www.python.org/ftp/python/3.13.14/python-3.13.14-amd64.zip"
+                        .to_string(),
+                ),
                 checksum_algorithm: Some("sha256".to_string()),
                 checksum: Some("a".repeat(64)),
                 notes_url: None,
@@ -2037,20 +2040,36 @@ mod tests {
                 channel: "stable".to_string(),
                 published_at: None,
                 architecture: "x86_64".to_string(),
-                download_url: Some("https://www.python.org/ftp/python/3.15.0/python-3.15.0-embed-amd64.zip".to_string()),
+                download_url: Some(
+                    "https://www.python.org/ftp/python/3.15.0/python-3.15.0-embed-amd64.zip"
+                        .to_string(),
+                ),
                 checksum_algorithm: Some("sha256".to_string()),
                 checksum: Some("a".repeat(64)),
                 notes_url: None,
             }],
         };
         write_version_catalog_cache(temporary.path(), &catalog).unwrap();
-        assert!(read_version_catalog_cache(temporary.path(), "python").unwrap().is_none());
-        catalog.versions[0].download_url = Some("https://www.python.org/ftp/python/3.15.0/python-3.15.0-amd64.zip".to_string());
+        assert!(
+            read_version_catalog_cache(temporary.path(), "python")
+                .unwrap()
+                .is_none()
+        );
+        catalog.versions[0].download_url =
+            Some("https://www.python.org/ftp/python/3.15.0/python-3.15.0-amd64.zip".to_string());
         write_version_catalog_cache(temporary.path(), &catalog).unwrap();
-        assert!(read_version_catalog_cache(temporary.path(), "python").unwrap().is_some());
+        assert!(
+            read_version_catalog_cache(temporary.path(), "python")
+                .unwrap()
+                .is_some()
+        );
         catalog.versions[0].checksum = None;
         write_version_catalog_cache(temporary.path(), &catalog).unwrap();
-        assert!(read_version_catalog_cache(temporary.path(), "python").unwrap().is_none());
+        assert!(
+            read_version_catalog_cache(temporary.path(), "python")
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]

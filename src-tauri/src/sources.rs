@@ -284,7 +284,12 @@ async fn fetch_python(client: &reqwest::Client, tool_id: &str) -> AppResult<Vers
         checked_json::<PythonRuntimeIndex>(client, &url).await
     })
     .await?;
-    Ok(catalog(tool_id, "Python.org 完整开发运行时", PYTHON_RUNTIME_SOURCE, versions))
+    Ok(catalog(
+        tool_id,
+        "Python.org 完整开发运行时",
+        PYTHON_RUNTIME_SOURCE,
+        versions,
+    ))
 }
 
 async fn fetch_python_indexes<F, Fut>(mut fetch_index: F) -> AppResult<Vec<RemoteVersion>>
@@ -300,7 +305,9 @@ where
             return Ok(versions.into_values().collect());
         };
         if !seen_pages.insert(source.clone()) {
-            return Err(AppError::InvalidSource("Python 官方运行时索引出现循环".to_string()));
+            return Err(AppError::InvalidSource(
+                "Python 官方运行时索引出现循环".to_string(),
+            ));
         }
         let index = fetch_index(source.clone()).await?;
         for runtime in index.versions {
@@ -308,25 +315,41 @@ where
                 continue;
             };
             if let Some(previous) = versions.get(&remote.version) {
-                if previous.download_url != remote.download_url || previous.checksum != remote.checksum {
-                    return Err(AppError::InvalidSource("Python 官方索引为同一版本提供了冲突的发行包".to_string()));
+                if previous.download_url != remote.download_url
+                    || previous.checksum != remote.checksum
+                {
+                    return Err(AppError::InvalidSource(
+                        "Python 官方索引为同一版本提供了冲突的发行包".to_string(),
+                    ));
                 }
             } else {
                 versions.insert(remote.version.clone(), remote);
             }
         }
-        next = index.next.map(|next| python_next_index(&source, &next)).transpose()?;
+        next = index
+            .next
+            .map(|next| python_next_index(&source, &next))
+            .transpose()?;
     }
     if next.is_some() {
-        return Err(AppError::InvalidSource("Python 官方运行时索引页数超出限制".to_string()));
+        return Err(AppError::InvalidSource(
+            "Python 官方运行时索引页数超出限制".to_string(),
+        ));
     }
     Ok(versions.into_values().collect())
 }
 
 fn python_next_index(source: &str, next: &str) -> AppResult<String> {
-    let invalid = || AppError::InvalidSource("Python 官方运行时索引包含不受信任的下一页地址".to_string());
-    let url = url::Url::parse(source).map_err(|_| invalid())?.join(next).map_err(|_| invalid())?;
-    let suffix = url.path().strip_prefix("/ftp/python/index-windows").and_then(|path| path.strip_suffix(".json"));
+    let invalid =
+        || AppError::InvalidSource("Python 官方运行时索引包含不受信任的下一页地址".to_string());
+    let url = url::Url::parse(source)
+        .map_err(|_| invalid())?
+        .join(next)
+        .map_err(|_| invalid())?;
+    let suffix = url
+        .path()
+        .strip_prefix("/ftp/python/index-windows")
+        .and_then(|path| path.strip_suffix(".json"));
     if url.scheme() != "https"
         || url.host_str() != Some("www.python.org")
         || url.port_or_known_default() != Some(443)
@@ -334,7 +357,11 @@ fn python_next_index(source: &str, next: &str) -> AppResult<String> {
         || url.password().is_some()
         || url.query().is_some()
         || url.fragment().is_some()
-        || suffix.is_none_or(|suffix| !suffix.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'-'))
+        || suffix.is_none_or(|suffix| {
+            !suffix
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+        })
     {
         return Err(invalid());
     }
@@ -343,7 +370,8 @@ fn python_next_index(source: &str, next: &str) -> AppResult<String> {
 
 fn python_runtime_version(runtime: PythonRuntime) -> Option<RemoteVersion> {
     let minor = python_stable_minor(&runtime.version)?;
-    if runtime.schema != 1 || runtime.company != "PythonCore"
+    if runtime.schema != 1
+        || runtime.company != "PythonCore"
         || runtime.tag != format!("3.{minor}-64")
         || runtime.id != format!("pythoncore-3.{minor}-64")
         || !python_full_runtime_url(&runtime.version, &runtime.url)
@@ -352,9 +380,17 @@ fn python_runtime_version(runtime: PythonRuntime) -> Option<RemoteVersion> {
     }
     // Legacy NuGet entries have no SHA-256 and lack parts of the full runtime.
     // Keep only official full ZIP packages; never fall back to an embedded build.
-    let checksum = runtime.hash.as_ref()?.get("sha256").filter(|hash| valid_sha256(hash))?.to_ascii_lowercase();
+    let checksum = runtime
+        .hash
+        .as_ref()?
+        .get("sha256")
+        .filter(|hash| valid_sha256(hash))?
+        .to_ascii_lowercase();
     Some(RemoteVersion {
-        notes_url: Some(format!("https://www.python.org/downloads/release/python-{}/", runtime.version.replace('.', ""))),
+        notes_url: Some(format!(
+            "https://www.python.org/downloads/release/python-{}/",
+            runtime.version.replace('.', "")
+        )),
         version: runtime.version,
         channel: "stable".to_string(),
         published_at: None,
@@ -366,22 +402,32 @@ fn python_runtime_version(runtime: PythonRuntime) -> Option<RemoteVersion> {
 }
 
 fn python_full_runtime_url(version: &str, download_url: &str) -> bool {
-    download_url == format!("https://www.python.org/ftp/python/{version}/python-{version}-amd64.zip")
+    download_url
+        == format!("https://www.python.org/ftp/python/{version}/python-{version}-amd64.zip")
 }
 
 fn python_stable_minor(version: &str) -> Option<&str> {
     let mut parts = version.split('.');
     let (major, minor, patch) = (parts.next()?, parts.next()?, parts.next()?);
-    (major == "3" && parts.next().is_none()
-        && [minor, patch].iter().all(|part| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit())))
-        .then_some(minor)
+    (major == "3"
+        && parts.next().is_none()
+        && [minor, patch]
+            .iter()
+            .all(|part| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit())))
+    .then_some(minor)
 }
 
 pub(crate) fn is_supported_python_runtime(remote: &RemoteVersion) -> bool {
     python_stable_minor(&remote.version).is_some()
         && remote.architecture == "x86_64"
-        && remote.download_url.as_deref().is_some_and(|url| python_full_runtime_url(&remote.version, url))
-        && remote.checksum_algorithm.as_deref().is_some_and(|algorithm| algorithm.eq_ignore_ascii_case("sha256"))
+        && remote
+            .download_url
+            .as_deref()
+            .is_some_and(|url| python_full_runtime_url(&remote.version, url))
+        && remote
+            .checksum_algorithm
+            .as_deref()
+            .is_some_and(|algorithm| algorithm.eq_ignore_ascii_case("sha256"))
         && remote.checksum.as_deref().is_some_and(valid_sha256)
 }
 
@@ -2009,14 +2055,21 @@ mod tests {
     #[test]
     fn python_catalog_keeps_every_complete_x64_runtime_and_rejects_embed_or_unverified_packages() {
         let versions = (0..40)
-            .filter_map(|index| python_runtime_version(python_runtime_fixture(&format!("3.{}.{}", 11 + index / 10, index % 10))))
+            .filter_map(|index| {
+                python_runtime_version(python_runtime_fixture(&format!(
+                    "3.{}.{}",
+                    11 + index / 10,
+                    index % 10
+                )))
+            })
             .collect::<Vec<_>>();
         assert_eq!(versions.len(), 40);
         assert!(versions.iter().all(is_supported_python_runtime));
         let mut embedded = python_runtime_fixture("3.15.0");
         embedded.company = "PythonEmbed".into();
         let mut old_embedded = python_runtime_fixture("3.15.0");
-        old_embedded.url = "https://www.python.org/ftp/python/3.15.0/python-3.15.0-embed-amd64.zip".into();
+        old_embedded.url =
+            "https://www.python.org/ftp/python/3.15.0/python-3.15.0-embed-amd64.zip".into();
         let mut preview = python_runtime_fixture("3.15.0rc1");
         preview.tag = "3.15-64".into();
         let mut freethreaded = python_runtime_fixture("3.15.0");
@@ -2024,15 +2077,27 @@ mod tests {
         let mut arm64 = python_runtime_fixture("3.15.0");
         arm64.tag = "3.15-arm64".into();
         let mut wrong_version_url = python_runtime_fixture("3.15.0");
-        wrong_version_url.url = "https://www.python.org/ftp/python/3.14.0/python-3.14.0-amd64.zip".into();
+        wrong_version_url.url =
+            "https://www.python.org/ftp/python/3.14.0/python-3.14.0-amd64.zip".into();
         let mut unverified = python_runtime_fixture("3.15.0");
         unverified.hash = None;
         let mut invalid_hash = python_runtime_fixture("3.15.0");
         invalid_hash.hash = Some(HashMap::from([("sha256".into(), "bad".into())]));
         let mut legacy = python_runtime_fixture("3.10.11");
-        legacy.url = "https://api.nuget.org/v3-flatcontainer/python/3.10.11/python.3.10.11.nupkg".into();
+        legacy.url =
+            "https://api.nuget.org/v3-flatcontainer/python/3.10.11/python.3.10.11.nupkg".into();
         legacy.hash = None;
-        for invalid in [embedded, old_embedded, preview, freethreaded, arm64, wrong_version_url, unverified, invalid_hash, legacy] {
+        for invalid in [
+            embedded,
+            old_embedded,
+            preview,
+            freethreaded,
+            arm64,
+            wrong_version_url,
+            unverified,
+            invalid_hash,
+            legacy,
+        ] {
             assert!(python_runtime_version(invalid).is_none());
         }
     }
@@ -2042,21 +2107,41 @@ mod tests {
         let mut legacy = python_runtime_fixture("3.10.11");
         legacy.hash = None;
         let mut pages = std::collections::VecDeque::from([
-            PythonRuntimeIndex { versions: vec![python_runtime_fixture("3.15.0")], next: Some("index-windows-recent.json".into()) },
-            PythonRuntimeIndex { versions: vec![python_runtime_fixture("3.15.0"), python_runtime_fixture("3.11.0")], next: Some("index-windows-legacy.json".into()) },
-            PythonRuntimeIndex { versions: vec![legacy], next: None },
+            PythonRuntimeIndex {
+                versions: vec![python_runtime_fixture("3.15.0")],
+                next: Some("index-windows-recent.json".into()),
+            },
+            PythonRuntimeIndex {
+                versions: vec![
+                    python_runtime_fixture("3.15.0"),
+                    python_runtime_fixture("3.11.0"),
+                ],
+                next: Some("index-windows-legacy.json".into()),
+            },
+            PythonRuntimeIndex {
+                versions: vec![legacy],
+                next: None,
+            },
         ]);
         let mut requests = Vec::new();
-        let versions = tokio::runtime::Runtime::new().unwrap().block_on(fetch_python_indexes(|url| {
-            requests.push(url);
-            let page = pages.pop_front().expect("only the index chain should be fetched");
-            async move { Ok(page) }
-        })).unwrap();
-        assert_eq!(requests, [
-            PYTHON_RUNTIME_SOURCE,
-            "https://www.python.org/ftp/python/index-windows-recent.json",
-            "https://www.python.org/ftp/python/index-windows-legacy.json",
-        ]);
+        let versions = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(fetch_python_indexes(|url| {
+                requests.push(url);
+                let page = pages
+                    .pop_front()
+                    .expect("only the index chain should be fetched");
+                async move { Ok(page) }
+            }))
+            .unwrap();
+        assert_eq!(
+            requests,
+            [
+                PYTHON_RUNTIME_SOURCE,
+                "https://www.python.org/ftp/python/index-windows-recent.json",
+                "https://www.python.org/ftp/python/index-windows-legacy.json",
+            ]
+        );
         assert_eq!(versions.len(), 2);
         assert!(versions.iter().any(|remote| remote.version == "3.11.0"));
         assert!(versions.iter().all(is_supported_python_runtime));
@@ -2071,25 +2156,45 @@ mod tests {
             "https://user@www.python.org/ftp/python/index-windows.json",
             "http://www.python.org/ftp/python/index-windows.json",
         ] {
-            assert!(python_next_index(PYTHON_RUNTIME_SOURCE, next).is_err(), "{next}");
+            assert!(
+                python_next_index(PYTHON_RUNTIME_SOURCE, next).is_err(),
+                "{next}"
+            );
         }
         let mut requests = 0;
-        let error = tokio::runtime::Runtime::new().unwrap().block_on(fetch_python_indexes(|_| {
-            requests += 1;
-            async { Ok(PythonRuntimeIndex { versions: vec![python_runtime_fixture("3.15.0")], next: Some("index-windows.json".into()) }) }
-        })).unwrap_err();
+        let error = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(fetch_python_indexes(|_| {
+                requests += 1;
+                async {
+                    Ok(PythonRuntimeIndex {
+                        versions: vec![python_runtime_fixture("3.15.0")],
+                        next: Some("index-windows.json".into()),
+                    })
+                }
+            }))
+            .unwrap_err();
         assert!(error.to_string().contains("循环"));
         assert_eq!(requests, 1);
         let mut conflicting = python_runtime_fixture("3.15.0");
         conflicting.hash = Some(HashMap::from([("sha256".into(), "b".repeat(64))]));
         let mut pages = std::collections::VecDeque::from([
-            PythonRuntimeIndex { versions: vec![python_runtime_fixture("3.15.0")], next: Some("index-windows-recent.json".into()) },
-            PythonRuntimeIndex { versions: vec![conflicting], next: None },
+            PythonRuntimeIndex {
+                versions: vec![python_runtime_fixture("3.15.0")],
+                next: Some("index-windows-recent.json".into()),
+            },
+            PythonRuntimeIndex {
+                versions: vec![conflicting],
+                next: None,
+            },
         ]);
-        let error = tokio::runtime::Runtime::new().unwrap().block_on(fetch_python_indexes(|_| {
-            let page = pages.pop_front().unwrap();
-            async move { Ok(page) }
-        })).unwrap_err();
+        let error = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(fetch_python_indexes(|_| {
+                let page = pages.pop_front().unwrap();
+                async move { Ok(page) }
+            }))
+            .unwrap_err();
         assert!(error.to_string().contains("冲突"));
     }
 
@@ -2098,11 +2203,24 @@ mod tests {
         let mut runtime = python_runtime_version(python_runtime_fixture("3.15.0")).unwrap();
         let executor = tokio::runtime::Runtime::new().unwrap();
         let checksum = runtime.checksum.clone();
-        executor.block_on(ensure_install_metadata(&local_client(), "python", &mut runtime)).unwrap();
+        executor
+            .block_on(ensure_install_metadata(
+                &local_client(),
+                "python",
+                &mut runtime,
+            ))
+            .unwrap();
         assert_eq!(runtime.checksum, checksum);
-        runtime.download_url = Some("https://www.python.org/ftp/python/3.15.0/python-3.15.0-embed-amd64.zip".into());
+        runtime.download_url =
+            Some("https://www.python.org/ftp/python/3.15.0/python-3.15.0-embed-amd64.zip".into());
         assert!(!is_supported_python_runtime(&runtime));
-        let error = executor.block_on(ensure_install_metadata(&local_client(), "python", &mut runtime)).unwrap_err();
+        let error = executor
+            .block_on(ensure_install_metadata(
+                &local_client(),
+                "python",
+                &mut runtime,
+            ))
+            .unwrap_err();
         assert!(error.to_string().contains("刷新版本列表"));
     }
 

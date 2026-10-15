@@ -1758,33 +1758,53 @@ mod tests {
             installed_at: Utc::now(),
             managed_root: directory.path().to_path_buf(),
             installation_path: root.clone(),
-            source_url: "https://www.python.org/ftp/python/3.15.0/python-3.15.0-embed-amd64.zip".to_string(),
+            source_url: "https://www.python.org/ftp/python/3.15.0/python-3.15.0-embed-amd64.zip"
+                .to_string(),
             checksum_algorithm: None,
             checksum: None,
         }];
         let scan = |probes: &mut ToolProbeContext| {
-            scan_tool(plugin.as_ref(), &EnvironmentMap::new(), &EnvironmentMap::new(), ToolScanSources {
-                manifests: &manifests,
-                configured_root: None,
-                disk_executables: &[],
-                configured_executables: &[],
-            }, probes)
+            scan_tool(
+                plugin.as_ref(),
+                &EnvironmentMap::new(),
+                &EnvironmentMap::new(),
+                ToolScanSources {
+                    manifests: &manifests,
+                    configured_root: None,
+                    disk_executables: &[],
+                    configured_executables: &[],
+                },
+                probes,
+            )
         };
         let old = scan(&mut probes);
         assert_eq!(old.installed_versions.len(), 1);
         assert!(old.installed_versions[0].managed);
         assert_eq!(old.installed_versions[0].health, HealthLevel::Warning);
-        assert!(old.issues.iter().any(|issue| issue.code.starts_with("PYTHON_INCOMPLETE_DEVELOPMENT_RUNTIME_")));
+        assert!(old.issues.iter().any(|issue| {
+            issue
+                .code
+                .starts_with("PYTHON_INCOMPLETE_DEVELOPMENT_RUNTIME_")
+        }));
 
         fs::remove_file(root.join("python315._pth")).unwrap();
-        for relative in ["Lib/site-packages/pip/__init__.py", "Lib/venv/__init__.py", "Lib/ensurepip/__init__.py", "Scripts/pip.exe"] {
+        for relative in [
+            "Lib/site-packages/pip/__init__.py",
+            "Lib/venv/__init__.py",
+            "Lib/ensurepip/__init__.py",
+            "Scripts/pip.exe",
+        ] {
             let path = root.join(relative);
             fs::create_dir_all(path.parent().unwrap()).unwrap();
             fs::write(path, b"fixture").unwrap();
         }
         let repaired = scan(&mut probes);
         assert_eq!(repaired.installed_versions[0].health, HealthLevel::Healthy);
-        assert!(!repaired.issues.iter().any(|issue| issue.code.starts_with("PYTHON_INCOMPLETE_DEVELOPMENT_RUNTIME_")));
+        assert!(!repaired.issues.iter().any(|issue| {
+            issue
+                .code
+                .starts_with("PYTHON_INCOMPLETE_DEVELOPMENT_RUNTIME_")
+        }));
         fs::remove_file(root.join("Lib/site-packages/pip/__init__.py")).unwrap();
         let damaged = scan(&mut probes);
         assert_eq!(damaged.installed_versions[0].health, HealthLevel::Warning);

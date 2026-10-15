@@ -1610,12 +1610,18 @@ fn python_setup_environment(
         ("TEMP", workspace.join("temp").into_os_string()),
         ("TMP", workspace.join("temp").into_os_string()),
         ("TMPDIR", workspace.join("temp").into_os_string()),
-        ("PIP_CACHE_DIR", workspace.join("pip-cache").into_os_string()),
+        (
+            "PIP_CACHE_DIR",
+            workspace.join("pip-cache").into_os_string(),
+        ),
         (
             "PIP_BUILD_TRACKER",
             workspace.join("pip-build-tracker").into_os_string(),
         ),
-        ("PYTHONUSERBASE", workspace.join("user-base").into_os_string()),
+        (
+            "PYTHONUSERBASE",
+            workspace.join("user-base").into_os_string(),
+        ),
         ("PYTHONHOME", OsString::new()),
         ("PYTHONPATH", OsString::new()),
         ("PYTHONPYCACHEPREFIX", OsString::new()),
@@ -1774,12 +1780,7 @@ fn initialize_python_runtime(request: &InstallRequest) -> AppResult<()> {
             &environment,
             timeout,
         )?;
-        verify_python_pip_launcher(
-            &pip,
-            &request.destination,
-            &environment,
-            timeout,
-        )?;
+        verify_python_pip_launcher(&pip, &request.destination, &environment, timeout)?;
         run_python_setup_module(
             &python,
             "pip",
@@ -1814,12 +1815,7 @@ fn initialize_python_runtime(request: &InstallRequest) -> AppResult<()> {
             &environment,
             timeout,
         )?;
-        verify_python_pip_launcher(
-            &venv.join("Scripts/pip.exe"),
-            &venv,
-            &environment,
-            timeout,
-        )?;
+        verify_python_pip_launcher(&venv.join("Scripts/pip.exe"), &venv, &environment, timeout)?;
         run_python_setup_module(
             &venv.join("Scripts/python.exe"),
             "pip",
@@ -2357,7 +2353,10 @@ mod tests {
             ("TEMP", workspace.join("temp").into_os_string()),
             ("TMP", workspace.join("temp").into_os_string()),
             ("TMPDIR", workspace.join("temp").into_os_string()),
-            ("PIP_CACHE_DIR", workspace.join("pip-cache").into_os_string()),
+            (
+                "PIP_CACHE_DIR",
+                workspace.join("pip-cache").into_os_string(),
+            ),
             (
                 "PIP_BUILD_TRACKER",
                 workspace.join("pip-build-tracker").into_os_string(),
