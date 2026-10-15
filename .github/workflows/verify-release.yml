@@ -7,12 +7,6 @@ on:
       - codex/**
   pull_request:
   workflow_dispatch:
-    inputs:
-      live_sources:
-        description: Also query every official catalog and perform the isolated Python install test
-        type: boolean
-        required: false
-        default: false
 
 permissions:
   contents: read
@@ -30,7 +24,6 @@ jobs:
       CARGO_TERM_COLOR: always
       CARGO_HOME: ${{ github.workspace }}/.devtools/cargo
       RUSTUP_HOME: ${{ github.workspace }}/.devtools/rustup
-      RUST_TEST_THREADS: '1'
       RUST_BACKTRACE: '1'
       HAS_SIGNING_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY != '' }}
     steps:
@@ -139,7 +132,7 @@ jobs:
           & ./scripts/Smoke-Cli.ps1 *>&1 | Tee-Object -FilePath artifacts/ci-logs/cli-smoke.log
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-      - name: Install official Node and Git packages and preview activation
+      - name: Install official tool packages and preview activation
         if: github.event_name != 'pull_request'
         shell: pwsh
         run: |
@@ -181,6 +174,7 @@ jobs:
             artifacts/ci-logs/
             artifacts/smoke/**/summary.json
             artifacts/installability-*/summary.json
+            artifacts/installability-*/reports/
           if-no-files-found: warn
           retention-days: 14
 

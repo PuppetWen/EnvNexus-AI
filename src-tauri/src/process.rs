@@ -49,25 +49,27 @@ impl OutputReader {
         let cancellation_pipe = pipe.as_handle().try_clone_to_owned()?;
         let stop = Arc::new(AtomicBool::new(false));
         let reader_stop = Arc::clone(&stop);
-        let thread = thread::Builder::new().name(name.to_string()).spawn(move || {
-            let mut captured = Vec::new();
-            let mut buffer = [0_u8; 16 * 1024];
-            while !reader_stop.load(Ordering::Acquire) {
-                match pipe.read(&mut buffer) {
-                    Ok(0) => break,
-                    Ok(count) => {
-                        // Keep draining after the storage limit so a noisy child
-                        // cannot block on a full pipe or grow memory indefinitely.
-                        let keep = count.min(MAX_CAPTURE_BYTES - captured.len());
-                        captured.extend_from_slice(&buffer[..keep]);
+        let thread = thread::Builder::new()
+            .name(name.to_string())
+            .spawn(move || {
+                let mut captured = Vec::new();
+                let mut buffer = [0_u8; 16 * 1024];
+                while !reader_stop.load(Ordering::Acquire) {
+                    match pipe.read(&mut buffer) {
+                        Ok(0) => break,
+                        Ok(count) => {
+                            // Keep draining after the storage limit so a noisy child
+                            // cannot block on a full pipe or grow memory indefinitely.
+                            let keep = count.min(MAX_CAPTURE_BYTES - captured.len());
+                            captured.extend_from_slice(&buffer[..keep]);
+                        }
+                        Err(_) if reader_stop.load(Ordering::Acquire) => break,
+                        Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                        Err(error) => return Err(error),
                     }
-                    Err(_) if reader_stop.load(Ordering::Acquire) => break,
-                    Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
-                    Err(error) => return Err(error),
                 }
-            }
-            Ok(captured)
-        })?;
+                Ok(captured)
+            })?;
         Ok(Self {
             thread: Some(thread),
             stop,
@@ -95,7 +97,9 @@ impl OutputReader {
     }
 
     fn finished(&self) -> bool {
-        self.thread.as_ref().is_none_or(thread::JoinHandle::is_finished)
+        self.thread
+            .as_ref()
+            .is_none_or(thread::JoinHandle::is_finished)
     }
 
     fn finish(mut self, deadline: Instant) -> io::Result<Vec<u8>> {
@@ -323,7 +327,9 @@ mod tests {
         assert!(output.status.success());
         assert_eq!(output.stdout.len(), MAX_CAPTURE_BYTES);
         assert_eq!(output.stderr.len(), MAX_CAPTURE_BYTES);
-        assert!(output.stdout.iter().filter(|byte| **byte == b'O').count() > MAX_CAPTURE_BYTES - 4096);
+        assert!(
+            output.stdout.iter().filter(|byte| **byte == b'O').count() > MAX_CAPTURE_BYTES - 4096
+        );
         assert!(output.stderr.iter().all(|byte| *byte == b'E'));
     }
 
@@ -414,15 +420,14 @@ mod tests {
         let imports_rva = usize::try_from(pe_u32(optional, directories + 8)?).ok()?;
         let imports_size = usize::try_from(pe_u32(optional, directories + 12)?).ok()?;
         let headers_size = usize::try_from(pe_u32(optional, 60)?).ok()?;
-        let sections = executable.get(
-            sections_start..sections_start.checked_add(section_count.checked_mul(40)?)?,
-        )?;
+        let sections = executable
+            .get(sections_start..sections_start.checked_add(section_count.checked_mul(40)?)?)?;
         let rva_to_offset = |rva: usize, size: usize| -> Option<usize> {
             if rva.checked_add(size)? <= headers_size {
                 executable.get(rva..rva.checked_add(size)?)?;
                 return Some(rva);
             }
-            for section in sections.chunks_exact(40) {
+            for section in sections.as_chunks::<40>().0 {
                 let virtual_address = usize::try_from(pe_u32(section, 12)?).ok()?;
                 let raw_size = usize::try_from(pe_u32(section, 16)?).ok()?;
                 let raw_offset = usize::try_from(pe_u32(section, 20)?).ok()?;
@@ -509,8 +514,7 @@ mod tests {
             .expect("test executable must have a valid PE import directory")
             .into_iter()
             .filter(|name| {
-                name.len() >= 12
-                    && executable[name.end - 4..name.end].eq_ignore_ascii_case(b".dll")
+                name.len() >= 12 && executable[name.end - 4..name.end].eq_ignore_ascii_case(b".dll")
             })
             .max_by_key(|name| name.len())
             .expect("test executable must have a startup DLL import");

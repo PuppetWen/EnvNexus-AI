@@ -1502,26 +1502,24 @@ fn add_cross_tool_diagnostics(
     if let Some(android) = by_id
         .get("adb")
         .and_then(|tool| tool.default_version.as_ref())
-    {
-        if let Some(java) = by_id
+        && let Some(java) = by_id
             .get("java")
             .and_then(|tool| tool.default_version.as_ref())
-            && drive_key(&android.path) != drive_key(&java.path)
-        {
-            issues.push(DiagnosticIssue {
-                code: "ANDROID_WORKSPACE_DISTRIBUTED".to_string(),
-                level: IssueLevel::Info,
-                title: "Android 依赖当前分布在不同根目录".to_string(),
-                detail: "EnvNexus AI 可以为后续安装建立统一根目录，但不会自动迁移已有目录。"
-                    .to_string(),
-                evidence: Some(format!(
-                    "ADB={} | JDK={}",
-                    android.path.display(),
-                    java.path.display()
-                )),
-                repairable: false,
-            });
-        }
+        && drive_key(&android.path) != drive_key(&java.path)
+    {
+        issues.push(DiagnosticIssue {
+            code: "ANDROID_WORKSPACE_DISTRIBUTED".to_string(),
+            level: IssueLevel::Info,
+            title: "Android 依赖当前分布在不同根目录".to_string(),
+            detail: "EnvNexus AI 可以为后续安装建立统一根目录，但不会自动迁移已有目录。"
+                .to_string(),
+            evidence: Some(format!(
+                "ADB={} | JDK={}",
+                android.path.display(),
+                java.path.display()
+            )),
+            repairable: false,
+        });
     }
 }
 

@@ -42,6 +42,7 @@ pub struct ToolDescriptor {
 }
 
 #[async_trait]
+#[allow(clippy::double_must_use, reason = "async_trait adds must_use to a boxed Future")]
 pub trait ToolPlugin: Send + Sync {
     fn descriptor(&self) -> &ToolDescriptor;
 

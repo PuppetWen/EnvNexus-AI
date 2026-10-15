@@ -123,7 +123,7 @@ src-tauri/target/release/bundle/nsis/EnvNexus AI_0.1.5_x64-setup.exe.sig
 
 ## GitHub Actions 发布验证
 
-`.github/workflows/verify-release.yml` 在 `main`、`codex/**` 分支推送、非草稿 PR 和手动触发时运行 Windows 校验与构建。它执行前端和 Rust 检查、命令脚本冒烟、NSIS 隔离安装，并上传安装包、便携包和日志。分支推送及手动运行还执行官方源查询、Python 安装事务和 Node.js/Git 隔离安装检查；具体通过结果以工作流和 `TEST_REPORT.md` 为准。
+`.github/workflows/verify-release.yml` 在 `main`、`codex/**` 分支推送、非草稿 PR 和手动触发时运行 Windows 校验与构建。它执行前端和 Rust 检查、命令脚本冒烟、NSIS 隔离安装，并上传安装包、便携包和日志。分支推送及手动运行还执行官方源查询、Python 安装事务和全部 15 类工具的隔离安装检查；每项完成后清理本次测试的大型包，具体通过结果以工作流和 `TEST_REPORT.md` 为准。
 
 工作流把项目构建缓存、Cargo/Rustup 和临时文件放在仓库目录；pnpm 启动工具安装在工作区相邻的隔离目录，避免被项目依赖安装递归扫描。项目缓存由 Actions cache 保存，构建文件通过 artifact 交付。
 
