@@ -6,6 +6,8 @@
 
 执行环境：GitHub Actions `windows-latest`、Windows x64 MSVC、Rust stable、Node.js 24、pnpm 11。本节以 CI7 提交 `79c50cc` 的完整测试报告为最终证据，运行记录为 [38689901318](https://github.com/PuppetWen/EnvNexus-AI/actions/runs/38689901318)，最终结论 `success`：全部测试和打包步骤通过，包括命令模式全盘扫描、15 类工具真实安装、ADB 实际激活与用户环境恢复。此前 CI6 提交 `a8526f2` 的 15 类安装检查也已通过。
 
+合并到 `main` 后，提交 `39e618f` 的[完整复测 38692450907](https://github.com/PuppetWen/EnvNexus-AI/actions/runs/38692450907) 也以 `success` 完成。该次 CI 不再自动格式化或改写源码，严格格式检查、全部自动测试、联网源查询、构建与 NSIS 校验、全盘扫描和 110 个脚本、15/15 实际安装及 ADB 激活/恢复均再次通过。
+
 ### 自动检查与构建
 
 | 项目 | 执行与结果 |
