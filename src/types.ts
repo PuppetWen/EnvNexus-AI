@@ -98,6 +98,7 @@ export interface RemoteVersion {
   publishedAt?: string;
   architecture: string;
   downloadUrl?: string;
+  installUnavailableReason?: string | null;
   checksumAlgorithm?: "sha512" | "sha256" | "sha1";
   checksum?: string;
   notesUrl?: string;

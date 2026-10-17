@@ -366,7 +366,7 @@ try {
         $taskNewCatalog = Get-Content -LiteralPath $taskLegacyCatalogPath -Raw | ConvertFrom-Json
         $taskRepairRemote = @($taskNewCatalog.versions | Where-Object version -ceq $taskVersion) | Select-Object -First 1
         Assert-FullRemote $taskRepairRemote
-        if ($taskNewCatalog.sourceUrl -cne 'https://www.python.org/ftp/python/index-windows.json' -or
+        if ($taskNewCatalog.sourceUrl -cne 'https://www.python.org/api/v2/downloads/release/?is_published=true' -or
             @($taskNewCatalog.versions | Where-Object { $_.downloadUrl -match '-embed-' }).Count -ne 0) {
             throw 'CLI repair retained the embedded Python catalog.'
         }

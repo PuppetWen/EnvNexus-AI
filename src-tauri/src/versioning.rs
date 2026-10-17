@@ -25,7 +25,7 @@ pub fn sort_remote_versions_descending(versions: &mut [RemoteVersion]) {
     });
 }
 
-fn compare_version_strings(left: &str, right: &str) -> Ordering {
+pub(crate) fn compare_version_strings(left: &str, right: &str) -> Ordering {
     let left_tokens = tokenize(left);
     let right_tokens = tokenize(right);
     let shared = left_tokens.len().min(right_tokens.len());
@@ -141,6 +141,7 @@ mod tests {
             checksum_algorithm: None,
             checksum: None,
             notes_url: None,
+            install_unavailable_reason: None,
         }
     }
 

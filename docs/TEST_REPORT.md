@@ -1,5 +1,74 @@
 # EnvNexus AI 测试报告
 
+## 0.1.7 验证记录（2026-10-17 UTC）
+
+本节以提交 `ba2c54e48bdb9a5606e8ccb8f6a29273c06795fa` 的 [CI7 / 39025514788](https://github.com/PuppetWen/EnvNexus-AI/actions/runs/39025514788) 原始报告为依据。整轮工作流已确认 `COMPLETED / SUCCESS`，完成时间为 `2026-10-17T11:03:39Z`，包含功能、构建、报告上传和缓存收尾。原始报告下载目录为 `artifacts/history-ci-seventh-reports-r1/`；下文保留全部旧版记录，不将旧结果作为本版复测。
+
+### 本轮主要结果
+
+| 项目 | CI7 原始证据与结果 |
+| --- | --- |
+| 自动检查 | `ci-logs/verification.log`：62 项前端测试、4 项发布脚本测试、184 项 Rust 测试通过；6 项联网/官方包/发布产物测试在默认单元测试中显式忽略。TypeScript、Vite 生产构建、Rust 格式及 clippy 检查通过 |
+| 官方源与安装事务 | `ci-logs/live-sources.log`：15 类官方源实时查询通过；`live-install.log`：官方完整 Python `3.15.0` 实际安装事务通过 |
+| Python 历史目录 | 662 条记录、367 条可安装下载、295 条无下载记录；其中预览 376 条、归档频道 7 条，不可安装预览 189 条。关键词/频道组合、可安装筛选、版本及发布日期双向排序均通过 |
+| 历史版本实际安装 | `python-history-e737b5d949f444608a4851c86b79e11a/summary.json`：10/10 通过，`complete: true`、`cleanup: passed`、`errors: []` |
+| 现代完整包新装与修复 | `python-88e5773f1ac4460c86d919a01aacf499/summary.json`：`3.15.0` 新装、真实旧嵌入式安装的同版本原路径修复均通过，旧缓存被拒绝，pip/开发组件/venv 验收通过 |
+| 命令模式 | `smoke/cli-a5e8525a5d864068bece7044d443afad/summary.json`：15 类定义、110 个生成命令、完成全盘扫描、根目录持久化、旧脚本读取最新根、只读不扫描及预览保护均通过 |
+| 15 类工具安装 | `installability-7121709ad768441b84593a487738b05e/summary.json`：15/15 通过、0 失败，安装清单、切换预览、缓存与清理均通过；ADB 实际激活、默认命令回读和用户环境恢复通过 |
+| 构建与 NSIS | `ci-logs/bundle.log`、`installer-payload.json`：0.1.7 构建及 NSIS 隔离安装通过，安装后主程序与便携包 SHA-256 相同 |
+
+历史目录只刷新一次，后续筛选使用同一缓存，`fetchedAt` 保持 `2026-10-17T10:44:35.433393900Z`，缓存 SHA-256 为 `c51271c9ac1993b5966d7dc0c89be86c565daedfec8854fd4b617980cb5e3d85`。原始 `reports/catalog/validation.json` 确认 `filteredCommandsUsedUnchangedCache: true`。目录包含 `0.9.1`、`1.6.1` 和 `3.4.0a1/a4/b1/rc1` 等样本；缺少可校验 Windows 下载元数据的条目保留官方页和明确不可安装原因，源码标签不被当作 Windows 包存在或不存在的证明。
+
+### 十个历史 Python 场景
+
+每项均通过正式 CLI 下载官方原包、校验并静态提取，实际解释器版本、prefix、可执行文件和标准库检查通过；受管清单与中央清单的版本、来源 URL、路径及摘要一致。证据位于上述历史报告的 `reports/<version>/`，各包实测 MD5 如下。
+
+| 版本 | 官方原包形式 | pip 验收 | venv 验收 | 已核对的原包 MD5 |
+| --- | --- | --- | --- | --- |
+| `2.0.1` | Wise EXE | 发行版未随附 | 发行版未随附 | `5940b6eea8972136f8e365346f1b1313` |
+| `2.1.3` | Wise EXE | 发行版未随附 | 发行版未随附 | `fc8020b2be17c098b69368543c5589a9` |
+| `2.2.3` | Wise EXE | 发行版未随附 | 发行版未随附 | `d76e774a4169794ae0d7a8598478e69e` |
+| `2.3.5` | Wise EXE | 发行版未随附 | 发行版未随附 | `ba6f9eb9da40ad23bc631a1f31149a01` |
+| `2.4.4` | MSI/CAB | 发行版未随附 | 发行版未随附 | `8b1517fdbf287d402ac06cc809abfad6` |
+| `2.7.18` | amd64 MSI/CAB | `19.2.3` 模块、列表、`pip.exe` | 发行版未随附 | `a425c758d38f8e28b56f4724b499239a` |
+| `3.0.1` | amd64 MSI/CAB | 发行版未随附 | 发行版未随附 | `be8f57265e1419330965692a4fa15d9a` |
+| `3.3.5` | amd64 MSI/CAB | 发行版未随附 | 独立解释器、prefix/base_prefix、小程序；不含 pip | `ebb3ab0df91389a6dd45317d6f4ac838` |
+| `3.4.4` | amd64 MSI/CAB | `7.1.2` 模块、列表、`pip.exe` | 同版 pip 模块、列表、入口及小程序 | `963f67116935447fad73e09cc561c713` |
+| `3.10.11` | amd64 Burn EXE 内 MSI/CAB | `23.0.1` 模块、列表、`pip.exe` | 同版 pip 模块、列表、入口及小程序 | `a55e9c1e6421c84a4bd8b4be41492f51` |
+
+前九项实际安装于本轮 GUID 内 `versions/<version>/tools/python/<version>` 的 ASCII 路径。各项先以 `unsupported-开发-é` 根生成预览，均在安装开始前被拒绝，`incompatible-path.json` 记录 `installationStarted: false`；Python `<3.6` 应使用如 `E:\Environment` 的 ASCII 安装目录。`3.10.11` 实际安装于 `versions/3.10.11/tools-开发-é/python/3.10.11`，解释器、pip 模块/输出/入口及 venv 均通过。
+
+十项 `setup-isolation.json` 均为 `passed`、`sentinelCount: 0`：故意注入的 `PIP_TARGET/PIP_PREFIX/PIP_ROOT/PIP_USER/PIP_LOG`、fake HOME 中 `pydistutils.cfg`、不可信 CWD 中 `setup.cfg` 以及 `platform/runpy/pip` 导入哨兵未影响安装。测试仅在 runner 本次 GUID 的 D 盘工作区安装和缓存，逐项及整轮用户环境保持 `unchanged`，清理通过；历史与现代 Python 冒烟执行前后 `HKCU\Environment` 指纹均为 `82be763dab7e32567aa983a6c3361d2762275e991a7cb2479fcbbbef7a158ba5`。历史包未运行厂商安装器、MSI 自定义动作或全局运行库安装程序。
+
+现代 `3.15.0` 原包为 `python-3.15.0-amd64.zip`，45,140,897 字节，SHA-256 `6b1a3f885ce416cf3a68af203e62203664eb5224d8d0c1d2a1945fddec5c500b`。新装与修复均验证 pip `26.2.1`、Tk `9.0`、IDLE、`include/Python.h`、3 个导入库及含 pip 的 venv；修复来源由 `python-3.15.0-embed-amd64.zip` 变为完整 ZIP，`sameVersion`、`oldCatalogRejected` 均为 `true`，安装路径保持原值。
+
+### 前六轮失败与后续修复
+
+| 轮次 | 失败记录及处理 |
+| --- | --- |
+| CI1 / `95a825b` | 官方数据库重复 `3.3.5rc1` 导致目录查询失败；改为合并同版本候选，仍拒绝矛盾摘要 |
+| CI2 / `28f2437` | 历史参数/flags、3.0 探针 CRLF、旧版非 ASCII 路径及筛选测试的扩展名假设失败；修正年代兼容探针、路径预检与完整 ZIP 筛选断言 |
+| CI3 / `a48f49e` | Wise helper 的三处 `ZipError` 转换导致编译失败；补显式统一错误转换，未将此轮计为安装成功 |
+| CI4 / `6f00b9b` | 历史归档内容无法识别，旧日志未给出具体页面，根因不作追认；补有界 gzip 解码、逐页验证、异常页重试及精确来源错误 |
+| CI5 / `665da95` | 四个 Wise 场景的脚本/ZIP 配对失败，2.7.18 出现 `connectionpool` 导入失败，3.4.4 最终无 pip；修复 Wise 配对，改用私有展开的原包 wheel、显式 SSL 探测及传播 pip 退出状态。3.4.4 旧日志不能单独证明 SSL 是唯一根因 |
+| CI6 | 单元测试通过后，三个测试用 `clone` 触发严格 clippy 失败；修正为引用切片。上述轮次均未计为整轮成功，实际历史安装结论以 CI7 十项报告为准 |
+
+### 工具激活、产物和交付边界
+
+15 类实际版本为：Python `3.15.0`、Java `27+35`、Go `1.27.2`、Rust `1.99.1`、Node.js `26.12.0`、Git `2.56.0.windows.2`、Android Command-line Tools `23.0`、NDK `30.0.16248370`、Gradle `9.8.1`、CMake `4.4.4`、ADB `37.0.1`、Maven `3.10.0`、.NET SDK `10.0.402`、Ruby `4.0.7-1`、PHP `8.5.11`。仅 ADB 实际应用用户环境计划并恢复，其余 14 类验证切换预览；安装完成仍需单独确认环境变更，系统 PATH 遮蔽保护继续生效。
+
+`release/SHA256SUMS.txt` 与 CI7 `installer-payload.json` 中的主程序摘要一致；当前本地产物摘要如下，公开下载回读仍待完成。
+
+| 资产 | SHA-256 |
+| --- | --- |
+| `EnvNexus-AI_0.1.7_x64-setup.exe` | `0f4ea8c1b51d20cff7a70c7c39111398cd65f88eb84d174d02d8d0cdc6a7e392` |
+| `EnvNexus-AI_0.1.7_x64-portable.exe` / NSIS 安装后主程序 | `879b28b2d659fad121da7d077186f15ffca9675d1f5ce51e340d9f4ccb8dfb4c` |
+| `latest.json` | `45dc83ddf69ace74a73439ff5864c683976c8da570b7a42130ca82fecb98d982` |
+
+独立签名验证 [39027005455](https://github.com/PuppetWen/EnvNexus-AI/actions/runs/39027005455) 已以 `COMPLETED / SUCCESS` 完成，完成时间为 `2026-10-17T11:06:57Z`；六项资产下载、版本/URL/完整 SHA-256 清单检查、应用内公钥的真实 Rust updater 签名验证及报告上传和缓存收尾均通过。正式公开发布、最终合并提交/标签对应关系及无凭据公开六资产回读仍待确认。
+
+以上十个稳定历史版本通过不表示全部 662 条版本、所有预览版组件、第三方包、原生扩展编译或 IDE 集成都已验证；pip/venv 按原发行版实际能力验收，没有为旧版补装现代 pip 或 virtualenv。历史包使用的官方 MD5 属于弱校验，不能等同于 SHA-256 或发行签名。此轮没有在用户开发机执行 Python PATH 切换或绕过 AppControl 启动新 GUI；Android SDK 覆盖 Command-line Tools，不含平台镜像或模拟器。
+
 ## 0.1.6 验证记录（2026-10-15 UTC）
 
 本节记录完整 Python 开发运行时修复的当前证据。0.1.5 的测试结果保留在下一节，不作为 0.1.6 完整 Python、旧安装迁移或最终发布包已通过的证明。

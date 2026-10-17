@@ -31,7 +31,9 @@ EnvNexus AI 是一款使用 Rust + Tauri 2 开发的 Windows 桌面 App。它把
 ### 主要功能
 
 - 管理 Python、Java/JDK、Go、Rust、Node.js、Git、Maven、.NET SDK、Ruby、PHP，以及 Android SDK、NDK、JDK、Gradle、CMake、ADB。
-- Python 使用官方 PythonCore 完整运行时 ZIP 和 SHA-256，提供 pip、venv、Tk/IDLE；仅列出完整包和校验值齐全的稳定版本，当前可用历史从 3.11 起。
+- Python 查询合并官网发布数据库、历史归档及官方 CPython 版本标签，展示 0.9、1.x、Python 2、旧 Python 3 的稳定版和预览版；缺包、仅源码或不能自动安装的条目也会保留并说明原因。
+- 官方版本支持关键词、发布类型和“仅可安装”筛选，可按版本或发布日期双向排序。
+- Python 优先采用官方完整 PythonCore ZIP；旧版受支持的 Wise EXE / MSI / WiX Burn EXE 通过静态提取安装，保留完整标准库和原发行包的能力。
 - 每个工具都有独立页面和独立安装根目录；Android 组件集中使用同一个用户指定根目录。
 - 显示当前默认版本、本机全部版本、官方可安装版本、安装位置和环境状态。
 - 官方版本列表优先显示已有缓存，过期内容在后台刷新；合并重复查询，安装前获取选中版本所需的校验信息。
@@ -46,6 +48,18 @@ EnvNexus AI 是一款使用 Rust + Tauri 2 开发的 Windows 桌面 App。它把
 - 支持现代科技、赛博朋克、日系轻量、游戏 HUD、专业极简主题，以及简体中文、繁体中文、English、日本語、한국어界面。
 - 支持托盘菜单、开机自启动、关闭到托盘、单实例运行和恢复上次离开的页面。
 
+### Python 历史版本
+
+目录默认展示全部获取到的官方记录，可筛选稳定版、预览版、历史归档或仅可安装版本。官方 CPython 标签通过 Git v2 `ls-refs` 批量查询，补齐发布数据库遗漏的历史标签；本轮网络样本返回 657 个版本标签，标签响应约 42 KB，数量和体积会随上游变化，不代表固定性能承诺。
+
+安装优先选择有官方 SHA-256 的完整 ZIP；历史 Python 2.0–2.3 的 Wise EXE、Python 2.4 起的 MSI、Python 3.5 起的 WiX Burn EXE 在有效官方校验元数据齐全时可静态解包到自选目录，不运行厂商安装器。CI7 已通过十个历史版本的隔离安装验收。仅源码、缺少 Windows 安装包或缺少可验证下载元数据的条目继续显示对应的不可自动安装原因；源码标签本身不作为存在或缺少 Windows 包的证明。
+
+Python 3.6 之前的 Windows 运行时及随包 Tcl/Tk 需要仅含 ASCII 字符的安装目录，例如 `E:\Environment`。安装或修复计划会提前拒绝不兼容的路径，执行阶段也会在启动旧解释器前复核。CI7 已通过这些路径拒绝检查，并以 Python `3.10.11` 通过包含中文和重音字符目录的安装与 pip/venv 验收。
+
+正式发行包中，Python 2.7.9+、Python 3.4+ 使用随包 pip/ensurepip，Python 3.3+ 保留内置 venv；预览版按实际发行组件区分，例如部分早期 alpha 尚无 venv 或 ensurepip。原包没有的功能不会被伪造，也不会联网补装最新版 pip。官网仅提供 MD5 的历史包会在安装计划中明确标记为弱校验，不冒充 SHA-256 或发行签名验证。
+
+历史 pip 从原包随带的 wheel 离线初始化，使用受管根目录内的短私有临时目录并隔离外部配置；安装后验证最终路径的 pip 命令和该版本具备的 venv 能力。[CI7 功能验证](https://github.com/PuppetWen/EnvNexus-AI/actions/runs/39025514788)已通过 184 项 Rust、62 项前端、4 项 Node 测试、十个历史 Python 安装、现代 Python 新装与旧嵌入式安装原路径修复，以及 15/15 类工具真实安装；[独立草稿签名验证](https://github.com/PuppetWen/EnvNexus-AI/actions/runs/39027005455)也已通过。公开发行及公开下载回读尚待完成，范围和未验证边界见[测试报告](docs/TEST_REPORT.md)。
+
 ### AI 在哪里起作用
 
 没有配置 AI 时，本地规则引擎仍会分析 PATH 重复/失效/遮蔽、默认版本冲突、用户级与系统级变量冲突、版本管理器接管状态，以及 `RUST1`、`RUST2` 这类自定义别名。
@@ -58,11 +72,11 @@ AI 不会绕过本地安全边界：它不能直接修改环境。任何一键�
 
 从 [GitHub Releases](https://github.com/PuppetWen/EnvNexus-AI/releases/latest) 下载：
 
-- `EnvNexus-AI_0.1.6_x64-setup.exe`：当前用户安装版，可选择安装目录；检测到已有安装时会复用原路径并原地升级。
-- `EnvNexus-AI_0.1.6_x64-portable.exe`：便携主程序；App 内更新会在原路径安全自替换。
+- `EnvNexus-AI_0.1.7_x64-setup.exe`：当前用户安装版，可选择安装目录；检测到已有安装时会复用原路径并原地升级。
+- `EnvNexus-AI_0.1.7_x64-portable.exe`：便携主程序；App 内更新会在原路径安全自替换。
 - `SHA256SUMS.txt`：下载文件校验值。
 
-0.1.5 安装的受管 Python 可能使用不含 pip/venv 的嵌入式包。升级后，对仍有对应官方完整发行包的版本，在 Python 版本卡片点击“修复”，可在原路径迁移到完整运行时；修复完成后再确认单独的 PATH/默认版本计划。旧版本清单缓存会自动失效；没有官方完整 ZIP 或 SHA-256 的旧版本不会改用嵌入式包代替。
+0.1.5 安装的受管 Python 可能使用不含 pip/venv 的嵌入式包。升级后，对仍有对应受支持官方完整发行包的版本，在 Python 版本卡片点击“修复”，可在原路径迁移到完整运行时；修复完成后再确认单独的 PATH/默认版本计划。旧的受限版本清单缓存会自动失效；没有可用完整发行包或有效官方校验信息时不会改用嵌入式包代替。
 
 首次打开不会扫描电脑。可先进入“工具链”为各工具设置目录，再按需扫描或查询官方版本。
 
@@ -76,6 +90,7 @@ jdk-list
 jdk-root set "E:\DevelopmentTools\Java"
 jdk-install 21.0.8
 python-list
+python-versions --query 3.10 --channel stable --installable --sort date-desc
 env-scan
 env-refresh
 env-diagnose
@@ -116,7 +131,9 @@ EnvNexus AI is a Windows desktop application built with Rust and Tauri 2. It pro
 ### Highlights
 
 - Manages Python, Java/JDK, Go, Rust, Node.js, Git, Maven, .NET SDK, Ruby, PHP, and the Android SDK/NDK/JDK/Gradle/CMake/ADB toolchain.
-- Python uses official PythonCore full runtime ZIPs with SHA-256 verification, including pip, venv, Tk, and IDLE. Only stable releases with full archives and checksums are listed; currently available history starts at 3.11.
+- Python catalogs combine official release records, historical archives, and official CPython version tags, including 0.9, 1.x, Python 2, older Python 3, stable releases, and previews. Source-only and unavailable releases remain visible with an explanation.
+- Filter official catalogs by keyword, release channel, and installability; sort versions or publication dates in either direction.
+- Python prefers official full PythonCore ZIPs. Supported historical Wise EXE, MSI, and WiX Burn EXE packages are extracted without running their installers, preserving the full standard library and the original distribution's features.
 - Gives every tool its own management page and selectable installation root. Android components share one user-selected root.
 - Shows the current default, every locally installed version, official releases, locations, and environment health.
 - Shows cached official catalogs first, refreshes stale results in the background, and merges duplicate queries. Installation fetches the selected version's required checksum metadata.
@@ -130,6 +147,18 @@ EnvNexus AI is a Windows desktop application built with Rust and Tauri 2. It pro
 - Generates commands such as `jdk-list`, `python-install`, and `env-diagnose` for any new CMD or PowerShell session.
 - Includes five distinct themes, five UI languages, a tray menu, launch at login, close-to-tray behavior, single-instance handling, and last-page restoration.
 
+### Historical Python releases
+
+Catalogs initially show every retrieved official record, with filters for stable releases, previews, archives, and installable packages. Git v2 `ls-refs` retrieves official CPython version tags in a batch to fill gaps in the release database. One network sample returned 657 version tags in a roughly 42 KB tag response; these figures vary with the upstream repository and are not a fixed performance guarantee.
+
+Full ZIPs with official SHA-256 checksums take priority. Supported Python 2.0–2.3 Wise EXEs, MSI packages from Python 2.4 onward, and WiX Burn EXEs from Python 3.5 onward are extracted into a selected directory when official checksums are available, without running vendor installers. CI7 passed isolated installation checks for ten historical versions. Source-only releases, missing Windows packages, and unavailable verifiable download metadata retain their specific installation-blocking reasons. A source tag alone does not establish whether a Windows package exists.
+
+Windows runtimes before Python 3.6 and their bundled Tcl/Tk require an ASCII-only installation path, such as `E:\Environment`. Install and repair plans reject incompatible paths, and execution checks again before starting an old interpreter. CI7 passed those rejection checks and installed Python `3.10.11`, including pip and venv checks, in a path containing Chinese and accented characters.
+
+For final releases, Python 2.7.9+ and Python 3.4+ use bundled pip/ensurepip, and Python 3.3+ retains built-in venv. Preview releases are checked against their actual components; some early alphas predate venv or ensurepip. Missing features are not fabricated or filled by downloading a current pip. Historical packages published with only MD5 are explicitly identified as using a weak checksum, distinct from SHA-256 or release-signature verification.
+
+Historical pip is initialized offline from bundled wheels, using a short private workspace inside the managed root and isolated external configuration. Final-path pip launchers and the release's available venv features are checked. [CI7 functional checks](https://github.com/PuppetWen/EnvNexus-AI/actions/runs/39025514788) passed 184 Rust, 62 frontend, and 4 Node tests, ten historical Python installations, modern Python installation and in-place embedded-package repair, and 15/15 tool installations. [Independent draft-asset signature verification](https://github.com/PuppetWen/EnvNexus-AI/actions/runs/39027005455) also passed. Public release and public-download checks remain pending; see the [test report](docs/TEST_REPORT.md) for coverage and remaining limits.
+
 ### What AI does
 
 The local rule engine works without AI and diagnoses duplicate, missing, or shadowed PATH entries, default-version conflicts, user/system variable conflicts, version-manager ownership, and custom aliases such as `RUST1` and `RUST2`.
@@ -142,11 +171,11 @@ AI cannot bypass local safety controls or directly change the environment. One-c
 
 Download the latest build from [GitHub Releases](https://github.com/PuppetWen/EnvNexus-AI/releases/latest):
 
-- `EnvNexus-AI_0.1.6_x64-setup.exe`: per-user installer with a selectable install directory. Existing installations are upgraded in their previous location.
-- `EnvNexus-AI_0.1.6_x64-portable.exe`: portable executable. In-app updates safely replace it in its original location.
+- `EnvNexus-AI_0.1.7_x64-setup.exe`: per-user installer with a selectable install directory. Existing installations are upgraded in their previous location.
+- `EnvNexus-AI_0.1.7_x64-portable.exe`: portable executable. In-app updates safely replace it in its original location.
 - `SHA256SUMS.txt`: release checksums.
 
-Managed Python installations created by 0.1.5 may use the embedded package without pip or venv. After upgrading, choose “Repair” on the installed version card to migrate it in place when a matching official full archive is available, then confirm the separate PATH/default version plan. Old catalog caches are invalidated. Releases without a full official ZIP and SHA-256 are not replaced with embedded packages.
+Managed Python installations created by 0.1.5 may use the embedded package without pip or venv. After upgrading, choose “Repair” on the installed version card to migrate it in place when a matching supported official full distribution is available, then confirm the separate PATH/default version plan. Old restricted catalog caches are invalidated. Missing full packages or valid official checksums do not trigger a fallback to embedded packages.
 
 The first launch does not scan the machine. You can configure each tool's installation root before running a scan or querying official releases.
 
@@ -160,6 +189,7 @@ jdk-list
 jdk-root set "E:\DevelopmentTools\Java"
 jdk-install 21.0.8
 python-list
+python-versions --query 3.10 --channel stable --installable --sort date-desc
 env-scan
 env-refresh
 env-diagnose

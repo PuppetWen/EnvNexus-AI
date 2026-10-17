@@ -831,6 +831,13 @@ fn diagnose_managed_python(installed: &mut [InstalledVersion], issues: &mut Vec<
             ("pip.exe", "Scripts/pip.exe"),
         ]
         .into_iter()
+        .filter(|(name, _)| {
+            if *name == "venv" {
+                crate::python_features::has_builtin_venv(&version.version)
+            } else {
+                crate::python_features::has_bundled_pip(&version.version)
+            }
+        })
         .filter(|(_, relative)| !root.join(relative).is_file())
         .map(|(name, _)| name)
         .collect::<Vec<_>>();
@@ -1718,6 +1725,44 @@ fn drive_key(path: &Path) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn historical_python_health_does_not_require_features_that_did_not_exist() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("2.7.18");
+        fs::create_dir_all(&root).unwrap();
+        let mut installed = vec![InstalledVersion {
+            version: "2.7.18".into(),
+            path: root.clone(),
+            source: "EnvNexus AI".into(),
+            is_default: false,
+            managed: true,
+            health: HealthLevel::Healthy,
+            executable: None,
+        }];
+        for relative in [
+            "Lib/site-packages/pip/__init__.py",
+            "Lib/ensurepip/__init__.py",
+            "Scripts/pip.exe",
+        ] {
+            let path = root.join(relative);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, b"fixture").unwrap();
+        }
+        let mut issues = Vec::new();
+        diagnose_managed_python(&mut installed, &mut issues);
+        assert!(issues.is_empty());
+        assert_eq!(installed[0].health, HealthLevel::Healthy);
+        fs::remove_file(root.join("Scripts/pip.exe")).unwrap();
+        diagnose_managed_python(&mut installed, &mut issues);
+        assert_eq!(issues.len(), 1);
+        installed[0].version = "2.4.6".into();
+        installed[0].health = HealthLevel::Healthy;
+        issues.clear();
+        diagnose_managed_python(&mut installed, &mut issues);
+        assert!(issues.is_empty());
+        assert_eq!(installed[0].health, HealthLevel::Healthy);
+    }
 
     #[test]
     fn managed_python_development_health_is_checked_even_with_a_cached_version() {

@@ -1,4 +1,7 @@
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{HashMap, HashSet},
+    io::Read,
+};
 
 use chrono::{DateTime, Duration, Utc};
 use futures_util::{StreamExt, stream};
@@ -106,10 +109,19 @@ async fn checked_text(client: &reqwest::Client, url: &str) -> AppResult<String> 
     for attempt in 0..3 {
         let (error, retryable) =
             match checked_response(client, url, "text/plain, text/html;q=0.9, */*;q=0.8").await {
-                Ok(response) => match response.text().await {
-                    Ok(text) if !text.is_empty() => return Ok(text),
-                    Ok(_) => (AppError::InvalidSource(format!("{url}：响应体为空")), true),
-                    Err(error) => (AppError::Http(error), true),
+                Ok(response) => match source_response_bytes(response, url).await {
+                    Ok(bytes) if bytes.is_empty() => {
+                        (AppError::InvalidSource(format!("{url}：响应体为空")), true)
+                    }
+                    Ok(bytes) => {
+                        return String::from_utf8(bytes).map_err(|error| {
+                            AppError::InvalidSource(format!("{url}：响应不是有效 UTF-8：{error}"))
+                        });
+                    }
+                    Err(error) => {
+                        let retryable = retryable_source_error(&error);
+                        (error, retryable)
+                    }
                 },
                 Err(error) => {
                     let retryable = retryable_source_error(&error);
@@ -137,7 +149,7 @@ where
                     .and_then(|value| value.to_str().ok())
                     .unwrap_or("未知 Content-Type")
                     .to_string();
-                match response.bytes().await {
+                match source_response_bytes(response, url).await {
                     Ok(bytes) if bytes.is_empty() => {
                         (AppError::InvalidSource(format!("{url}：响应体为空")), true)
                     }
@@ -153,7 +165,10 @@ where
                             )
                         }
                     },
-                    Err(error) => (AppError::Http(error), true),
+                    Err(error) => {
+                        let retryable = retryable_source_error(&error);
+                        (error, retryable)
+                    }
                 }
             }
             Err(error) => {
@@ -177,8 +192,93 @@ async fn checked_response(
     let response = client
         .get(url)
         .header(reqwest::header::ACCEPT, accept)
+        // Decode only source metadata here; binary/range downloads keep their
+        // original representation and Content-Length semantics.
+        .header(reqwest::header::ACCEPT_ENCODING, "gzip, identity")
         .send()
         .await?;
+    checked_source_response(response)
+}
+
+const MAX_SOURCE_RESPONSE_BYTES: usize = 32 * 1024 * 1024;
+
+async fn source_response_bytes(response: reqwest::Response, source: &str) -> AppResult<Vec<u8>> {
+    let encoding = response
+        .headers()
+        .get(reqwest::header::CONTENT_ENCODING)
+        .map(|value| value.to_str())
+        .transpose()
+        .map_err(|_| AppError::InvalidSource(format!("{source}：Content-Encoding 无效")))?
+        .unwrap_or("identity")
+        .to_ascii_lowercase();
+    if !matches!(encoding.trim(), "identity" | "gzip" | "x-gzip") {
+        return Err(AppError::InvalidSource(format!(
+            "{source}：不支持 Content-Encoding {encoding}"
+        )));
+    }
+    if response
+        .content_length()
+        .is_some_and(|length| length > MAX_SOURCE_RESPONSE_BYTES as u64)
+    {
+        return Err(AppError::InvalidSource(format!(
+            "{source}：响应超过 {} 字节限制",
+            MAX_SOURCE_RESPONSE_BYTES
+        )));
+    }
+    let mut stream = response.bytes_stream();
+    let mut bytes = Vec::new();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk?;
+        if chunk.len() > MAX_SOURCE_RESPONSE_BYTES - bytes.len() {
+            return Err(AppError::InvalidSource(format!(
+                "{source}：响应超过 {} 字节限制",
+                MAX_SOURCE_RESPONSE_BYTES
+            )));
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    decode_source_body(bytes, &encoding, source, MAX_SOURCE_RESPONSE_BYTES)
+}
+
+fn decode_source_body(
+    bytes: Vec<u8>,
+    encoding: &str,
+    source: &str,
+    limit: usize,
+) -> AppResult<Vec<u8>> {
+    let oversized =
+        || AppError::InvalidSource(format!("{source}：压缩或解压后的响应超过 {limit} 字节限制"));
+    if bytes.len() > limit {
+        return Err(oversized());
+    }
+    match encoding.trim() {
+        "identity" => Ok(bytes),
+        "gzip" | "x-gzip" => {
+            let mut decoded = Vec::new();
+            let mut reader =
+                flate2::read::MultiGzDecoder::new(bytes.as_slice()).take(limit as u64 + 1);
+            reader.read_to_end(&mut decoded).map_err(|error| {
+                if error.kind() == std::io::ErrorKind::UnexpectedEof {
+                    AppError::Io(std::io::Error::new(
+                        error.kind(),
+                        format!("{source}：gzip 响应被截断：{error}"),
+                    ))
+                } else {
+                    AppError::InvalidSource(format!("{source}：gzip 响应无效：{error}"))
+                }
+            })?;
+            if decoded.len() > limit {
+                return Err(oversized());
+            }
+            Ok(decoded)
+        }
+        _ => Err(AppError::InvalidSource(format!(
+            "{source}：不支持 Content-Encoding {encoding}"
+        ))),
+    }
+}
+
+fn checked_source_response(response: reqwest::Response) -> AppResult<reqwest::Response> {
     if response.status().is_success() {
         return Ok(response);
     }
@@ -240,6 +340,7 @@ fn source_retry_time(
 fn retryable_source_error(error: &AppError) -> bool {
     match error {
         AppError::Http(error) => error.is_timeout() || error.is_connect() || error.is_body(),
+        AppError::Io(error) => error.kind() == std::io::ErrorKind::UnexpectedEof,
         AppError::SourceHttp {
             status,
             rate_limited: false,
@@ -260,6 +361,42 @@ async fn retry_delay(attempt: usize) {
 }
 
 const PYTHON_RUNTIME_SOURCE: &str = "https://www.python.org/ftp/python/index-windows.json";
+const PYTHON_RELEASE_SOURCE: &str =
+    "https://www.python.org/api/v2/downloads/release/?is_published=true";
+const PYTHON_FILE_SOURCE: &str = "https://www.python.org/api/v2/downloads/release_file/?os=1";
+const PYTHON_LEGACY_SOURCE: &str = "https://www.python.org/ftp/python/src/";
+const PYTHON_EARLY_SOURCE: &str = "https://www.python.org/download/releases/";
+const PYTHON_FTP_SOURCE: &str = "https://www.python.org/ftp/python/";
+const PYTHON_TAGS_SOURCE: &str =
+    "https://github.com/python/cpython.git/info/refs?service=git-upload-pack";
+const PYTHON_TAGS_UPLOAD: &str = "https://github.com/python/cpython.git/git-upload-pack";
+const PYTHON_TAGS_REQUEST: &[u8] = b"0014command=ls-refs\n0001001bref-prefix refs/tags/v\n0000";
+const PYTHON_TAGS_MAX_BYTES: usize = 32 * 1024 * 1024;
+const PYTHON_HISTORY_NAME: &str = "Python.org 发布与历史归档（含预览版）";
+
+#[derive(Debug, Deserialize)]
+struct PythonRelease {
+    name: String,
+    slug: String,
+    version: u32,
+    is_published: bool,
+    pre_release: bool,
+    release_date: Option<String>,
+    resource_uri: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct PythonReleaseFile {
+    name: String,
+    os: String,
+    release: String,
+    is_source: bool,
+    url: String,
+    #[serde(default)]
+    md5_sum: String,
+    #[serde(default)]
+    sha256_sum: String,
+}
 
 #[derive(Debug, Deserialize)]
 struct PythonRuntimeIndex {
@@ -280,16 +417,832 @@ struct PythonRuntime {
 }
 
 async fn fetch_python(client: &reqwest::Client, tool_id: &str) -> AppResult<VersionCatalog> {
-    let versions = fetch_python_indexes(|url| async move {
-        checked_json::<PythonRuntimeIndex>(client, &url).await
-    })
-    .await?;
+    // Both API collections are unpaginated bulk responses. Never hydrate hundreds
+    // of releases separately: python.org also limits anonymous API requests.
+    let (releases, files, (runtimes, (legacy, ftp, early), tags)) =
+        futures_util::future::try_join3(
+            checked_json::<Vec<PythonRelease>>(client, PYTHON_RELEASE_SOURCE),
+            checked_json::<Vec<PythonReleaseFile>>(client, PYTHON_FILE_SOURCE),
+            futures_util::future::try_join3(
+                fetch_python_indexes(|url| async move {
+                    checked_json::<PythonRuntimeIndex>(client, &url).await
+                }),
+                futures_util::future::try_join3(
+                    checked_python_archive(client, PYTHON_LEGACY_SOURCE),
+                    checked_python_archive(client, PYTHON_FTP_SOURCE),
+                    checked_python_archive(client, PYTHON_EARLY_SOURCE),
+                ),
+                fetch_python_source_tags(client),
+            ),
+        )
+        .await?;
+    if releases.is_empty() || files.is_empty() || runtimes.is_empty() {
+        return Err(AppError::InvalidSource(
+            "Python 官方历史目录或完整运行时索引为空，不能作为完整版本列表".into(),
+        ));
+    }
+    let archives = format!("{legacy}\n{early}");
+    let mut versions = build_python_history(releases, files, runtimes, &archives, &ftp)?;
+    merge_python_source_tags(&mut versions, tags);
     Ok(catalog(
         tool_id,
-        "Python.org 完整开发运行时",
-        PYTHON_RUNTIME_SOURCE,
+        PYTHON_HISTORY_NAME,
+        PYTHON_RELEASE_SOURCE,
         versions,
     ))
+}
+
+async fn fetch_python_source_tags(client: &reqwest::Client) -> AppResult<Vec<(String, String)>> {
+    fetch_python_source_tags_from(client, PYTHON_TAGS_SOURCE, PYTHON_TAGS_UPLOAD).await
+}
+
+async fn fetch_python_source_tags_from(
+    client: &reqwest::Client,
+    discovery_url: &str,
+    upload_url: &str,
+) -> AppResult<Vec<(String, String)>> {
+    // The two v2 requests avoid downloading tens of thousands of pull refs.
+    let response = client
+        .get(discovery_url)
+        .header("Git-Protocol", "version=2")
+        .header(
+            reqwest::header::ACCEPT,
+            "application/x-git-upload-pack-advertisement",
+        )
+        .send()
+        .await?;
+    let capabilities =
+        read_python_git_response(response, "application/x-git-upload-pack-advertisement").await?;
+    parse_python_git_capabilities(&capabilities)?;
+    let response = client
+        .post(upload_url)
+        .header("Git-Protocol", "version=2")
+        .header(
+            reqwest::header::CONTENT_TYPE,
+            "application/x-git-upload-pack-request",
+        )
+        .header(
+            reqwest::header::ACCEPT,
+            "application/x-git-upload-pack-result",
+        )
+        .body(PYTHON_TAGS_REQUEST)
+        .send()
+        .await?;
+    let tags = read_python_git_response(response, "application/x-git-upload-pack-result").await?;
+    parse_python_ls_refs(&tags)
+}
+
+async fn read_python_git_response(
+    response: reqwest::Response,
+    expected_type: &str,
+) -> AppResult<Vec<u8>> {
+    let response = checked_source_response(response)?;
+    if !response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split(';').next())
+        .is_some_and(|content_type| content_type.trim().eq_ignore_ascii_case(expected_type))
+    {
+        return Err(AppError::InvalidSource(
+            "CPython 官方源码标签服务返回了错误的 Content-Type".into(),
+        ));
+    }
+    if response
+        .content_length()
+        .is_some_and(|length| length > PYTHON_TAGS_MAX_BYTES as u64)
+    {
+        return Err(AppError::InvalidSource(
+            "CPython 官方源码标签响应超过 32 MiB 上限".into(),
+        ));
+    }
+    let mut bytes = Vec::new();
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk?;
+        if chunk.len() > PYTHON_TAGS_MAX_BYTES - bytes.len() {
+            return Err(AppError::InvalidSource(
+                "CPython 官方源码标签响应超过 32 MiB 上限".into(),
+            ));
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    Ok(bytes)
+}
+
+fn parse_python_git_capabilities(bytes: &[u8]) -> AppResult<()> {
+    let invalid = || {
+        AppError::InvalidSource("CPython 官方源码标签服务未提供完整的 Git v2 ls-refs 能力".into())
+    };
+    if bytes.len() > PYTHON_TAGS_MAX_BYTES {
+        return Err(invalid());
+    }
+    let mut offset = 0;
+    let mut first = python_git_packet(bytes, &mut offset)?;
+    // GitHub's smart HTTP advertisement includes the service announcement.
+    if first == Some(b"# service=git-upload-pack\n".as_slice()) {
+        if python_git_packet(bytes, &mut offset)?.is_some() {
+            return Err(invalid());
+        }
+        first = python_git_packet(bytes, &mut offset)?;
+    }
+    if first != Some(b"version 2\n".as_slice()) {
+        return Err(invalid());
+    }
+    let mut ls_refs = false;
+    let mut complete = false;
+    let mut seen = HashSet::new();
+    while offset < bytes.len() {
+        let Some(packet) = python_git_packet(bytes, &mut offset)? else {
+            complete = offset == bytes.len();
+            break;
+        };
+        let capability = std::str::from_utf8(packet)
+            .ok()
+            .and_then(|line| line.strip_suffix('\n'))
+            .ok_or_else(invalid)?;
+        let name = capability.split('=').next().ok_or_else(invalid)?;
+        if name.is_empty()
+            || !name
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+            || !capability
+                .bytes()
+                .all(|byte| byte == b' ' || byte.is_ascii_graphic())
+            || !seen.insert(name)
+        {
+            return Err(invalid());
+        }
+        ls_refs |= name == "ls-refs";
+    }
+    if complete && ls_refs {
+        Ok(())
+    } else {
+        Err(invalid())
+    }
+}
+
+fn parse_python_ls_refs(bytes: &[u8]) -> AppResult<Vec<(String, String)>> {
+    let invalid =
+        || AppError::InvalidSource("CPython 官方源码标签不是完整有效的 Git v2 ls-refs".into());
+    if bytes.len() > PYTHON_TAGS_MAX_BYTES {
+        return Err(invalid());
+    }
+    let mut offset = 0;
+    let mut complete = false;
+    let mut tags = HashMap::<String, (String, String)>::new();
+    while offset < bytes.len() {
+        let Some(packet) = python_git_packet(bytes, &mut offset)? else {
+            complete = offset == bytes.len();
+            break;
+        };
+        let record = std::str::from_utf8(packet)
+            .ok()
+            .and_then(|line| line.strip_suffix('\n'))
+            .ok_or_else(invalid)?;
+        let (object, reference) = record.split_once(' ').ok_or_else(invalid)?;
+        let raw = reference.strip_prefix("refs/tags/v").ok_or_else(invalid)?;
+        let version = normalize_python_history_version(raw).ok_or_else(invalid)?;
+        if !matches!(object.len(), 40 | 64)
+            || !object.bytes().all(|byte| byte.is_ascii_hexdigit())
+            || !valid_python_git_ref(reference)
+        {
+            return Err(invalid());
+        }
+        if let Some((_, previous)) = tags.get(raw)
+            && previous != object
+        {
+            return Err(invalid());
+        }
+        tags.insert(raw.into(), (version, object.into()));
+    }
+    if !complete || tags.is_empty() {
+        return Err(invalid());
+    }
+    let mut versions = tags
+        .into_iter()
+        .map(|(tag, (version, _))| (version, tag))
+        .collect::<Vec<_>>();
+    versions.sort_by(|left, right| left.1.cmp(&right.1));
+    Ok(versions)
+}
+
+fn python_git_packet<'a>(bytes: &'a [u8], offset: &mut usize) -> AppResult<Option<&'a [u8]>> {
+    let invalid = || AppError::InvalidSource("CPython 官方源码标签 pkt-line 长度无效".into());
+    let header = bytes.get(*offset..*offset + 4).ok_or_else(invalid)?;
+    if !header.iter().all(u8::is_ascii_hexdigit) {
+        return Err(invalid());
+    }
+    let length = usize::from_str_radix(std::str::from_utf8(header).map_err(|_| invalid())?, 16)
+        .map_err(|_| invalid())?;
+    *offset += 4;
+    if length == 0 {
+        return Ok(None);
+    }
+    // These discovery and ls-refs responses contain data and flush packets,
+    // never command delimiters or response-end markers.
+    if !(4..=65_520).contains(&length) {
+        return Err(invalid());
+    }
+    let payload = bytes
+        .get(*offset..*offset + length - 4)
+        .ok_or_else(invalid)?;
+    *offset += length - 4;
+    Ok(Some(payload))
+}
+
+fn valid_python_git_ref(reference: &str) -> bool {
+    !reference.is_empty()
+        && !reference.contains(['~', '^', ':', '?', '*', '[', '\\'])
+        && !reference.contains("..")
+        && !reference.contains("@{")
+        && !reference
+            .chars()
+            .any(|character| character.is_control() || character.is_whitespace())
+        && reference.split('/').all(|part| {
+            !part.is_empty()
+                && !part.starts_with('.')
+                && !part.ends_with('.')
+                && !part.ends_with(".lock")
+        })
+}
+
+#[cfg(test)]
+fn parse_python_source_tags(bytes: &[u8]) -> AppResult<Vec<(String, String)>> {
+    let invalid =
+        || AppError::InvalidSource("CPython 官方源码标签不是完整有效的 Git v0 refs".into());
+    if bytes.len() > PYTHON_TAGS_MAX_BYTES {
+        return Err(invalid());
+    }
+    let mut offset = 0;
+    if python_git_packet(bytes, &mut offset)? != Some(b"# service=git-upload-pack\n".as_slice())
+        || python_git_packet(bytes, &mut offset)?.is_some()
+    {
+        return Err(invalid());
+    }
+    let mut first_ref = true;
+    let mut complete = false;
+    let mut tags = HashMap::<String, (String, String)>::new();
+    while offset < bytes.len() {
+        let Some(packet) = python_git_packet(bytes, &mut offset)? else {
+            complete = offset == bytes.len();
+            break;
+        };
+        let record = std::str::from_utf8(packet)
+            .ok()
+            .and_then(|record| record.strip_suffix('\n'))
+            .ok_or_else(invalid)?;
+        let record = if let Some((reference, capabilities)) = record.split_once('\0') {
+            if !first_ref
+                || capabilities.is_empty()
+                || !capabilities
+                    .bytes()
+                    .all(|byte| byte == b' ' || byte.is_ascii_graphic())
+            {
+                return Err(invalid());
+            }
+            reference
+        } else {
+            record
+        };
+        let (object, reference) = record.split_once(' ').ok_or_else(invalid)?;
+        if !matches!(object.len(), 40 | 64) || !object.bytes().all(|byte| byte.is_ascii_hexdigit())
+        {
+            return Err(invalid());
+        }
+        let peeled = reference.ends_with("^{}");
+        let plain_ref = reference.strip_suffix("^{}").unwrap_or(reference);
+        if !valid_python_git_ref(plain_ref) {
+            return Err(invalid());
+        }
+        if plain_ref == "HEAD" {
+            if !first_ref || peeled {
+                return Err(invalid());
+            }
+        } else if plain_ref.starts_with("refs/heads/") {
+            if peeled {
+                return Err(invalid());
+            }
+        } else if let Some(pull) = plain_ref.strip_prefix("refs/pull/") {
+            let (number, kind) = pull.split_once('/').ok_or_else(invalid)?;
+            if peeled
+                || number.is_empty()
+                || !number.bytes().all(|byte| byte.is_ascii_digit())
+                || !matches!(kind, "head" | "merge")
+            {
+                return Err(invalid());
+            }
+        } else if let Some(tag) = plain_ref.strip_prefix("refs/tags/") {
+            if !peeled
+                && let Some(raw) = tag.strip_prefix('v')
+                && let Some(version) = normalize_python_history_version(raw)
+            {
+                if let Some((_, previous)) = tags.get(raw)
+                    && previous != object
+                {
+                    return Err(invalid());
+                }
+                tags.insert(raw.into(), (version, object.into()));
+            }
+        } else {
+            return Err(invalid());
+        }
+        first_ref = false;
+    }
+    if !complete || tags.is_empty() {
+        return Err(invalid());
+    }
+    let mut versions = tags
+        .into_iter()
+        .map(|(tag, (version, _))| (version, tag))
+        .collect::<Vec<_>>();
+    versions.sort_by(|left, right| left.1.cmp(&right.1));
+    Ok(versions)
+}
+
+fn merge_python_source_tags(versions: &mut Vec<RemoteVersion>, tags: Vec<(String, String)>) {
+    let mut seen = versions
+        .iter()
+        .map(|remote| remote.version.clone())
+        .collect::<HashSet<_>>();
+    for (version, tag) in tags {
+        if !seen.insert(version.clone()) {
+            continue;
+        }
+        let mut remote = python_archive_row(
+            version,
+            format!("https://github.com/python/cpython/tree/v{tag}"),
+            "官方 CPython 源码标签可查，发布数据库缺少可校验的 Windows 安装包元数据",
+        );
+        if remote.channel == "stable" {
+            remote.channel = "archive".into();
+        }
+        versions.push(remote);
+    }
+}
+
+fn python_source_tag_notes(version: &str, notes: &str) -> bool {
+    let Ok(url) = url::Url::parse(notes) else {
+        return false;
+    };
+    url.scheme() == "https"
+        && url.host_str() == Some("github.com")
+        && url.port().is_none()
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url.query().is_none()
+        && url.fragment().is_none()
+        && url
+            .path()
+            .strip_prefix("/python/cpython/tree/v")
+            .and_then(normalize_python_history_version)
+            .as_deref()
+            == Some(version)
+        && notes == url.as_str()
+}
+
+fn build_python_history(
+    releases: Vec<PythonRelease>,
+    files: Vec<PythonReleaseFile>,
+    runtimes: Vec<RemoteVersion>,
+    legacy_html: &str,
+    ftp_html: &str,
+) -> AppResult<Vec<RemoteVersion>> {
+    let mut files_by_release = HashMap::<String, Vec<PythonReleaseFile>>::new();
+    for file in files {
+        if file.os.ends_with("/os/1/") && !file.is_source {
+            files_by_release
+                .entry(file.release.clone())
+                .or_default()
+                .push(file);
+        }
+    }
+    let mut versions = HashMap::<String, RemoteVersion>::new();
+    let mut package_checksums = HashMap::new();
+    for release in releases {
+        if !release.is_published || !matches!(release.version, 2 | 3) {
+            continue;
+        }
+        let version = release
+            .name
+            .strip_prefix("Python ")
+            .and_then(normalize_python_history_version)
+            .filter(|version| version.starts_with(&format!("{}.", release.version)))
+            .ok_or_else(|| AppError::InvalidSource("Python 官方发布记录的版本号无效".into()))?;
+        if release.slug.is_empty()
+            || !release
+                .slug
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+        {
+            return Err(AppError::InvalidSource(
+                "Python 官方发布记录的说明页地址无效".into(),
+            ));
+        }
+        let mut remote = RemoteVersion {
+            install_unavailable_reason: None,
+            version: version.clone(),
+            channel: if release.pre_release {
+                "preview"
+            } else {
+                "stable"
+            }
+            .into(),
+            published_at: release.release_date,
+            architecture: "source".into(),
+            download_url: None,
+            checksum_algorithm: None,
+            checksum: None,
+            notes_url: Some(format!(
+                "https://www.python.org/downloads/release/{}/",
+                release.slug
+            )),
+        };
+        remote.install_unavailable_reason =
+            Some("此版本的官方发布记录未提供适合本机的完整 Windows x64/x86 安装包".into());
+        let release_files = files_by_release
+            .remove(&release.resource_uri)
+            .unwrap_or_default();
+        let mut candidates = Vec::new();
+        for file in release_files {
+            let Some((url, architecture)) = python_installer_file(&version, &file) else {
+                continue;
+            };
+            if !python_supported_installer_format(&version, &url) {
+                remote.install_unavailable_reason =
+                    Some("官方完整安装包采用尚未支持的旧式 EXE 格式；可通过官网归档查看".into());
+                continue;
+            }
+            let Some((algorithm, checksum)) = python_file_checksum(&file) else {
+                remote.install_unavailable_reason =
+                    Some("官方安装包未提供有效的 SHA256 或 MD5 校验值，暂不能安全安装".into());
+                continue;
+            };
+            let key = (url.clone(), algorithm.clone());
+            if let Some(previous) = package_checksums.insert(key, checksum.clone())
+                && previous != checksum
+            {
+                return Err(AppError::InvalidSource(
+                    "Python 官方目录对同一安装包给出了冲突的校验值".into(),
+                ));
+            }
+            candidates.push((architecture, url, algorithm, checksum));
+        }
+        // The official database contains distinct release records for the same
+        // version (for example 3.3.5rc1). Merge their package candidates instead
+        // of rejecting the whole catalog or overwriting an installable row.
+        if let Some(previous) = versions.remove(&version) {
+            if let (Some(url), Some(algorithm), Some(checksum)) = (
+                previous.download_url,
+                previous.checksum_algorithm,
+                previous.checksum,
+            ) {
+                candidates.push((previous.architecture, url, algorithm, checksum));
+            }
+            if remote.published_at.is_none() {
+                remote.published_at = previous.published_at;
+            }
+        }
+        candidates.sort_by(|left, right| {
+            let rank = |candidate: &(String, String, String, String)| {
+                (candidate.0 != "x86_64", candidate.2 != "sha256")
+            };
+            rank(left).cmp(&rank(right)).then(left.1.cmp(&right.1))
+        });
+        if let Some((architecture, url, algorithm, checksum)) = candidates.first() {
+            if candidates.iter().skip(1).any(|candidate| {
+                candidate.1 == *url && candidate.2 == *algorithm && candidate.3 != *checksum
+            }) {
+                return Err(AppError::InvalidSource(
+                    "Python 官方目录对同一安装包给出了冲突的校验值".into(),
+                ));
+            }
+            remote.architecture = architecture.clone();
+            remote.download_url = Some(url.clone());
+            remote.checksum_algorithm = Some(algorithm.clone());
+            remote.checksum = Some(checksum.clone());
+            remote.install_unavailable_reason = None;
+        }
+        versions.insert(version, remote);
+    }
+    if versions.is_empty() {
+        return Err(AppError::InvalidSource(
+            "Python 官方发布目录不含 Python 2/3".into(),
+        ));
+    }
+    merge_python_archives(&mut versions, legacy_html, ftp_html)?;
+    // Full PythonCore ZIPs retain their official SHA-256, and always take
+    // precedence over the traditional installer of the same release.
+    for mut runtime in runtimes {
+        if let Some(release) = versions.get(&runtime.version) {
+            runtime.published_at = release.published_at.clone();
+            runtime.notes_url = release.notes_url.clone();
+        }
+        versions.insert(runtime.version.clone(), runtime);
+    }
+    Ok(versions.into_values().collect())
+}
+
+fn normalize_python_history_version(version: &str) -> Option<String> {
+    let suffix_start = version
+        .find(|character: char| character.is_ascii_alphabetic())
+        .unwrap_or(version.len());
+    let (base, suffix) = version.split_at(suffix_start);
+    let parts = base.split('.').collect::<Vec<_>>();
+    if !(2..=3).contains(&parts.len())
+        || !matches!(parts[0], "0" | "1" | "2" | "3")
+        || parts
+            .iter()
+            .any(|part| part.is_empty() || !part.bytes().all(|byte| byte.is_ascii_digit()))
+    {
+        return None;
+    }
+    let suffix = if suffix.is_empty() {
+        String::new()
+    } else {
+        let (marker, number) = ["rc", "a", "b", "c"]
+            .into_iter()
+            .find_map(|marker| suffix.strip_prefix(marker).map(|number| (marker, number)))?;
+        if number.is_empty() || !number.bytes().all(|byte| byte.is_ascii_digit()) {
+            return None;
+        }
+        format!("{}{number}", if marker == "c" { "rc" } else { marker })
+    };
+    Some(format!(
+        "{base}{}{suffix}",
+        if parts.len() == 2 { ".0" } else { "" }
+    ))
+}
+
+fn python_release_base(version: &str) -> &str {
+    version
+        .split(|character: char| character.is_ascii_alphabetic())
+        .next()
+        .unwrap_or(version)
+}
+
+fn python_download_url(value: &str) -> Option<String> {
+    let mut url = url::Url::parse(value).ok()?;
+    if !matches!(url.scheme(), "http" | "https")
+        || url.host_str() != Some("www.python.org")
+        || url.port_or_known_default() != Some(if url.scheme() == "http" { 80 } else { 443 })
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+        || !url.path().starts_with("/ftp/python/")
+        || url.path().contains('%')
+    {
+        return None;
+    }
+    if url.scheme() == "http" {
+        url.set_port(None).ok()?;
+        url.set_scheme("https").ok()?;
+    }
+    Some(url.to_string())
+}
+
+fn python_installer_architecture(version: &str, value: &str) -> Option<&'static str> {
+    let url = url::Url::parse(value).ok()?;
+    let relative = url.path().strip_prefix("/ftp/python/")?;
+    let (directory, filename) = relative.split_once('/')?;
+    let base = python_release_base(version);
+    let short_base = base.strip_suffix(".0").unwrap_or(base);
+    if directory != base && directory != short_base {
+        return None;
+    }
+    let short_version = format!("{short_base}{}", &version[base.len()..]);
+    for spelling in [version, short_version.as_str()] {
+        for (suffix, architecture) in [
+            ("-amd64.exe", "x86_64"),
+            (".amd64.msi", "x86_64"),
+            (".exe", "x86"),
+            (".msi", "x86"),
+            ("-1.exe", "x86"),
+        ] {
+            if filename.eq_ignore_ascii_case(&format!("python-{spelling}{suffix}")) {
+                return Some(architecture);
+            }
+        }
+    }
+    None
+}
+
+fn python_installer_file(version: &str, file: &PythonReleaseFile) -> Option<(String, String)> {
+    let name = file.name.to_ascii_lowercase();
+    if !name.contains("installer")
+        || ["web", "embed", "debug", "database"]
+            .iter()
+            .any(|excluded| name.contains(excluded))
+    {
+        return None;
+    }
+    let url = python_download_url(&file.url)?;
+    let architecture = python_installer_architecture(version, &url)?;
+    Some((url, architecture.to_string()))
+}
+
+fn python_supported_installer_format(version: &str, url: &str) -> bool {
+    if url.to_ascii_lowercase().ends_with(".msi") {
+        return true;
+    }
+    let parts = python_release_base(version).split('.').collect::<Vec<_>>();
+    let minor = parts.get(1).and_then(|minor| minor.parse::<u32>().ok());
+    (parts.first() == Some(&"3") && minor.is_some_and(|minor| minor >= 5))
+        || (parts.first() == Some(&"2") && minor.is_some_and(|minor| minor <= 3))
+}
+
+fn python_file_checksum(file: &PythonReleaseFile) -> Option<(String, String)> {
+    if !file.sha256_sum.is_empty() {
+        return valid_sha256(&file.sha256_sum)
+            .then(|| ("sha256".into(), file.sha256_sum.to_ascii_lowercase()));
+    }
+    valid_hex_digest(&file.md5_sum, 32).then(|| ("md5".into(), file.md5_sum.to_ascii_lowercase()))
+}
+
+fn python_archive_filename_version(filename: &str) -> Option<String> {
+    let stem = filename
+        .strip_suffix(".tar.gz")
+        .or_else(|| filename.strip_suffix(".tgz"))?;
+    let raw = match stem {
+        "py152" => "1.5.2",
+        "pyth151" => "1.5.1",
+        stem => stem
+            .strip_prefix("python-")
+            .or_else(|| stem.strip_prefix("python"))
+            .or_else(|| stem.strip_prefix("Python-"))?,
+    };
+    normalize_python_history_version(raw)
+}
+
+fn python_early_archive_entry(href: &str, label: &str) -> Option<(String, String)> {
+    let version = normalize_python_history_version(label)?;
+    let notes = url::Url::parse(PYTHON_EARLY_SOURCE)
+        .ok()?
+        .join(href)
+        .ok()
+        .filter(|notes| notes.as_str().starts_with(PYTHON_EARLY_SOURCE))?;
+    Some((version, notes.to_string()))
+}
+
+async fn checked_python_archive(client: &reqwest::Client, source: &str) -> AppResult<String> {
+    checked_python_archive_with(source, || checked_text(client, source)).await
+}
+
+async fn checked_python_archive_with<F, Fut>(source: &str, mut fetch: F) -> AppResult<String>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = AppResult<String>>,
+{
+    for attempt in 0..3 {
+        // Retry only this malformed 200 response, not the large release APIs
+        // or other successful archive pages. The caller's overall deadline is
+        // unchanged, and an unrecognizable page is never cached as complete.
+        let page = fetch().await?;
+        match validate_python_archive_page(source, &page) {
+            Ok(()) => return Ok(page),
+            Err(error) if attempt == 2 => return Err(error),
+            Err(_) => retry_delay(attempt).await,
+        }
+    }
+    unreachable!("the last archive attempt returns its precise error")
+}
+
+fn validate_python_archive_page(source: &str, page: &str) -> AppResult<()> {
+    let links = Regex::new(r#"(?i)\bhref\s*=\s*["']([^"']+)["']"#)
+        .map_err(|error| AppError::Message(error.to_string()))?;
+    let count = if source == PYTHON_EARLY_SOURCE {
+        let early = Regex::new(
+            r#"(?is)<a\b[^>]*\bhref\s*=\s*["']([^"']+)["'][^>]*>\s*Python\s+([^<\s]+)\s*</a>"#,
+        )
+        .map_err(|error| AppError::Message(error.to_string()))?;
+        early
+            .captures_iter(page)
+            .filter(|capture| python_early_archive_entry(&capture[1], &capture[2]).is_some())
+            .count()
+    } else if source == PYTHON_LEGACY_SOURCE {
+        links
+            .captures_iter(page)
+            .filter(|capture| python_archive_filename_version(&capture[1]).is_some())
+            .count()
+    } else if source == PYTHON_FTP_SOURCE {
+        links
+            .captures_iter(page)
+            .filter(|capture| {
+                capture[1]
+                    .strip_suffix('/')
+                    .and_then(normalize_python_history_version)
+                    .is_some()
+            })
+            .count()
+    } else {
+        return Err(AppError::InvalidSource(format!(
+            "{source}：未知的 Python 历史归档来源"
+        )));
+    };
+    if count == 0 {
+        let title = Regex::new(r"(?is)<title[^>]*>([^<]*)</title>")
+            .map_err(|error| AppError::Message(error.to_string()))?
+            .captures(page)
+            .map(|capture| capture[1].trim().chars().take(120).collect::<String>())
+            .unwrap_or_else(|| "无 HTML 标题".into());
+        return Err(AppError::InvalidSource(format!(
+            "{source}：Python 官方历史归档识别到 0 个版本条目（响应 {} 字节；{title}）",
+            page.len()
+        )));
+    }
+    Ok(())
+}
+
+fn merge_python_archives(
+    versions: &mut HashMap<String, RemoteVersion>,
+    legacy_html: &str,
+    ftp_html: &str,
+) -> AppResult<()> {
+    let links = Regex::new(r#"(?i)\bhref\s*=\s*["']([^"']+)["']"#)
+        .map_err(|error| AppError::Message(error.to_string()))?;
+    let early_links = Regex::new(
+        r#"(?is)<a\b[^>]*\bhref\s*=\s*["']([^"']+)["'][^>]*>\s*Python\s+([^<\s]+)\s*</a>"#,
+    )
+    .map_err(|error| AppError::Message(error.to_string()))?;
+    let mut early_count = 0;
+    for capture in early_links.captures_iter(legacy_html) {
+        let Some((version, notes)) = python_early_archive_entry(&capture[1], &capture[2]) else {
+            continue;
+        };
+        early_count += 1;
+        versions.entry(version.clone()).or_insert_with(|| {
+            python_archive_row(
+                version,
+                notes,
+                "官方历史发布页可查，尚无可验证的 Windows 安装包元数据",
+            )
+        });
+    }
+    let mut legacy_count = 0;
+    for capture in links.captures_iter(legacy_html) {
+        let Some(version) = python_archive_filename_version(&capture[1]) else {
+            continue;
+        };
+        legacy_count += 1;
+        versions.entry(version.clone()).or_insert_with(|| {
+            python_archive_row(
+                version,
+                PYTHON_LEGACY_SOURCE.to_string(),
+                "官方源码归档可查，尚无可验证的 Windows 安装包元数据",
+            )
+        });
+    }
+    let mut ftp_count = 0;
+    for capture in links.captures_iter(ftp_html) {
+        let Some(directory) = capture[1].strip_suffix('/') else {
+            continue;
+        };
+        let Some(version) = normalize_python_history_version(directory) else {
+            continue;
+        };
+        ftp_count += 1;
+        // A directory also contains prereleases (e.g. 3.16.0a1). It is not
+        // evidence that the final version has been published.
+        if versions
+            .keys()
+            .any(|known| python_release_base(known) == version)
+        {
+            continue;
+        }
+        versions.entry(version.clone()).or_insert_with(|| {
+            let mut row = python_archive_row(
+                version,
+                format!("{PYTHON_FTP_SOURCE}{directory}/"),
+                "官方历史目录可查，发布数据库未提供可验证的 Windows 安装包元数据",
+            );
+            row.channel = "archive".into();
+            row
+        });
+    }
+    if legacy_count == 0 || ftp_count == 0 || early_count == 0 {
+        return Err(AppError::InvalidSource(format!(
+            "Python 官方历史归档未返回可识别的版本目录：{PYTHON_LEGACY_SOURCE}={legacy_count}，{PYTHON_EARLY_SOURCE}={early_count}，{PYTHON_FTP_SOURCE}={ftp_count}"
+        )));
+    }
+    Ok(())
+}
+
+fn python_archive_row(version: String, notes_url: String, reason: &str) -> RemoteVersion {
+    let preview = version.bytes().any(|byte| byte.is_ascii_alphabetic());
+    let mut remote = RemoteVersion {
+        install_unavailable_reason: None,
+        version,
+        channel: if preview { "preview" } else { "stable" }.into(),
+        published_at: None,
+        architecture: "source".into(),
+        download_url: None,
+        checksum_algorithm: None,
+        checksum: None,
+        notes_url: Some(notes_url),
+    };
+    remote.install_unavailable_reason = Some(reason.into());
+    remote
 }
 
 async fn fetch_python_indexes<F, Fut>(mut fetch_index: F) -> AppResult<Vec<RemoteVersion>>
@@ -387,6 +1340,7 @@ fn python_runtime_version(runtime: PythonRuntime) -> Option<RemoteVersion> {
         .filter(|hash| valid_sha256(hash))?
         .to_ascii_lowercase();
     Some(RemoteVersion {
+        install_unavailable_reason: None,
         notes_url: Some(format!(
             "https://www.python.org/downloads/release/python-{}/",
             runtime.version.replace('.', "")
@@ -418,17 +1372,77 @@ fn python_stable_minor(version: &str) -> Option<&str> {
 }
 
 pub(crate) fn is_supported_python_runtime(remote: &RemoteVersion) -> bool {
-    python_stable_minor(&remote.version).is_some()
+    if remote.install_unavailable_reason.is_some()
+        || normalize_python_history_version(&remote.version).as_deref()
+            != Some(remote.version.as_str())
+        || !(remote.version.starts_with("2.") || remote.version.starts_with("3."))
+    {
+        return false;
+    }
+    let Some(download_url) = remote.download_url.as_deref() else {
+        return false;
+    };
+    let valid_sha = remote
+        .checksum_algorithm
+        .as_deref()
+        .is_some_and(|algorithm| algorithm.eq_ignore_ascii_case("sha256"))
+        && remote.checksum.as_deref().is_some_and(valid_sha256);
+    if python_stable_minor(&remote.version).is_some()
         && remote.architecture == "x86_64"
-        && remote
-            .download_url
-            .as_deref()
-            .is_some_and(|url| python_full_runtime_url(&remote.version, url))
-        && remote
+        && python_full_runtime_url(&remote.version, download_url)
+    {
+        return valid_sha;
+    }
+    (valid_sha
+        || (remote
             .checksum_algorithm
             .as_deref()
-            .is_some_and(|algorithm| algorithm.eq_ignore_ascii_case("sha256"))
-        && remote.checksum.as_deref().is_some_and(valid_sha256)
+            .is_some_and(|algorithm| algorithm.eq_ignore_ascii_case("md5"))
+            && remote
+                .checksum
+                .as_deref()
+                .is_some_and(|checksum| valid_hex_digest(checksum, 32))))
+        && python_download_url(download_url).as_deref() == Some(download_url)
+        && python_installer_architecture(&remote.version, download_url)
+            == Some(remote.architecture.as_str())
+        && python_supported_installer_format(&remote.version, download_url)
+}
+
+pub(crate) fn is_complete_python_catalog(catalog: &VersionCatalog) -> bool {
+    if catalog.tool_id != "python"
+        || catalog.source_name != PYTHON_HISTORY_NAME
+        || catalog.source_url != PYTHON_RELEASE_SOURCE
+        || catalog.versions.is_empty()
+    {
+        return false;
+    }
+    let mut seen = HashSet::new();
+    catalog.versions.iter().all(|remote| {
+        if !seen.insert(&remote.version)
+            || normalize_python_history_version(&remote.version).as_deref()
+                != Some(remote.version.as_str())
+        {
+            return false;
+        }
+        if is_supported_python_runtime(remote) {
+            return true;
+        }
+        remote.download_url.is_none()
+            && remote.checksum_algorithm.is_none()
+            && remote.checksum.is_none()
+            && remote.architecture == "source"
+            && remote
+                .install_unavailable_reason
+                .as_deref()
+                .is_some_and(|reason| !reason.trim().is_empty())
+            && remote.notes_url.as_deref().is_some_and(|notes| {
+                notes == PYTHON_LEGACY_SOURCE
+                    || notes.starts_with(PYTHON_EARLY_SOURCE)
+                    || notes.starts_with("https://www.python.org/downloads/release/")
+                    || notes.starts_with(PYTHON_FTP_SOURCE)
+                    || python_source_tag_notes(&remote.version, notes)
+            })
+    })
 }
 
 #[derive(Debug, Deserialize)]
@@ -486,6 +1500,7 @@ async fn fetch_adoptium(client: &reqwest::Client, tool_id: &str) -> AppResult<Ve
                     .into_iter()
                     .next();
                 Ok::<_, AppError>(asset.map(|asset| RemoteVersion {
+                    install_unavailable_reason: None,
                     version: asset.version.openjdk_version,
                     channel: if is_lts {
                         "LTS".to_string()
@@ -541,6 +1556,7 @@ async fn fetch_go(client: &reqwest::Client, tool_id: &str) -> AppResult<VersionC
                     && file.filename.ends_with(".zip")
             })?;
             Some(RemoteVersion {
+                install_unavailable_reason: None,
                 version: release.version.trim_start_matches("go").to_string(),
                 channel: if release.stable { "stable" } else { "preview" }.to_string(),
                 published_at: None,
@@ -587,6 +1603,7 @@ async fn fetch_rust(client: &reqwest::Client, tool_id: &str) -> AppResult<Versio
     .next()
     .map(str::to_string);
     let versions = vec![RemoteVersion {
+        install_unavailable_reason: None,
         version: version.to_string(),
         channel: "stable".to_string(),
         published_at: date.map(str::to_string),
@@ -625,6 +1642,7 @@ fn build_node_versions(releases: Vec<NodeRelease>) -> Vec<RemoteVersion> {
         .map(|release| {
             let filename = format!("node-{}-win-x64.zip", release.version);
             RemoteVersion {
+                install_unavailable_reason: None,
                 version: release.version.trim_start_matches('v').to_string(),
                 channel: if release.lts.is_string() {
                     "LTS"
@@ -658,11 +1676,17 @@ pub(crate) async fn ensure_install_metadata(
     remote: &mut RemoteVersion,
 ) -> AppResult<()> {
     if tool_id == "python" {
+        if let Some(reason) = &remote.install_unavailable_reason {
+            return Err(AppError::InvalidSource(format!(
+                "Python {} 暂不能安装：{reason}",
+                remote.version
+            )));
+        }
         return if is_supported_python_runtime(remote) {
             Ok(())
         } else {
             Err(AppError::InvalidSource(
-                "Python 发行包不是已校验的官方完整开发运行时，请刷新版本列表；嵌入式包不支持完整 pip/venv 开发环境".to_string(),
+                "Python 发行包不是已校验的官方完整运行时或安装包，请刷新版本列表；嵌入式包不支持完整开发环境".to_string(),
             ))
         };
     }
@@ -727,7 +1751,11 @@ async fn fill_node_checksum(
 }
 
 fn valid_sha256(value: &str) -> bool {
-    value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+    valid_hex_digest(value, 64)
+}
+
+fn valid_hex_digest(value: &str, length: usize) -> bool {
+    value.len() == length && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 #[derive(Debug, Deserialize)]
@@ -759,6 +1787,7 @@ async fn fetch_gradle(client: &reqwest::Client, tool_id: &str) -> AppResult<Vers
                 && (release.final_.unwrap_or(false) || release.active_rc)
         })
         .map(|release| RemoteVersion {
+            install_unavailable_reason: None,
             version: release.version,
             channel: if release.active_rc { "RC" } else { "stable" }.to_string(),
             published_at: Some(release.build_time),
@@ -795,6 +1824,7 @@ async fn fetch_maven(client: &reqwest::Client, tool_id: &str) -> AppResult<Versi
                     .ok()
                     .and_then(|value| value.split_whitespace().next().map(str::to_string));
                 RemoteVersion {
+                    install_unavailable_reason: None,
                     version,
                     channel: "stable".to_string(),
                     published_at: None,
@@ -883,6 +1913,7 @@ async fn fetch_dotnet(client: &reqwest::Client, tool_id: &str) -> AppResult<Vers
                                 && file.name.ends_with("-win-x64.zip")
                         })?;
                         Some(RemoteVersion {
+                            install_unavailable_reason: None,
                             version: sdk.version,
                             channel: format!(
                                 "{} {}",
@@ -944,6 +1975,7 @@ async fn fetch_ruby(client: &reqwest::Client, tool_id: &str) -> AppResult<Versio
                 })
                 .unwrap_or((None, None));
             Some(RemoteVersion {
+                install_unavailable_reason: None,
                 version,
                 channel: if release.prerelease {
                     "preview"
@@ -996,6 +2028,7 @@ async fn fetch_php(client: &reqwest::Client, tool_id: &str) -> AppResult<Version
             let version = capture.get(2)?.as_str();
             let checksum = checksum_map.get(&filename.to_ascii_lowercase()).cloned();
             Some(RemoteVersion {
+                install_unavailable_reason: None,
                 version: version.to_string(),
                 channel: "stable NTS".to_string(),
                 published_at: None,
@@ -1061,6 +2094,7 @@ async fn fetch_github_release(
                 })
                 .unwrap_or((None, None));
             Some(RemoteVersion {
+                install_unavailable_reason: None,
                 version: release.tag_name.trim_start_matches('v').to_string(),
                 channel: if release.prerelease {
                     "preview"
@@ -1417,6 +2451,7 @@ fn parse_android_repository(xml: &str, package: AndroidPackage) -> AppResult<Vec
             .and_then(|capture| capture.get(2))
             .map(|value| value.as_str().to_string());
         versions.push(RemoteVersion {
+            install_unavailable_reason: None,
             version,
             channel: if body.contains("<preview>") || body.contains(r#"channelRef ref="channel-2""#)
             {
@@ -1457,6 +2492,10 @@ mod tests {
 
     impl MockSource {
         fn new(responses: Vec<String>) -> Self {
+            Self::binary(responses.into_iter().map(String::into_bytes).collect())
+        }
+
+        fn binary(responses: Vec<Vec<u8>>) -> Self {
             let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
             listener.set_nonblocking(true).unwrap();
             let url = format!("http://{}", listener.local_addr().unwrap());
@@ -1502,6 +2541,52 @@ mod tests {
                                         ));
                                     }
                                 }
+                                let header_end = request
+                                    .windows(4)
+                                    .position(|window| window == b"\r\n\r\n")
+                                    .unwrap()
+                                    + 4;
+                                let headers = std::str::from_utf8(&request[..header_end]).map_err(
+                                    |error| {
+                                        std::io::Error::new(std::io::ErrorKind::InvalidData, error)
+                                    },
+                                )?;
+                                let content_length = headers
+                                    .lines()
+                                    .find_map(|line| {
+                                        let (name, value) = line.split_once(':')?;
+                                        name.eq_ignore_ascii_case("content-length")
+                                            .then_some(value.trim())
+                                    })
+                                    .map(str::parse::<usize>)
+                                    .transpose()
+                                    .map_err(|error| {
+                                        std::io::Error::new(std::io::ErrorKind::InvalidData, error)
+                                    })?
+                                    .unwrap_or(0);
+                                if content_length > 64 * 1024 - header_end {
+                                    return Err(std::io::Error::new(
+                                        std::io::ErrorKind::InvalidData,
+                                        "mock request body exceeds the limit",
+                                    ));
+                                }
+                                while request.len() < header_end + content_length {
+                                    match stream.read(&mut buffer) {
+                                        Ok(0) => {
+                                            return Err(std::io::Error::new(
+                                                std::io::ErrorKind::UnexpectedEof,
+                                                "mock client closed before sending its request body",
+                                            ));
+                                        }
+                                        Ok(length) => request.extend_from_slice(&buffer[..length]),
+                                        Err(error)
+                                            if error.kind() == std::io::ErrorKind::Interrupted =>
+                                        {
+                                            continue;
+                                        }
+                                        Err(error) => return Err(error),
+                                    }
+                                }
                                 String::from_utf8(request).map_err(|error| {
                                     std::io::Error::new(std::io::ErrorKind::InvalidData, error)
                                 })
@@ -1516,7 +2601,7 @@ mod tests {
                             server_requests.lock().unwrap().push(request);
                             let response = &responses[index.min(responses.len() - 1)];
                             // Status-error tests may close the response without reading its body.
-                            let _ = stream.write_all(response.as_bytes());
+                            let _ = stream.write_all(response);
                             index += 1;
                         }
                         Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
@@ -1581,6 +2666,173 @@ mod tests {
             .timeout(std::time::Duration::from_secs(3))
             .build()
             .unwrap()
+    }
+
+    fn gzip_body(body: &[u8]) -> Vec<u8> {
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        encoder.write_all(body).unwrap();
+        encoder.finish().unwrap()
+    }
+
+    fn binary_response(headers: &str, body: &[u8]) -> Vec<u8> {
+        let mut response = format!(
+            "HTTP/1.1 200 OK\r\n{headers}Content-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        )
+        .into_bytes();
+        response.extend_from_slice(body);
+        response
+    }
+
+    #[test]
+    fn metadata_http_reads_plain_and_gzip_text_and_json() {
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            let text = "<a href=\"Python-0.9.1.tar.gz\">Python 0.9.1</a>";
+            let json = br#"{"versions":["3.15.0"]}"#;
+            for compressed in [false, true] {
+                let encoding = if compressed {
+                    "Content-Encoding: gzip\r\n"
+                } else {
+                    ""
+                };
+                let body = if compressed {
+                    gzip_body(text.as_bytes())
+                } else {
+                    text.as_bytes().to_vec()
+                };
+                let source = MockSource::binary(vec![binary_response(encoding, &body)]);
+                assert_eq!(
+                    checked_text(&local_client(), &source.url).await.unwrap(),
+                    text
+                );
+                assert_eq!(source.request_count(), 1);
+                assert!(
+                    source.requests.lock().unwrap()[0]
+                        .to_ascii_lowercase()
+                        .contains("accept-encoding: gzip, identity")
+                );
+                let body = if compressed {
+                    gzip_body(json)
+                } else {
+                    json.to_vec()
+                };
+                let source = MockSource::binary(vec![binary_response(encoding, &body)]);
+                let value = checked_json::<serde_json::Value>(&local_client(), &source.url)
+                    .await
+                    .unwrap();
+                assert_eq!(value["versions"][0], "3.15.0");
+                assert_eq!(source.request_count(), 1);
+            }
+        });
+    }
+
+    #[test]
+    fn metadata_gzip_limits_and_corruption_remain_strict() {
+        let source = "https://www.python.org/ftp/python/src/";
+        let encoded = gzip_body(b"normal metadata");
+        assert_eq!(
+            decode_source_body(encoded.clone(), "gzip", source, 256).unwrap(),
+            b"normal metadata"
+        );
+        let mut corrupt = encoded.clone();
+        let crc = corrupt.len() - 8;
+        corrupt[crc] ^= 1;
+        let error = decode_source_body(corrupt, "gzip", source, 256).unwrap_err();
+        assert!(error.to_string().contains(source));
+        assert!(!retryable_source_error(&error));
+        let error = decode_source_body(encoded[..encoded.len() - 4].to_vec(), "gzip", source, 256)
+            .unwrap_err();
+        assert!(retryable_source_error(&error));
+        assert!(decode_source_body(gzip_body(&[0; 512]), "gzip", source, 64).is_err());
+        assert!(decode_source_body(vec![0; 65], "identity", source, 64).is_err());
+        assert!(decode_source_body(vec![0; 65], "gzip", source, 64).is_err());
+        assert!(decode_source_body(encoded, "br", source, 256).is_err());
+    }
+
+    #[test]
+    fn metadata_truncated_gzip_retries_but_bad_encoding_or_utf8_does_not() {
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            let complete = gzip_body(br#"{"complete":true}"#);
+            let source = MockSource::binary(vec![
+                binary_response(
+                    "Content-Encoding: gzip\r\n",
+                    &complete[..complete.len() - 4],
+                ),
+                binary_response("Content-Encoding: gzip\r\n", &complete),
+            ]);
+            let value = checked_json::<serde_json::Value>(&local_client(), &source.url)
+                .await
+                .unwrap();
+            assert_eq!(value["complete"], true);
+            assert_eq!(source.request_count(), 2);
+            for (headers, body, detail) in [
+                (
+                    "Content-Encoding: br\r\n",
+                    b"body".as_slice(),
+                    "Content-Encoding br",
+                ),
+                ("", b"\xff\xfe".as_slice(), "UTF-8"),
+            ] {
+                let source = MockSource::binary(vec![binary_response(headers, body)]);
+                let error = checked_text(&local_client(), &source.url)
+                    .await
+                    .unwrap_err();
+                assert!(error.to_string().contains(&source.url));
+                assert!(error.to_string().contains(detail));
+                assert_eq!(source.request_count(), 1);
+            }
+        });
+    }
+
+    #[test]
+    fn python_archive_validation_identifies_each_required_page() {
+        for (source, page) in [
+            (PYTHON_LEGACY_SOURCE, PYTHON_LEGACY_FIXTURE),
+            (PYTHON_EARLY_SOURCE, PYTHON_LEGACY_FIXTURE),
+            (PYTHON_FTP_SOURCE, PYTHON_FTP_FIXTURE),
+        ] {
+            validate_python_archive_page(source, page).unwrap();
+            let error = validate_python_archive_page(
+                source,
+                "<html><title>Temporarily unavailable</title><a href=\"../\">../</a></html>",
+            )
+            .unwrap_err();
+            let message = error.to_string();
+            assert!(message.contains(source));
+            assert!(message.contains("0 个版本条目"));
+            assert!(message.contains("Temporarily unavailable"));
+        }
+    }
+
+    #[test]
+    fn python_archive_retries_only_the_unrecognized_page_and_preserves_final_error() {
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            let mut attempts = 0;
+            let page = checked_python_archive_with(PYTHON_LEGACY_SOURCE, || {
+                attempts += 1;
+                let body = if attempts == 1 {
+                    "<title>Temporary CDN response</title>"
+                } else {
+                    PYTHON_LEGACY_FIXTURE
+                };
+                async move { Ok(body.to_string()) }
+            })
+            .await
+            .unwrap();
+            assert_eq!(attempts, 2);
+            assert_eq!(page, PYTHON_LEGACY_FIXTURE);
+            let mut attempts = 0;
+            let error = checked_python_archive_with(PYTHON_EARLY_SOURCE, || {
+                attempts += 1;
+                async { Ok("<title>Changed archive page</title>".to_string()) }
+            })
+            .await
+            .unwrap_err();
+            assert_eq!(attempts, 3);
+            assert!(error.to_string().contains(PYTHON_EARLY_SOURCE));
+            assert!(error.to_string().contains("0 个版本条目"));
+            assert!(error.to_string().contains("Changed archive page"));
+        });
     }
 
     #[derive(Debug, Deserialize)]
@@ -2039,6 +3291,908 @@ mod tests {
         );
     }
 
+    fn python_release_fixture(version: &str, preview: bool) -> PythonRelease {
+        PythonRelease {
+            name: format!("Python {version}"),
+            slug: format!("python-{}", version.replace('.', "")),
+            version: version.split('.').next().unwrap().parse().unwrap(),
+            is_published: true,
+            pre_release: preview,
+            release_date: Some("2026-10-17T00:00:00Z".into()),
+            resource_uri: format!("https://www.python.org/api/v2/downloads/release/{version}/"),
+        }
+    }
+
+    fn python_installer_fixture(version: &str, architecture: &str) -> PythonReleaseFile {
+        let suffix = if architecture == "x86_64" {
+            ".amd64.msi"
+        } else {
+            ".msi"
+        };
+        PythonReleaseFile {
+            name: format!(
+                "Windows {} MSI installer",
+                if architecture == "x86_64" {
+                    "x86-64"
+                } else {
+                    "x86"
+                }
+            ),
+            os: "https://www.python.org/api/v2/downloads/os/1/".into(),
+            release: python_release_fixture(version, false).resource_uri,
+            is_source: false,
+            url: format!(
+                "https://www.python.org/ftp/python/{}/python-{version}{suffix}",
+                python_release_base(version)
+            ),
+            md5_sum: "a".repeat(32),
+            sha256_sum: String::new(),
+        }
+    }
+
+    const PYTHON_LEGACY_FIXTURE: &str = r#"
+        <a class="reference external" href="1.6.1">Python 1.6.1</a>
+        <a class="reference external" href="1.5">Python 1.5.2</a>
+        <a href="python1.0.1.tar.gz">source</a>
+        <a href="py152.tgz">source</a>
+        <a href="python-1.5.2c1.tar.gz">source</a>
+        <a href="lib1.2.tar.gz">not an interpreter</a>
+    "#;
+    const PYTHON_FTP_FIXTURE: &str = r#"
+        <a href="2.1/">archived directory</a>
+        <a href="3.16.0/">also contains prereleases</a>
+        <a href="contrib/">not a version</a>
+    "#;
+
+    fn python_git_fixture(records: &[&str]) -> Vec<u8> {
+        let mut bytes = b"001e# service=git-upload-pack\n0000".to_vec();
+        bytes.extend_from_slice(&python_ls_refs_fixture(records));
+        bytes
+    }
+
+    fn python_ls_refs_fixture(records: &[&str]) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        for record in records {
+            let packet = format!("{record}\n");
+            bytes.extend_from_slice(format!("{:04x}", packet.len() + 4).as_bytes());
+            bytes.extend_from_slice(packet.as_bytes());
+        }
+        bytes.extend_from_slice(b"0000");
+        bytes
+    }
+
+    const PYTHON_REAL_V2_CAPABILITIES: &str = concat!(
+        "001e# service=git-upload-pack\n0000000eversion 2\n",
+        "0028agent=git/github-41cc7379a75f-Linux\n",
+        "0013ls-refs=unborn\n0027fetch=shallow wait-for-done filter\n",
+        "0012server-option\n0017object-format=sha1\n0000",
+    );
+
+    #[test]
+    fn python_v2_queries_only_version_tags_with_a_checked_discovery_and_post() {
+        let tags = String::from_utf8(python_ls_refs_fixture(&[
+            "1f08c772f5a68bdf8309d6ad1cdddb838fc35feb refs/tags/v3.4.0a1",
+            "bd61c3ae1f45c402d8e09fdebeeabbe68132bb52 refs/tags/v3.4.0a4",
+            "7e611dab4a05a97e708541d98e2f6817cfbe7453 refs/tags/v3.4.0b1",
+            "e9f73ac1fd5184173179596d4fa5caa45682d301 refs/tags/v3.4.0rc1",
+            "7a325c385bb547b481abfee8301e9d9f2e58990a refs/tags/v1.0.2",
+            "c94d53db0e54d919ed3d37b85bd8d6e7f5a64a9e refs/tags/v1.1",
+            "c7afd2c7bbdbb0b9bb47f0eb088285aec8ec7414 refs/tags/v1.5.2c1",
+        ]))
+        .unwrap();
+        let source = MockSource::new(vec![
+            http_response(
+                "200 OK",
+                "Content-Type: application/x-git-upload-pack-advertisement\r\n",
+                PYTHON_REAL_V2_CAPABILITIES,
+            ),
+            http_response(
+                "200 OK",
+                "Content-Type: application/x-git-upload-pack-result\r\n",
+                &tags,
+            ),
+        ]);
+        let versions = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(fetch_python_source_tags_from(
+                &local_client(),
+                &format!(
+                    "{}/python/cpython.git/info/refs?service=git-upload-pack",
+                    source.url
+                ),
+                &format!("{}/python/cpython.git/git-upload-pack", source.url),
+            ))
+            .unwrap();
+        assert_eq!(versions.len(), 7);
+        assert!(versions.contains(&("3.4.0a1".into(), "3.4.0a1".into())));
+        assert!(versions.contains(&("3.4.0a4".into(), "3.4.0a4".into())));
+        assert!(versions.contains(&("3.4.0b1".into(), "3.4.0b1".into())));
+        assert!(versions.contains(&("3.4.0rc1".into(), "3.4.0rc1".into())));
+        assert!(versions.contains(&("1.1.0".into(), "1.1".into())));
+        assert!(versions.contains(&("1.5.2rc1".into(), "1.5.2c1".into())));
+        assert_eq!(source.request_count(), 2);
+        let requests = source.requests.lock().unwrap();
+        let has_header = |headers: &str, expected_name: &str, expected_value: &str| {
+            headers
+                .lines()
+                .filter_map(|line| line.split_once(':'))
+                .any(|(name, value)| {
+                    name.eq_ignore_ascii_case(expected_name)
+                        && value.trim().eq_ignore_ascii_case(expected_value)
+                })
+        };
+        let (get, get_body) = requests[0].split_once("\r\n\r\n").unwrap();
+        assert!(
+            get.starts_with(
+                "GET /python/cpython.git/info/refs?service=git-upload-pack HTTP/1.1\r\n"
+            )
+        );
+        assert!(has_header(get, "Git-Protocol", "version=2"));
+        assert!(has_header(
+            get,
+            "Accept",
+            "application/x-git-upload-pack-advertisement"
+        ));
+        assert!(get_body.is_empty());
+        let (post, body) = requests[1].split_once("\r\n\r\n").unwrap();
+        assert!(post.starts_with("POST /python/cpython.git/git-upload-pack HTTP/1.1\r\n"));
+        assert!(has_header(post, "Git-Protocol", "version=2"));
+        assert!(has_header(
+            post,
+            "Content-Type",
+            "application/x-git-upload-pack-request"
+        ));
+        assert!(has_header(
+            post,
+            "Accept",
+            "application/x-git-upload-pack-result"
+        ));
+        assert_eq!(
+            body,
+            "0014command=ls-refs\n0001001bref-prefix refs/tags/v\n0000"
+        );
+    }
+
+    #[test]
+    fn python_v2_discovery_and_post_keep_http_errors_and_reject_wrong_response_types() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        for (responses, status, expected_count) in [
+            (
+                vec![http_response(
+                    "429 Too Many Requests",
+                    "Retry-After: 120\r\n",
+                    "slow down",
+                )],
+                429,
+                1,
+            ),
+            (
+                vec![
+                    http_response(
+                        "200 OK",
+                        "Content-Type: application/x-git-upload-pack-advertisement\r\n",
+                        PYTHON_REAL_V2_CAPABILITIES,
+                    ),
+                    http_response(
+                        "403 Forbidden",
+                        "X-RateLimit-Remaining: 0\r\nX-RateLimit-Reset: 1792022400\r\n",
+                        "blocked",
+                    ),
+                ],
+                403,
+                2,
+            ),
+        ] {
+            let source = MockSource::new(responses);
+            let error = runtime
+                .block_on(fetch_python_source_tags_from(
+                    &local_client(),
+                    &source.url,
+                    &source.url,
+                ))
+                .unwrap_err();
+            assert!(
+                matches!(error, AppError::SourceHttp { status: actual, rate_limited: true, retry_at: Some(_), .. } if actual == status)
+            );
+            assert_eq!(source.request_count(), expected_count);
+        }
+        let valid_tags = String::from_utf8(python_ls_refs_fixture(&[
+            "1f08c772f5a68bdf8309d6ad1cdddb838fc35feb refs/tags/v3.4.0a1",
+        ]))
+        .unwrap();
+        for (responses, expected_count) in [
+            (
+                vec![http_response(
+                    "200 OK",
+                    "Content-Type: text/html\r\n",
+                    PYTHON_REAL_V2_CAPABILITIES,
+                )],
+                1,
+            ),
+            (
+                vec![http_response(
+                    "200 OK",
+                    "Content-Type: application/x-git-upload-pack-advertisement\r\n",
+                    "000eversion 2\n0000",
+                )],
+                1,
+            ),
+            (
+                vec![http_response(
+                    "200 OK",
+                    "Content-Type: application/x-git-upload-pack-advertisement\r\n",
+                    &String::from_utf8(python_git_fixture(&[
+                        "1f08c772f5a68bdf8309d6ad1cdddb838fc35feb refs/tags/v3.4.0a1",
+                    ]))
+                    .unwrap(),
+                )],
+                1,
+            ),
+            (
+                vec![
+                    http_response(
+                        "200 OK",
+                        "Content-Type: application/x-git-upload-pack-advertisement\r\n",
+                        PYTHON_REAL_V2_CAPABILITIES,
+                    ),
+                    http_response("200 OK", "Content-Type: text/html\r\n", &valid_tags),
+                ],
+                2,
+            ),
+            (
+                vec![
+                    http_response(
+                        "200 OK",
+                        "Content-Type: application/x-git-upload-pack-advertisement\r\n",
+                        PYTHON_REAL_V2_CAPABILITIES,
+                    ),
+                    http_response(
+                        "200 OK",
+                        "Content-Type: application/x-git-upload-pack-result\r\n",
+                        PYTHON_REAL_V2_CAPABILITIES,
+                    ),
+                ],
+                2,
+            ),
+        ] {
+            let source = MockSource::new(responses);
+            let error = runtime
+                .block_on(fetch_python_source_tags_from(
+                    &local_client(),
+                    &source.url,
+                    &source.url,
+                ))
+                .unwrap_err();
+            assert!(matches!(error, AppError::InvalidSource(_)));
+            assert_eq!(source.request_count(), expected_count);
+        }
+    }
+
+    #[test]
+    fn python_v2_limits_both_declared_and_chunked_response_bodies() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let declared = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/x-git-upload-pack-advertisement\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            PYTHON_TAGS_MAX_BYTES + 1,
+        );
+        // No Content-Length: enforce the same bound while accumulating chunks.
+        let chunk = "x".repeat(PYTHON_TAGS_MAX_BYTES + 1);
+        let chunked = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/x-git-upload-pack-advertisement\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n{:x}\r\n{chunk}\r\n0\r\n\r\n",
+            chunk.len(),
+        );
+        drop(chunk);
+        for response in [declared, chunked] {
+            let source = MockSource::new(vec![response]);
+            let error = runtime
+                .block_on(fetch_python_source_tags_from(
+                    &local_client(),
+                    &source.url,
+                    &source.url,
+                ))
+                .unwrap_err();
+            assert!(matches!(error, AppError::InvalidSource(_)));
+            assert!(error.to_string().contains("32 MiB"));
+            assert_eq!(source.request_count(), 1);
+        }
+    }
+
+    #[test]
+    fn python_v2_requires_complete_capabilities_and_version_tag_ref_records() {
+        assert!(parse_python_git_capabilities(PYTHON_REAL_V2_CAPABILITIES.as_bytes()).is_ok());
+        assert!(parse_python_git_capabilities(b"000eversion 2\n000cls-refs\n0000").is_ok());
+        let record = "1f08c772f5a68bdf8309d6ad1cdddb838fc35feb refs/tags/v3.4.0a1";
+        for capabilities in [
+            b"000eversion 2\n0000".to_vec(),
+            b"000eversion 1\n000cls-refs\n0000".to_vec(),
+            b"000eversion 2\n0010not-ls-refs\n0000".to_vec(),
+            PYTHON_REAL_V2_CAPABILITIES.as_bytes()[..PYTHON_REAL_V2_CAPABILITIES.len() - 4]
+                .to_vec(),
+            [PYTHON_REAL_V2_CAPABILITIES.as_bytes(), b"0000"].concat(),
+            python_git_fixture(&[record]),
+        ] {
+            assert!(parse_python_git_capabilities(&capabilities).is_err());
+        }
+        let valid = python_ls_refs_fixture(&[record]);
+        for invalid in [
+            b"0000".to_vec(),
+            b"0001".to_vec(),
+            PYTHON_REAL_V2_CAPABILITIES.as_bytes().to_vec(),
+            python_git_fixture(&[record]),
+            valid[..valid.len() - 1].to_vec(),
+            valid[..valid.len() - 4].to_vec(),
+            [valid.as_slice(), b"junk"].concat(),
+        ] {
+            assert!(parse_python_ls_refs(&invalid).is_err());
+        }
+        for reference in [
+            "HEAD",
+            "refs/heads/main",
+            "refs/pull/123/head",
+            "refs/tags/legacy",
+            "refs/tags/v3.4.0a1^{}",
+            "refs/tags/v3.4.0a1 peeled:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "refs/tags/v3.4.0a1/evil",
+            "refs/tags/v3.4.0a1\0capabilities",
+        ] {
+            let invalid = format!("{} {reference}", "a".repeat(40));
+            assert!(
+                parse_python_ls_refs(&python_ls_refs_fixture(&[record, &invalid])).is_err(),
+                "{reference}"
+            );
+        }
+        for object in [
+            "a".repeat(39),
+            "g".repeat(40),
+            "a".repeat(41),
+            "a".repeat(63),
+            "a".repeat(65),
+        ] {
+            let invalid = format!("{object} refs/tags/v3.4.0a1");
+            assert!(parse_python_ls_refs(&python_ls_refs_fixture(&[&invalid])).is_err());
+        }
+        let sha256 = format!("{} refs/tags/v3.4.0a1", "a".repeat(64));
+        assert_eq!(
+            parse_python_ls_refs(&python_ls_refs_fixture(&[&sha256]))
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    fn python_real_source_tags() -> Vec<(String, String)> {
+        // Actual official v0 advertisement records, including labels missing
+        // from the python.org release database and old c -> rc spellings.
+        parse_python_source_tags(&python_git_fixture(&[
+            "010bebbf9fd12bba1e3f40bdbddacd51a9c2bf20 HEAD\0multi_ack thin-pack object-format=sha1",
+            "010bebbf9fd12bba1e3f40bdbddacd51a9c2bf20 refs/heads/main",
+            "010bebbf9fd12bba1e3f40bdbddacd51a9c2bf20 refs/pull/123/head",
+            "1f08c772f5a68bdf8309d6ad1cdddb838fc35feb refs/tags/v3.4.0a1",
+            "bd61c3ae1f45c402d8e09fdebeeabbe68132bb52 refs/tags/v3.4.0a4",
+            "7e611dab4a05a97e708541d98e2f6817cfbe7453 refs/tags/v3.4.0b1",
+            "e9f73ac1fd5184173179596d4fa5caa45682d301 refs/tags/v3.4.0rc1",
+            "7a325c385bb547b481abfee8301e9d9f2e58990a refs/tags/v1.0.2",
+            "c94d53db0e54d919ed3d37b85bd8d6e7f5a64a9e refs/tags/v1.1",
+            "c7afd2c7bbdbb0b9bb47f0eb088285aec8ec7414 refs/tags/v1.5.2c1",
+            "c7afd2c7bbdbb0b9bb47f0eb088285aec8ec7414 refs/tags/v1.5.2c1^{}",
+            "c7afd2c7bbdbb0b9bb47f0eb088285aec8ec7414 refs/tags/legacy-label",
+        ]))
+        .unwrap()
+    }
+
+    #[test]
+    fn python_source_tags_add_missing_previews_and_old_labels_without_replacing_packages() {
+        let mut rows = build_python_history(
+            vec![python_release_fixture("3.4.0a1", true)],
+            vec![python_installer_fixture("3.4.0a1", "x86_64")],
+            Vec::new(),
+            PYTHON_LEGACY_FIXTURE,
+            PYTHON_FTP_FIXTURE,
+        )
+        .unwrap();
+        let original = rows
+            .iter()
+            .find(|row| row.version == "3.4.0a1")
+            .unwrap()
+            .clone();
+        let tags = python_real_source_tags();
+        assert_eq!(tags.len(), 7);
+        assert!(tags.contains(&("1.1.0".into(), "1.1".into())));
+        assert!(tags.contains(&("1.5.2rc1".into(), "1.5.2c1".into())));
+        merge_python_source_tags(&mut rows, tags);
+        let package = rows.iter().find(|row| row.version == "3.4.0a1").unwrap();
+        assert_eq!(package.download_url, original.download_url);
+        assert_eq!(package.checksum, original.checksum);
+        assert_eq!(package.notes_url, original.notes_url);
+        assert!(is_supported_python_runtime(package));
+        assert_eq!(
+            rows.iter().filter(|row| row.version == "3.4.0a1").count(),
+            1
+        );
+        for version in ["3.4.0a4", "3.4.0b1", "3.4.0rc1"] {
+            let row = rows.iter().find(|row| row.version == version).unwrap();
+            assert_eq!(row.channel, "preview");
+            assert!(row.download_url.is_none());
+            assert!(row.checksum.is_none());
+            assert!(row.install_unavailable_reason.is_some());
+            assert_eq!(
+                row.notes_url,
+                Some(format!("https://github.com/python/cpython/tree/v{version}"))
+            );
+        }
+        let old = rows.iter().find(|row| row.version == "1.1.0").unwrap();
+        assert_eq!(old.channel, "archive");
+        assert_eq!(
+            old.notes_url.as_deref(),
+            Some("https://github.com/python/cpython/tree/v1.1")
+        );
+        assert!(is_complete_python_catalog(&catalog(
+            "python",
+            PYTHON_HISTORY_NAME,
+            PYTHON_RELEASE_SOURCE,
+            rows,
+        )));
+
+        let mut tags_only = Vec::new();
+        merge_python_source_tags(&mut tags_only, python_real_source_tags());
+        let alpha = tags_only
+            .iter()
+            .find(|row| row.version == "3.4.0a1")
+            .unwrap();
+        assert!(alpha.download_url.is_none());
+        assert_eq!(alpha.channel, "preview");
+        assert!(python_source_tag_notes(
+            &alpha.version,
+            alpha.notes_url.as_deref().unwrap()
+        ));
+    }
+
+    #[test]
+    fn python_source_tag_cache_notes_require_the_exact_official_repository_and_version() {
+        assert!(python_source_tag_notes(
+            "1.1.0",
+            "https://github.com/python/cpython/tree/v1.1"
+        ));
+        assert!(python_source_tag_notes(
+            "1.5.2rc1",
+            "https://github.com/python/cpython/tree/v1.5.2c1"
+        ));
+        for notes in [
+            "http://github.com/python/cpython/tree/v3.4.0a1",
+            "https://github.com.evil.test/python/cpython/tree/v3.4.0a1",
+            "https://attacker@github.com/python/cpython/tree/v3.4.0a1",
+            "https://github.com:444/python/cpython/tree/v3.4.0a1",
+            "https://github.com/another/cpython/tree/v3.4.0a1",
+            "https://github.com/python/cpython-other/tree/v3.4.0a1",
+            "https://github.com/python/cpython/tree/v3.4.0a1?raw=1",
+            "https://github.com/python/cpython/tree/v3.4.0a1#fragment",
+            "https://github.com/python/cpython/tree/v3.4.0a1/",
+            "https://github.com/python/cpython/tree/v%33.4.0a1",
+            "https://github.com/python/cpython/tree/v3.4.0a1/../v3.4.0a1",
+            "https://github.com/python/cpython/tree/v3.4.0",
+        ] {
+            assert!(!python_source_tag_notes("3.4.0a1", notes), "{notes}");
+            let mut row = python_archive_row(
+                "3.4.0a1".into(),
+                notes.into(),
+                "No verified package metadata",
+            );
+            row.channel = "preview".into();
+            assert!(
+                !is_complete_python_catalog(&catalog(
+                    "python",
+                    PYTHON_HISTORY_NAME,
+                    PYTHON_RELEASE_SOURCE,
+                    vec![row],
+                )),
+                "{notes}"
+            );
+        }
+    }
+
+    #[test]
+    fn python_git_advertisement_rejects_bad_packets_hashes_namespaces_and_partial_results() {
+        let valid_record = "1f08c772f5a68bdf8309d6ad1cdddb838fc35feb refs/tags/v3.4.0a1";
+        let valid = python_git_fixture(&[valid_record]);
+        for malformed in [
+            Vec::new(),
+            b"0001".to_vec(),
+            b"000eversion 2\n0000".to_vec(),
+            b"zzzz# service=git-upload-pack\n0000".to_vec(),
+            b"001e# service=git-upload-pack\n00000002".to_vec(),
+            b"001e# service=git-upload-pack\n0000ffff".to_vec(),
+            valid[..valid.len() - 1].to_vec(),
+            valid[..valid.len() - 4].to_vec(),
+            [valid.clone(), b"junk".to_vec()].concat(),
+        ] {
+            assert!(parse_python_source_tags(&malformed).is_err());
+        }
+        for object in [
+            "a".repeat(39),
+            "a".repeat(41),
+            "g".repeat(40),
+            "a".repeat(63),
+            "a".repeat(65),
+        ] {
+            let record = format!("{object} refs/tags/v3.4.0a1");
+            assert!(
+                parse_python_source_tags(&python_git_fixture(&[valid_record, &record])).is_err()
+            );
+        }
+        let sha256 = format!(
+            "{} refs/tags/v3.4.0a1\0object-format=sha256",
+            "a".repeat(64)
+        );
+        assert_eq!(
+            parse_python_source_tags(&python_git_fixture(&[&sha256]))
+                .unwrap()
+                .len(),
+            1
+        );
+        for reference in [
+            "refs/remotes/fork/tags/v3.4.0a1",
+            "refs/heads/../tags/v3.4.0a1",
+            "https://evil.test/refs/tags/v3.4.0a1",
+            "refs/pull/123/other",
+            "refs/tags/v3.4.0a1\0late-capabilities",
+            "refs/tags/v3.4.0a1 extra",
+        ] {
+            let record = format!("{} {reference}", "a".repeat(40));
+            assert!(
+                parse_python_source_tags(&python_git_fixture(&[valid_record, &record])).is_err(),
+                "{reference}"
+            );
+        }
+        let conflicting = format!("{} refs/tags/v3.4.0a1", "a".repeat(40));
+        assert!(
+            parse_python_source_tags(&python_git_fixture(&[valid_record, &conflicting])).is_err()
+        );
+        let no_versions = format!("{} refs/heads/main", "a".repeat(40));
+        assert!(parse_python_source_tags(&python_git_fixture(&[&no_versions])).is_err());
+    }
+
+    #[test]
+    fn duplicate_official_python_release_records_merge_without_losing_installers() {
+        let version = "3.3.5rc1";
+        let mut second = python_release_fixture(version, true);
+        second.resource_uri.push_str("second/");
+        let mut empty = python_release_fixture(version, true);
+        empty.resource_uri.push_str("empty/");
+        let x86 = python_installer_fixture(version, "x86");
+        let mut x64 = python_installer_fixture(version, "x86_64");
+        x64.release = second.resource_uri.clone();
+        let rows = build_python_history(
+            vec![python_release_fixture(version, true), second, empty],
+            vec![x86, x64],
+            Vec::new(),
+            PYTHON_LEGACY_FIXTURE,
+            PYTHON_FTP_FIXTURE,
+        )
+        .unwrap();
+        let matching = rows
+            .iter()
+            .filter(|row| row.version == version)
+            .collect::<Vec<_>>();
+        assert_eq!(matching.len(), 1);
+        assert_eq!(matching[0].architecture, "x86_64");
+        assert!(matching[0].install_unavailable_reason.is_none());
+        assert!(
+            matching[0]
+                .download_url
+                .as_deref()
+                .unwrap()
+                .ends_with(".amd64.msi")
+        );
+
+        let mut second = python_release_fixture(version, true);
+        second.resource_uri.push_str("second/");
+        let first = python_installer_fixture(version, "x86_64");
+        let mut conflicting = python_installer_fixture(version, "x86_64");
+        conflicting.release = second.resource_uri.clone();
+        conflicting.md5_sum = "b".repeat(32);
+        assert!(
+            build_python_history(
+                vec![python_release_fixture(version, true), second],
+                vec![first, conflicting],
+                Vec::new(),
+                PYTHON_LEGACY_FIXTURE,
+                PYTHON_FTP_FIXTURE,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn python_history_merges_bulk_releases_previews_archives_and_prefers_full_zip() {
+        let releases = vec![
+            python_release_fixture("2.7.18", false),
+            python_release_fixture("3.10.11", false),
+            python_release_fixture("3.10.0rc1", true),
+            python_release_fixture("3.10.22", false),
+            python_release_fixture("3.15.0", false),
+            python_release_fixture("3.16.0a1", true),
+        ];
+        let mut exe = python_installer_fixture("3.10.11", "x86_64");
+        exe.name = "Windows installer (64-bit)".into();
+        exe.url = "https://www.python.org/ftp/python/3.10.11/python-3.10.11-amd64.exe".into();
+        let mut zip_replacement = python_installer_fixture("3.15.0", "x86_64");
+        zip_replacement.md5_sum = "b".repeat(32);
+        let versions = build_python_history(
+            releases,
+            vec![
+                python_installer_fixture("2.7.18", "x86_64"),
+                exe,
+                python_installer_fixture("3.10.0rc1", "x86_64"),
+                zip_replacement,
+            ],
+            vec![python_runtime_version(python_runtime_fixture("3.15.0")).unwrap()],
+            PYTHON_LEGACY_FIXTURE,
+            PYTHON_FTP_FIXTURE,
+        )
+        .unwrap();
+        let versions = versions
+            .into_iter()
+            .map(|remote| (remote.version.clone(), remote))
+            .collect::<HashMap<_, _>>();
+        assert_eq!(versions.len(), 11);
+        assert_eq!(
+            versions["2.7.18"].checksum_algorithm.as_deref(),
+            Some("md5")
+        );
+        assert_eq!(
+            versions["3.10.11"].checksum_algorithm.as_deref(),
+            Some("md5")
+        );
+        assert_eq!(versions["3.10.0rc1"].channel, "preview");
+        assert!(is_supported_python_runtime(&versions["3.10.0rc1"]));
+        assert_eq!(
+            versions["3.15.0"].checksum_algorithm.as_deref(),
+            Some("sha256")
+        );
+        assert!(
+            versions["3.15.0"]
+                .download_url
+                .as_ref()
+                .unwrap()
+                .ends_with("-amd64.zip")
+        );
+        assert_eq!(
+            versions["3.15.0"].published_at.as_deref(),
+            Some("2026-10-17T00:00:00Z")
+        );
+        assert!(versions["3.10.22"].download_url.is_none());
+        assert!(versions["3.10.22"].install_unavailable_reason.is_some());
+        assert_eq!(versions["1.5.2rc1"].channel, "preview");
+        assert!(versions["1.0.1"].download_url.is_none());
+        assert_eq!(
+            versions["1.6.1"].notes_url.as_deref(),
+            Some("https://www.python.org/download/releases/1.6.1")
+        );
+        assert_eq!(
+            versions["1.5.2"].notes_url.as_deref(),
+            Some("https://www.python.org/download/releases/1.5")
+        );
+        assert_eq!(versions["2.1.0"].channel, "archive");
+        assert!(!versions.contains_key("3.16.0"));
+        let history = catalog(
+            "python",
+            PYTHON_HISTORY_NAME,
+            PYTHON_RELEASE_SOURCE,
+            versions.into_values().collect(),
+        );
+        assert!(is_complete_python_catalog(&history));
+    }
+
+    #[test]
+    fn python_history_prefers_x64_then_checksum_and_supports_x86_when_needed() {
+        let mut x86 = python_installer_fixture("2.7.18", "x86");
+        x86.sha256_sum = "b".repeat(64);
+        let mut x86_only = python_installer_fixture("2.4.0", "x86");
+        x86_only.url = "https://www.python.org/ftp/python/2.4/python-2.4.msi".into();
+        let versions = build_python_history(
+            vec![
+                python_release_fixture("2.7.18", false),
+                python_release_fixture("2.4.0", false),
+            ],
+            vec![x86, python_installer_fixture("2.7.18", "x86_64"), x86_only],
+            vec![],
+            PYTHON_LEGACY_FIXTURE,
+            PYTHON_FTP_FIXTURE,
+        )
+        .unwrap();
+        let x64 = versions
+            .iter()
+            .find(|remote| remote.version == "2.7.18")
+            .unwrap();
+        assert_eq!(x64.architecture, "x86_64");
+        assert_eq!(x64.checksum_algorithm.as_deref(), Some("md5"));
+        let x86 = versions
+            .iter()
+            .find(|remote| remote.version == "2.4.0")
+            .unwrap();
+        assert_eq!(x86.architecture, "x86");
+        assert!(is_supported_python_runtime(x86));
+    }
+
+    #[test]
+    fn python_installer_metadata_rejects_embedding_web_wrong_versions_and_untrusted_urls() {
+        let version = "3.10.11";
+        for (name, url) in [
+            (
+                "Windows embeddable package (64-bit)",
+                "https://www.python.org/ftp/python/3.10.11/python-3.10.11-amd64.exe",
+            ),
+            (
+                "Windows x86-64 web-based installer",
+                "https://www.python.org/ftp/python/3.10.11/python-3.10.11-amd64.exe",
+            ),
+            (
+                "Windows debug installer",
+                "https://www.python.org/ftp/python/3.10.11/python-3.10.11-amd64.exe",
+            ),
+            (
+                "Windows installer (64-bit)",
+                "https://evil.invalid/ftp/python/3.10.11/python-3.10.11-amd64.exe",
+            ),
+            (
+                "Windows installer (64-bit)",
+                "https://www.python.org/ftp/python/3.10.10/python-3.10.10-amd64.exe",
+            ),
+            (
+                "Windows installer (64-bit)",
+                "https://www.python.org/ftp/python/3.10.11/python-3.10.11-embed-amd64.zip",
+            ),
+            (
+                "Windows installer (64-bit)",
+                "https://www.python.org/ftp/python/3.10.11/python-3.10.11-amd64-webinstall.exe",
+            ),
+            (
+                "Windows installer (64-bit)",
+                "http://www.python.org:8080/ftp/python/3.10.11/python-3.10.11-amd64.exe",
+            ),
+            (
+                "Windows installer (64-bit)",
+                "https://user@www.python.org/ftp/python/3.10.11/python-3.10.11-amd64.exe",
+            ),
+        ] {
+            let mut file = python_installer_fixture(version, "x86_64");
+            file.name = name.into();
+            file.url = url.into();
+            assert!(python_installer_file(version, &file).is_none(), "{url}");
+        }
+        let mut historical = python_installer_fixture("3.3.4", "x86_64");
+        historical.url = "http://www.python.org/ftp/python/3.3.4/python-3.3.4.amd64.msi".into();
+        assert_eq!(
+            python_installer_file("3.3.4", &historical).unwrap().0,
+            "https://www.python.org/ftp/python/3.3.4/python-3.3.4.amd64.msi"
+        );
+        let mut short = python_installer_fixture("3.0.0", "x86_64");
+        short.url = "https://www.python.org/ftp/python/3.0/python-3.0.amd64.msi".into();
+        assert!(python_installer_file("3.0.0", &short).is_some());
+    }
+
+    #[test]
+    fn python_history_keeps_unverified_rows_and_supports_verified_wise_installers() {
+        let mut unsigned = python_installer_fixture("2.7.18", "x86_64");
+        unsigned.md5_sum.clear();
+        let mut old_exe = python_installer_fixture("2.3.5", "x86");
+        old_exe.name = "Windows installer".into();
+        old_exe.url = "https://www.python.org/ftp/python/2.3.5/Python-2.3.5.exe".into();
+        let versions = build_python_history(
+            vec![
+                python_release_fixture("2.7.18", false),
+                python_release_fixture("2.3.5", false),
+            ],
+            vec![unsigned, old_exe],
+            vec![],
+            PYTHON_LEGACY_FIXTURE,
+            PYTHON_FTP_FIXTURE,
+        )
+        .unwrap();
+        assert!(
+            versions
+                .iter()
+                .find(|remote| remote.version == "2.7.18")
+                .unwrap()
+                .install_unavailable_reason
+                .as_ref()
+                .unwrap()
+                .contains("校验值")
+        );
+        let wise = versions
+            .iter()
+            .find(|remote| remote.version == "2.3.5")
+            .unwrap();
+        assert!(wise.install_unavailable_reason.is_none());
+        assert!(is_supported_python_runtime(wise));
+        assert!(
+            wise.download_url
+                .as_deref()
+                .unwrap()
+                .ends_with("Python-2.3.5.exe")
+        );
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let mut blocked = versions
+            .into_iter()
+            .find(|remote| remote.version == "2.7.18")
+            .unwrap();
+        let error = runtime
+            .block_on(ensure_install_metadata(
+                &local_client(),
+                "python",
+                &mut blocked,
+            ))
+            .unwrap_err();
+        assert!(error.to_string().contains("校验值"));
+    }
+
+    #[test]
+    fn python_history_uses_official_sha256_and_does_not_hide_malformed_hashes_with_md5() {
+        let mut file = python_installer_fixture("2.7.18", "x86_64");
+        file.sha256_sum = "B".repeat(64);
+        assert_eq!(
+            python_file_checksum(&file),
+            Some(("sha256".into(), "b".repeat(64)))
+        );
+        file.sha256_sum = "invalid official hash".into();
+        assert!(python_file_checksum(&file).is_none());
+        file.sha256_sum.clear();
+        file.md5_sum = "A".repeat(32);
+        assert_eq!(
+            python_file_checksum(&file),
+            Some(("md5".into(), "a".repeat(32)))
+        );
+        file.md5_sum = "invalid".into();
+        assert!(python_file_checksum(&file).is_none());
+    }
+
+    #[test]
+    fn python_history_rejects_conflicting_hashes_and_old_or_corrupted_cache() {
+        let first = python_installer_fixture("2.7.18", "x86_64");
+        let mut conflicting = python_installer_fixture("2.7.18", "x86_64");
+        conflicting.md5_sum = "b".repeat(32);
+        let error = build_python_history(
+            vec![python_release_fixture("2.7.18", false)],
+            vec![first, conflicting],
+            vec![],
+            PYTHON_LEGACY_FIXTURE,
+            PYTHON_FTP_FIXTURE,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("冲突"));
+        let full = python_runtime_version(python_runtime_fixture("3.15.0")).unwrap();
+        let old = catalog(
+            "python",
+            "Python.org 完整开发运行时",
+            PYTHON_RUNTIME_SOURCE,
+            vec![full.clone()],
+        );
+        assert!(!is_complete_python_catalog(&old));
+        let mut current = catalog(
+            "python",
+            PYTHON_HISTORY_NAME,
+            PYTHON_RELEASE_SOURCE,
+            vec![full],
+        );
+        assert!(is_complete_python_catalog(&current));
+        current.versions[0].download_url =
+            Some("https://evil.invalid/python-3.15.0-amd64.zip".into());
+        assert!(!is_complete_python_catalog(&current));
+        current.versions[0].download_url = None;
+        current.versions[0].install_unavailable_reason = Some("no file".into());
+        assert!(!is_complete_python_catalog(&current));
+        assert!(
+            build_python_history(
+                vec![python_release_fixture("2.7.18", false)],
+                vec![],
+                vec![],
+                "unrecognized HTML",
+                PYTHON_FTP_FIXTURE
+            )
+            .is_err()
+        );
+    }
+
     fn python_runtime_fixture(version: &str) -> PythonRuntime {
         let minor = version.split('.').nth(1).unwrap();
         PythonRuntime {
@@ -2290,7 +4444,15 @@ mod tests {
                                 .is_some_and(|url| url.starts_with("https://"))
                         }) =>
                 {
-                    println!("{tool_id}: {} Windows downloads", catalog.versions.len());
+                    let downloads = catalog
+                        .versions
+                        .iter()
+                        .filter(|version| version.download_url.is_some())
+                        .count();
+                    println!(
+                        "{tool_id}: {} versions, {downloads} Windows downloads",
+                        catalog.versions.len()
+                    );
                 }
                 Ok(catalog) if catalog.versions.is_empty() => {
                     failures.push(format!("{tool_id}: returned an empty catalog"));

@@ -13,6 +13,7 @@ mod paths;
 mod plans;
 mod plugins;
 mod process;
+mod python_features;
 mod scanner;
 mod sources;
 mod terminal;
@@ -1929,14 +1930,10 @@ fn read_version_catalog_cache(
     if catalog.tool_id != tool_id || catalog.versions.is_empty() {
         return Ok(None);
     }
-    // Older releases cached the embedded Python distribution under the same
-    // version number. Never reuse it for a fresh install or an in-place repair.
-    if tool_id == "python"
-        && catalog
-            .versions
-            .iter()
-            .any(|remote| !sources::is_supported_python_runtime(remote))
-    {
+    // Catalog completeness is separate from each release's installability.
+    // Invalidate both embedded and full-ZIP-only catalogs so historical entries
+    // are fetched even when the old catalog is still within its freshness TTL.
+    if tool_id == "python" && !sources::is_complete_python_catalog(&catalog) {
         return Ok(None);
     }
     versioning::sort_remote_versions_descending(&mut catalog.versions);
@@ -1998,8 +1995,9 @@ mod tests {
         ensure_data_layout(temporary.path()).unwrap();
         let catalog = VersionCatalog {
             tool_id: "python".to_string(),
-            source_name: "Python.org".to_string(),
-            source_url: "https://www.python.org/".to_string(),
+            source_name: "Python.org 发布与历史归档（含预览版）".to_string(),
+            source_url: "https://www.python.org/api/v2/downloads/release/?is_published=true"
+                .to_string(),
             fetched_at: chrono::Utc::now(),
             cached: false,
             versions: vec![crate::model::RemoteVersion {
@@ -2014,6 +2012,7 @@ mod tests {
                 checksum_algorithm: Some("sha256".to_string()),
                 checksum: Some("a".repeat(64)),
                 notes_url: None,
+                install_unavailable_reason: None,
             }],
         };
 
@@ -2027,7 +2026,7 @@ mod tests {
     }
 
     #[test]
-    fn embedded_python_catalog_is_invalidated_even_when_fresh() {
+    fn old_python_catalogs_are_invalidated_without_rejecting_history() {
         let temporary = tempfile::tempdir().unwrap();
         let mut catalog = VersionCatalog {
             tool_id: "python".to_string(),
@@ -2047,6 +2046,7 @@ mod tests {
                 checksum_algorithm: Some("sha256".to_string()),
                 checksum: Some("a".repeat(64)),
                 notes_url: None,
+                install_unavailable_reason: None,
             }],
         };
         write_version_catalog_cache(temporary.path(), &catalog).unwrap();
@@ -2057,6 +2057,16 @@ mod tests {
         );
         catalog.versions[0].download_url =
             Some("https://www.python.org/ftp/python/3.15.0/python-3.15.0-amd64.zip".to_string());
+        catalog.source_url = "https://www.python.org/ftp/python/index-windows.json".to_string();
+        write_version_catalog_cache(temporary.path(), &catalog).unwrap();
+        assert!(
+            read_version_catalog_cache(temporary.path(), "python")
+                .unwrap()
+                .is_none()
+        );
+        catalog.source_url =
+            "https://www.python.org/api/v2/downloads/release/?is_published=true".to_string();
+        catalog.source_name = "Python.org 发布与历史归档（含预览版）".to_string();
         write_version_catalog_cache(temporary.path(), &catalog).unwrap();
         assert!(
             read_version_catalog_cache(temporary.path(), "python")
@@ -2070,6 +2080,19 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+        catalog.versions[0].version = "2.0.0".to_string();
+        catalog.versions[0].download_url = None;
+        catalog.versions[0].checksum_algorithm = None;
+        catalog.versions[0].architecture = "source".to_string();
+        catalog.versions[0].notes_url = Some("https://www.python.org/ftp/python/2.0/".to_string());
+        catalog.versions[0].install_unavailable_reason =
+            Some("官方历史归档未提供可验证的 Windows 安装包元数据".to_string());
+        write_version_catalog_cache(temporary.path(), &catalog).unwrap();
+        let restored = read_version_catalog_cache(temporary.path(), "python")
+            .unwrap()
+            .unwrap();
+        assert_eq!(restored.versions[0].version, "2.0.0");
+        assert!(restored.versions[0].install_unavailable_reason.is_some());
     }
 
     #[test]

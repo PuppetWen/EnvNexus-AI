@@ -171,8 +171,49 @@ pub fn run_capture_with_env(
     timeout: Duration,
     environment: &[(&str, &OsStr)],
 ) -> AppResult<Output> {
+    run_capture_inner(program, args, timeout, environment, &[])
+}
+
+/// Runs with a child-only snapshot of the inherited environment after removing
+/// the selected ASCII prefixes. Explicit overrides are applied afterwards.
+/// Callers must ensure those overrides contain only trusted values.
+pub fn run_capture_sanitized(
+    program: &Path,
+    args: &[&str],
+    timeout: Duration,
+    environment: &[(&str, &OsStr)],
+    remove_prefixes: &[&str],
+) -> AppResult<Output> {
+    run_capture_inner(program, args, timeout, environment, remove_prefixes)
+}
+
+fn run_capture_inner(
+    program: &Path,
+    args: &[&str],
+    timeout: Duration,
+    environment: &[(&str, &OsStr)],
+    remove_prefixes: &[&str],
+) -> AppResult<Output> {
     initialize_error_mode();
     let mut command = Command::new(program);
+    if !remove_prefixes.is_empty() {
+        // Legacy Python has no -I switch. Its inherited working directory can
+        // otherwise shadow standard-library and pip modules before setup runs.
+        let directory = program
+            .parent()
+            .filter(|directory| !directory.as_os_str().is_empty())
+            .ok_or_else(|| AppError::Message("隔离子进程需要可执行文件的完整路径".to_string()))?;
+        command.current_dir(directory);
+        command
+            .env_clear()
+            .envs(std::env::vars_os().filter(|(name, _)| {
+                let name = name.to_string_lossy();
+                !remove_prefixes.iter().any(|prefix| {
+                    name.get(..prefix.len())
+                        .is_some_and(|start| start.eq_ignore_ascii_case(prefix))
+                })
+            }));
+    }
     command
         .args(args)
         .envs(environment.iter().copied())
@@ -311,6 +352,46 @@ mod tests {
                 eprintln!("PIPE_HOLDER_STDERR_READY");
             }
             Ok("sleep") => thread::sleep(Duration::from_secs(30)),
+            Ok("filtered-parent") => {
+                let output = run_capture_sanitized(
+                    &std::env::current_exe().unwrap(),
+                    CAPTURE_FIXTURE_ARGS,
+                    Duration::from_secs(10),
+                    &[
+                        (CAPTURE_FIXTURE_ENV, OsStr::new("filtered-leaf")),
+                        ("PIP_CACHE_DIR", OsStr::new("controlled-cache")),
+                    ],
+                    &["PIP_"],
+                )
+                .unwrap();
+                assert!(output.status.success(), "{}", output_text(&output));
+                assert!(output_text(&output).contains("FILTERED_ENV_OK"));
+                // Only this parent carries the poisoned inherited values.
+                assert!(std::env::var_os("PIP_TARGET").is_some());
+                println!("FILTERED_PARENT_OK");
+            }
+            Ok("filtered-leaf") => {
+                let pip = std::env::vars_os()
+                    .filter(|(key, _)| {
+                        key.to_string_lossy()
+                            .to_ascii_uppercase()
+                            .starts_with("PIP_")
+                    })
+                    .collect::<Vec<_>>();
+                assert_eq!(pip.len(), 1, "{pip:?}");
+                assert_eq!(std::env::var("PIP_CACHE_DIR").unwrap(), "controlled-cache");
+                assert_eq!(
+                    std::env::var("ENVNEXUS_KEEP_UNRELATED").unwrap(),
+                    "preserved"
+                );
+                let sentinel = std::env::var_os("ENVNEXUS_CAPTURE_SENTINEL").unwrap();
+                assert_eq!(
+                    std::env::current_dir().unwrap(),
+                    std::env::current_exe().unwrap().parent().unwrap()
+                );
+                assert!(!Path::new(&sentinel).exists());
+                println!("FILTERED_ENV_OK");
+            }
             _ => {}
         }
     }
@@ -331,6 +412,32 @@ mod tests {
             output.stdout.iter().filter(|byte| **byte == b'O').count() > MAX_CAPTURE_BYTES - 4096
         );
         assert!(output.stderr.iter().all(|byte| *byte == b'E'));
+    }
+
+    #[test]
+    fn sanitized_child_removes_inherited_pip_options_and_keeps_unrelated_values() {
+        let directory = tempfile::tempdir().unwrap();
+        let sentinel = directory.path().join("must-not-be-created");
+        let output = Command::new(std::env::current_exe().unwrap())
+            .args(CAPTURE_FIXTURE_ARGS)
+            .current_dir(directory.path())
+            .env(CAPTURE_FIXTURE_ENV, "filtered-parent")
+            .env("PIP_TARGET", &sentinel)
+            .env("pip_ROOT", &sentinel)
+            .env("PIP_PREFIX", &sentinel)
+            .env("pip_user", "1")
+            .env("PIP_LOG", sentinel.join("pip.log"))
+            .env("PIP_CONFIG_FILE", sentinel.join("pip.ini"))
+            .env("PIP_CACHE_DIR", sentinel.join("cache"))
+            .env("ENVNEXUS_KEEP_UNRELATED", "preserved")
+            .env("ENVNEXUS_CAPTURE_SENTINEL", &sentinel)
+            .stdin(Stdio::null())
+            .creation_flags(CREATE_NO_WINDOW)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{}", output_text(&output));
+        assert!(output_text(&output).contains("FILTERED_PARENT_OK"));
+        assert!(!sentinel.exists());
     }
 
     #[test]

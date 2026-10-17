@@ -79,9 +79,21 @@ pnpm icons:generate
 .\scripts\Invoke-Rust.ps1 -Task live-install
 ```
 
-`live-added-sources` 单独验证 Maven、.NET SDK、Ruby、PHP，便于区分新增解析器与其他上游网络波动。`live-install` 会在仓库的 `artifacts/integration` 下创建临时目录，真实下载并校验 Python 官方完整 PythonCore ZIP，验证安装事务与完整开发运行时；结束后删除临时目录，不修改 PATH。Python 源只接受官方完整 ZIP 和 SHA-256 齐全的稳定版本，当前可用历史从 3.11 起；旧 NuGet 包及嵌入式包不作为完整运行时备用源。
+`live-added-sources` 单独验证 Maven、.NET SDK、Ruby、PHP，便于区分新增解析器与其他上游网络波动。`live-install` 会在仓库的 `artifacts/integration` 下创建临时目录，真实下载并校验 Python 官方完整 PythonCore ZIP，验证安装事务与完整开发运行时；结束后删除临时目录，不修改 PATH。
+
+0.1.7 的 Python 查询并发合并官网发布 API、Windows 文件 API、完整 PythonCore 索引链、少量历史归档总表和官方 CPython 版本标签，保留 0.9、1.x、Python 2、旧 Python 3 和预览版；不逐版本请求下载元数据。CPython 官方仓库使用 Git v2：先验证 `version 2` / `ls-refs` 能力，再以 `ref-prefix refs/tags/v` 批量获取版本标签，不使用 GitHub API 分页或下载全部 pull refs。两个响应均验证状态、Content-Type、pkt-line 完整性及 32 MiB 读取上限。本轮网络样本中，标签响应为 41,706 字节（约 42 KB），包含 657 个版本标签；能力响应另为 191 字节。这是网络样本，不保证固定标签数量、响应大小或查询耗时。
+
+完整 ZIP 与官方 SHA-256 优先，同版本缺少该 ZIP 时可选择有有效官方 SHA-256 或 MD5 的完整 x64 / x86 Wise EXE、MSI、WiX Burn EXE。Python 2.0–2.3 的 Wise EXE、Python 2.4 起的 MSI、Python 3.5 起的 Burn EXE 均通过静态提取安装，不调用厂商安装器、MSI 自定义动作或全局运行库安装程序；CI7 已通过下述十版本验收。仅源码、缺少 Windows 包或缺少可验证下载元数据的版本保留对应的不可自动安装原因；源码标签本身不证明该版有或没有 Windows 包。旧 NuGet 包和嵌入式包不冒充完整发行包，MD5 在安装计划中明确标注为弱校验，不等同于 SHA-256 或发行签名验证。
+
+Python 3.6 之前的 Windows 运行时及随包 Tcl/Tk 需要 ASCII 安装路径，例如 `E:\Environment`。安装和修复计划在预览阶段检查路径，安装器执行入口及启动解释器前再次复核，避免在中文或重音字符路径中启动不兼容的旧运行时。CI7 已验证这些版本在非 ASCII 路径中被拒绝且未生成安装，再在 ASCII 路径中安装；Python `3.10.11` 已通过包含中文和重音字符的 `tools-开发-é` 目录安装与 pip/venv 验收。
+
+历史 pip 使用原包随带的 wheel：先在受管根目录内的短私有工作目录中有界解包并验证 ZIP CRC、路径和大小，再通过隔离 wrapper 直接运行 `pip.__main__`，在最终 prefix 离线生成命令入口并传播真实退出码。它不依赖预先安装的 pip，不联网升级旧 pip，且清除外部 pip 选项、禁用 pip/distutils 配置；venv 使用同一组随包 wheel。随后验证最终路径的 pip 命令、模块、列表及对应 venv 能力。现代完整 ZIP 的初始化流程保持独立。
 
 `Smoke-Python.ps1` 用于在 CI 中检查完整 Python 的 pip 命令入口、venv 和旧嵌入式安装的原路径修复；测试、缓存和临时目录限制在仓库下。具体通过结果以当次工作流和 `TEST_REPORT.md` 为准。
+
+新增 `Smoke-Python-History.ps1` 仅允许在 Windows GitHub CI runner 的隔离工作区执行。CI7 已通过十个版本：`2.0.1`、`2.1.3`、`2.2.3`、`2.3.5`、`2.4.4`、`2.7.18`、`3.0.1`、`3.3.5`、`3.4.4`、`3.10.11`，检查官方目录、筛选排序、Wise EXE / MSI / Burn EXE 静态提取、随包能力、用户环境指纹、配置污染隔离和有界清理。正式发行包中的 Python 2.7.9+ / 3.4+ 使用原包自带 pip，Python 3.3+ 检查内置 venv；更早版本不联网补装最新版 pip。预览版按实际组件区分，例如 3.3 早期 alpha 不要求 venv，3.4 alpha 不要求 ensurepip；这十个稳定版本的验收不能代替全部历史或预览版验收。测试包、缓存和临时文件均留在隔离工作区所在的 D / E 盘，不写全局用户缓存，也不修改 HKCU。
+
+本轮证据来自提交 `ba2c54e` 的 [CI7](https://github.com/PuppetWen/EnvNexus-AI/actions/runs/39025514788)：184 项 Rust、62 项前端、4 项 Node 测试，以及实时官方源、十个历史 Python、现代 Python 新装与旧嵌入式包原路径修复、15/15 类工具真实安装均已通过。[独立草稿资产验证](https://github.com/PuppetWen/EnvNexus-AI/actions/runs/39027005455)的下载、清单及 Rust 签名验证也已通过；公开发行和公开下载回读尚待完成。完整范围及未验证边界见[测试报告](TEST_REPORT.md)，0.1.6 的结果单独保留为历史记录。
 
 ## 开发运行
 
@@ -104,8 +116,8 @@ pnpm tauri dev
 
 ```text
 src-tauri/target/release/envnexus-ai.exe
-src-tauri/target/release/bundle/nsis/EnvNexus AI_0.1.6_x64-setup.exe
-src-tauri/target/release/bundle/nsis/EnvNexus AI_0.1.6_x64-setup.exe.sig
+src-tauri/target/release/bundle/nsis/EnvNexus AI_0.1.7_x64-setup.exe
+src-tauri/target/release/bundle/nsis/EnvNexus AI_0.1.7_x64-setup.exe.sig
 ```
 
 `envnexus-ai.exe` 无参数时启动 GUI，有命令参数时作为工具脚本的内部命令引擎。便携交付把主程序和安装包复制到 `release/`，并附 `SHA256SUMS.txt`。
@@ -125,7 +137,7 @@ src-tauri/target/release/bundle/nsis/EnvNexus AI_0.1.6_x64-setup.exe.sig
 
 ## GitHub Actions 发布验证
 
-`.github/workflows/verify-release.yml` 在 `main`、`codex/**` 分支推送、非草稿 PR 和手动触发时运行 Windows 校验与构建。它执行前端和 Rust 检查、命令脚本冒烟、NSIS 隔离安装，并上传安装包、便携包和日志。分支推送及手动运行还执行官方源查询、Python 安装事务和全部 15 类工具的隔离安装检查；每项完成后清理本次测试的大型包，具体通过结果以工作流和 `TEST_REPORT.md` 为准。
+`.github/workflows/verify-release.yml` 在 `main`、`codex/**` 分支推送、非草稿 PR 和手动触发时运行 Windows 校验与构建。它执行前端和 Rust 检查、命令脚本冒烟、NSIS 隔离安装，并上传安装包、便携包和日志。分支推送及手动运行还执行官方源查询、Python 完整运行时及历史安装检查和全部 15 类工具的隔离安装检查；每项完成后清理本次测试的大型包，具体通过结果以工作流和 `TEST_REPORT.md` 为准。
 
 工作流把项目构建缓存、Cargo/Rustup 和临时文件放在仓库目录；pnpm 启动工具安装在工作区相邻的隔离目录，避免被项目依赖安装递归扫描。项目缓存由 Actions cache 保存，构建文件通过 artifact 交付。
 
@@ -134,7 +146,7 @@ src-tauri/target/release/bundle/nsis/EnvNexus AI_0.1.6_x64-setup.exe.sig
 签名资产应先上传到对应版本的 draft Release，再运行 `verify-signed-release.yml`：
 
 ```powershell
-gh workflow run verify-signed-release.yml --ref main -f tag=v0.1.6
+gh workflow run verify-signed-release.yml --ref main -f tag=v0.1.7
 ```
 
 所选源码版本必须与 tag 一致。该工作流的 `verify` 作业使用 `contents: write` 权限访问 draft Release：GitHub 不向仅有读取权限的令牌开放草稿。作业只下载对应草稿或已发布发行版的六项资产（安装包、便携包、各自签名、`latest.json`、`SHA256SUMS.txt`）并验证，不发布或修改发行版，也不接触私钥；checkout 禁用凭据持久化。它检查 PE 版本、发布 URL、签名旁文件、完整 SHA-256 清单，并运行应用自身的 Rust 签名验证测试。验证报告随运行上传，发布完成应以实际验证结果为依据。首次启用手动触发前，该工作流文件需要存在于默认分支。
@@ -146,6 +158,24 @@ gh workflow run verify-signed-release.yml --ref main -f tag=v0.1.6
 ```
 
 该脚本使用单独的 `ENVNEXUS_AI_DATA_ROOT`，生成 110 个工具命令脚本并实际执行 `jdk-list.cmd`、`env-refresh.cmd` 与 `env-repair.cmd`，验证无快照只读查询、15 个工具定义、先生成脚本后修改工具目录仍读取最新配置、完整扫描、增量刷新、共享快照和无 `--yes` 的修复预览，不执行真实环境变更。旧的 `ENVPILOT_DATA_ROOT` 仍作为只读兼容入口。桌面冒烟另会输入并保存自定义命令脚本目录，再确认脚本生成在该目录中，并打开本地诊断建议弹窗核对可复制命令。
+
+官方版本查询支持以下参数，直接命令和生成的 `python-versions` 等脚本共用：
+
+```powershell
+.\src-tauri\target\release\envnexus-ai.exe versions python --channel all --sort version-desc --json
+python-versions --query 2.7 --channel stable --installable --sort version-asc
+python-versions --channel preview --sort date-desc --refresh
+```
+
+| 参数 | 含义 |
+| --- | --- |
+| `--query <文本>` | 搜索版本号文本；界面的关键词搜索还覆盖通道、架构、日期和不可安装原因 |
+| `--channel all\|stable\|preview\|archive` | 全部、稳定、预览或历史归档；默认全部 |
+| `--installable` | 只显示存在受支持下载包且没有不可安装原因的条目 |
+| `--sort version-desc\|version-asc\|date-desc\|date-asc` | 按版本或发布日期双向排序；默认版本倒序，未知日期排在已知日期之后 |
+| `--refresh` / `--json` | 主动刷新官网目录 / 输出筛选后的 JSON 清单 |
+
+界面中的“发布日期：新到旧 / 旧到新”对应 CLI 的 `date-desc / date-asc`。省略筛选参数时保留全部目录条目，包括暂不能自动安装的归档；查询命令不安装工具或修改 PATH。
 
 窗口与托盘隔离冒烟：
 

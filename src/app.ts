@@ -9,6 +9,15 @@ import {
 } from "./scroll-state";
 import { backend } from "./bridge";
 import { latestCatalog } from "./catalog-state";
+import {
+  catalogView,
+  defaultCatalogView,
+  installUnavailableReason,
+  officialReleaseUrl,
+  type CatalogChannel,
+  type CatalogSort,
+  type CatalogViewPreferences,
+} from "./catalog-view";
 import { previewInstallationEnvironment } from "./install-followup";
 import { aiProviderIcon } from "./ai-icons";
 import { toolBrandIcon } from "./brand-icons";
@@ -93,6 +102,7 @@ const state: {
   toolDefinitions: ToolDefinition[];
   scan?: EnvironmentScan;
   catalogs: Map<string, VersionCatalog>;
+  catalogViews: Map<string, CatalogViewPreferences>;
   fetchingCatalogs: Set<string>;
   scanning: boolean;
   error?: string;
@@ -123,6 +133,7 @@ const state: {
   trayReady: false,
   toolDefinitions: [],
   catalogs: new Map(),
+  catalogViews: new Map(),
   fetchingCatalogs: new Set(),
   scanning: false,
   applying: false,
@@ -635,6 +646,7 @@ function renderToolDetail(): string {
   const fetchingCatalog = state.fetchingCatalogs.has(tool.id);
   const installRoot = state.toolRoots[tool.id];
   const sharedAndroidRoot = androidWorkspaceTools.has(tool.id);
+  const catalogPreferences = toolCatalogView(tool.id);
   return `
     <div class="tool-detail-page">
       <button class="back-button" data-nav="tools">${icon("ArrowLeft", 16)} 返回工具链</button>
@@ -688,34 +700,75 @@ function renderToolDetail(): string {
         </section>
         <section class="tool-detail-section panel">
           <div class="drawer-section-title">
-            <div><p class="eyebrow">OFFICIAL RELEASES</p><h3>官方可安装版本</h3></div>
+            <div><p class="eyebrow">OFFICIAL RELEASES</p><h3>官方发布版本</h3></div>
             <div class="catalog-title-actions">
-              ${catalog ? `<span class="catalog-version-count">${catalog.versions.length} 个版本</span>` : ""}
+              ${catalog ? `<span class="catalog-version-count" data-catalog-count>${renderCatalogCount(catalog, catalogPreferences)}</span>` : ""}
               <button class="text-button" data-fetch-versions="${escapeHtml(tool.id)}" ${fetchingCatalog ? "disabled" : ""}>${fetchingCatalog ? `${icon("LoaderCircle", 14)} 查询中…` : catalog ? "刷新版本" : "查询官方源"}</button>
             </div>
           </div>
-          <p class="catalog-install-note">安装完成后会显示默认版本计划；确认后配置 PATH 和相关环境变量，也可选择仅保留安装。</p>
+          <p class="catalog-install-note">默认展示全部发布版本；每个版本会注明安装支持情况。安装完成后仍需确认默认版本计划以配置环境变量。</p>
           ${
             catalog
               ? `<div class="source-proof ${catalog.cached ? "cached" : ""}">${icon(catalog.cached ? "Database" : "BadgeCheck", 15)}<span>${escapeHtml(catalog.sourceName)}${catalog.cached ? " · 本地缓存，过期后后台更新" : ""}</span><time>${new Date(catalog.fetchedAt).toLocaleString(state.appPreferences?.language ?? "zh-CN")}</time></div>
-                 <div class="version-stack remote-stack">
-                   ${catalog.versions
-                     .map(
-                       (version) => `
-                         <article class="version-item">
-                           <div><strong>${escapeHtml(version.version)}</strong><span>${escapeHtml(version.channel)} · ${escapeHtml(version.architecture)}</span><code>${version.checksum ? `${escapeHtml(version.checksumAlgorithm ?? "")}: ${escapeHtml(version.checksum.slice(0, 16))}…` : "官方源未提供校验值"}</code></div>
-                           <button class="primary-button" data-install-version="${encodeURIComponent(version.version)}" ${installRoot ? "" : "disabled"} title="${installRoot ? "生成安装计划" : "请先在页面上方设置安装目录"}">${icon("Download", 15)} ${installRoot ? "安装" : "先设置目录"}</button>
-                         </article>
-                       `,
-                     )
-                     .join("")}
-                 </div>`
+                 ${renderCatalogControls(catalogPreferences)}
+                 <div data-catalog-results>${renderCatalogVersions(tool.id, catalog, catalogPreferences)}</div>`
               : `<div class="drawer-empty">${icon("CloudDownload", 28)}<span>点击“查询官方源”获取实时版本；安装前请先设置页面上方的默认安装目录。</span></div>`
           }
         </section>
       </div>
     </div>
   `;
+}
+
+function toolCatalogView(toolId: string): CatalogViewPreferences {
+  let preferences = state.catalogViews.get(toolId);
+  if (!preferences) {
+    preferences = defaultCatalogView();
+    state.catalogViews.set(toolId, preferences);
+  }
+  return preferences;
+}
+
+function renderCatalogCount(catalog: VersionCatalog, preferences: CatalogViewPreferences): string {
+  const view = catalogView(catalog.versions, preferences);
+  return `显示 ${view.filteredCount} / 共 ${view.totalCount} 个版本 · ${view.installableCount} 个可安装`;
+}
+
+function renderCatalogControls(preferences: CatalogViewPreferences): string {
+  const option = (value: string, label: string, selected: string): string => `<option value="${value}" ${value === selected ? "selected" : ""}>${label}</option>`;
+  return `<div class="catalog-controls">
+    <label class="catalog-search"><span>版本关键词</span><input type="search" data-catalog-query value="${escapeHtml(preferences.query)}" placeholder="搜索版本、通道或架构…" spellcheck="false"></label>
+    <label><span>发布类型</span><select data-catalog-channel>${option("all", "全部", preferences.channel)}${option("stable", "稳定版", preferences.channel)}${option("preview", "预览版", preferences.channel)}${option("archive", "历史归档", preferences.channel)}</select></label>
+    <label><span>排序</span><select data-catalog-sort>${option("version-desc", "版本：新到旧", preferences.sort)}${option("version-asc", "版本：旧到新", preferences.sort)}${option("published-desc", "发布日期：新到旧", preferences.sort)}${option("published-asc", "发布日期：旧到新", preferences.sort)}</select></label>
+    <label class="catalog-installable-filter"><input type="checkbox" data-catalog-installable ${preferences.installableOnly ? "checked" : ""}><span>仅可安装</span></label>
+  </div>`;
+}
+
+function renderCatalogVersions(toolId: string, catalog: VersionCatalog, preferences: CatalogViewPreferences): string {
+  const view = catalogView(catalog.versions, preferences);
+  const installRoot = state.toolRoots[toolId];
+  if (!view.filteredCount) {
+    return `<div class="drawer-empty catalog-empty">${icon("Search", 24)}<span>没有符合条件的版本，请调整关键词或筛选。</span><button class="text-button" data-reset-catalog>重置筛选</button></div>`;
+  }
+  return `<div class="version-stack remote-stack">${view.versions.map((version) => {
+    const reason = installUnavailableReason(version);
+    const notes = officialReleaseUrl(version.notesUrl);
+    const publishedAt = version.publishedAt ? Date.parse(version.publishedAt) : NaN;
+    const published = Number.isFinite(publishedAt)
+      ? new Date(publishedAt).toLocaleDateString(state.appPreferences?.language ?? "zh-CN", { timeZone: "UTC" })
+      : "发布日期未知";
+    const title = reason ?? (installRoot ? "生成安装计划" : "请先在页面上方设置安装目录");
+    return `<article class="version-item catalog-version-item ${reason ? "unavailable" : ""}" data-catalog-version="${escapeHtml(version.version)}">
+      <div><strong>${escapeHtml(version.version)}</strong><span>${escapeHtml(version.channel)} · ${escapeHtml(version.architecture)}</span><span class="catalog-publication">${escapeHtml(published)}</span>
+        ${version.downloadUrl ? `<code>${version.checksum ? `${escapeHtml(version.checksumAlgorithm ?? "")}: ${escapeHtml(version.checksum.slice(0, 16))}…` : "官方源未提供校验值"}</code>` : ""}
+        <span class="catalog-support ${reason ? "unavailable" : "available"}">${escapeHtml(reason ?? "可安装")}</span>
+      </div>
+      <div class="version-actions catalog-version-actions">
+        <button class="primary-button" data-install-tool="${escapeHtml(toolId)}" data-install-version="${encodeURIComponent(version.version)}" ${!reason && installRoot ? "" : "disabled"} title="${escapeHtml(title)}">${icon("Download", 15)} ${reason ? "暂不可安装" : installRoot ? "安装" : "先设置目录"}</button>
+        ${notes ? `<a class="secondary-button catalog-release-link" href="${escapeHtml(notes)}" target="_blank" rel="noopener noreferrer">${icon("ExternalLink", 13)} 官方发布页</a>` : ""}
+      </div>
+    </article>`;
+  }).join("")}</div>`;
 }
 
 function renderChanges(): string {
@@ -1433,6 +1486,79 @@ function renderEnvironmentDiffs(plan: OperationPlan): string {
     .join("")}</div>`;
 }
 
+function bindCatalogResultActions(root: HTMLElement): void {
+  root.querySelector("[data-reset-catalog]")?.addEventListener("click", () => {
+    if (!state.selectedToolId) return;
+    state.catalogViews.set(state.selectedToolId, defaultCatalogView());
+    render();
+  });
+  root.querySelectorAll<HTMLButtonElement>("[data-install-version]").forEach((element) => {
+    element.addEventListener("click", async () => {
+      const toolId = element.dataset.installTool ?? state.selectedToolId;
+      const version = element.dataset.installVersion
+        ? decodeURIComponent(element.dataset.installVersion)
+        : undefined;
+      if (!toolId || !version) return;
+      const remote = state.catalogs.get(toolId)?.versions.find((candidate) => candidate.version === version);
+      const reason = remote ? installUnavailableReason(remote) : "版本信息已失效，请刷新官方版本列表。";
+      if (reason) {
+        state.error = `无法生成安装计划：${reason}`;
+        render();
+        return;
+      }
+      const selected = state.toolRoots[toolId];
+      if (!selected) {
+        state.error = "请先在工具详情页上方设置默认安装目录。";
+        render();
+        return;
+      }
+      try {
+        state.pendingPlan = await backend.previewInstall(toolId, version, selected);
+        state.error = undefined;
+      } catch (error) {
+        state.error = `无法生成安装计划：${String(error)}`;
+      }
+      render();
+    });
+  });
+}
+
+function bindCatalogControls(root: HTMLElement): void {
+  const toolId = state.selectedToolId;
+  if (!toolId) return;
+  const preferences = toolCatalogView(toolId);
+  const update = (): void => {
+    const catalog = state.catalogs.get(toolId);
+    const results = root.querySelector<HTMLElement>("[data-catalog-results]");
+    if (!catalog || !results) return;
+    results.innerHTML = renderCatalogVersions(toolId, catalog, preferences);
+    const count = root.querySelector<HTMLElement>("[data-catalog-count]");
+    if (count) count.textContent = renderCatalogCount(catalog, preferences);
+    localizeUi(results, state.appPreferences?.language ?? "zh-CN");
+    bindCatalogResultActions(root);
+  };
+  root.querySelector<HTMLInputElement>("[data-catalog-query]")?.addEventListener("input", (event) => {
+    preferences.query = (event.currentTarget as HTMLInputElement).value;
+    update();
+  });
+  root.querySelector<HTMLSelectElement>("[data-catalog-channel]")?.addEventListener("change", (event) => {
+    const value = (event.currentTarget as HTMLSelectElement).value;
+    if (!["all", "stable", "preview", "archive"].includes(value)) return;
+    preferences.channel = value as CatalogChannel;
+    update();
+  });
+  root.querySelector<HTMLSelectElement>("[data-catalog-sort]")?.addEventListener("change", (event) => {
+    const value = (event.currentTarget as HTMLSelectElement).value;
+    if (!["version-desc", "version-asc", "published-desc", "published-asc"].includes(value)) return;
+    preferences.sort = value as CatalogSort;
+    update();
+  });
+  root.querySelector<HTMLInputElement>("[data-catalog-installable]")?.addEventListener("change", (event) => {
+    preferences.installableOnly = (event.currentTarget as HTMLInputElement).checked;
+    update();
+  });
+}
+
 function bindEvents(root: HTMLElement): void {
   const content = root.querySelector<HTMLElement>(".content");
   content?.addEventListener(
@@ -2018,28 +2144,8 @@ function bindEvents(root: HTMLElement): void {
       }
     });
   });
-  root.querySelectorAll<HTMLButtonElement>("[data-install-version]").forEach((element) => {
-    element.addEventListener("click", async () => {
-      const toolId = state.selectedToolId;
-      const version = element.dataset.installVersion
-        ? decodeURIComponent(element.dataset.installVersion)
-        : undefined;
-      if (!toolId || !version) return;
-      const selected = state.toolRoots[toolId];
-      if (!selected) {
-        state.error = "请先在工具详情页上方设置默认安装目录。";
-        render();
-        return;
-      }
-      try {
-        state.pendingPlan = await backend.previewInstall(toolId, version, selected);
-        state.error = undefined;
-      } catch (error) {
-        state.error = `无法生成安装计划：${String(error)}`;
-      }
-      render();
-    });
-  });
+  bindCatalogControls(root);
+  bindCatalogResultActions(root);
   root.querySelectorAll<HTMLButtonElement>("[data-switch-path]").forEach((element) => {
     element.addEventListener("click", async () => {
       if (!state.selectedToolId || !element.dataset.switchPath) return;
