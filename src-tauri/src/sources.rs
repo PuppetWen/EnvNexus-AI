@@ -260,6 +260,37 @@ async fn retry_delay(attempt: usize) {
 }
 
 const PYTHON_RUNTIME_SOURCE: &str = "https://www.python.org/ftp/python/index-windows.json";
+const PYTHON_RELEASE_SOURCE: &str =
+    "https://www.python.org/api/v2/downloads/release/?is_published=true";
+const PYTHON_FILE_SOURCE: &str = "https://www.python.org/api/v2/downloads/release_file/?os=1";
+const PYTHON_LEGACY_SOURCE: &str = "https://www.python.org/ftp/python/src/";
+const PYTHON_EARLY_SOURCE: &str = "https://www.python.org/download/releases/";
+const PYTHON_FTP_SOURCE: &str = "https://www.python.org/ftp/python/";
+const PYTHON_HISTORY_NAME: &str = "Python.org 发布与历史归档（含预览版）";
+
+#[derive(Debug, Deserialize)]
+struct PythonRelease {
+    name: String,
+    slug: String,
+    version: u32,
+    is_published: bool,
+    pre_release: bool,
+    release_date: Option<String>,
+    resource_uri: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct PythonReleaseFile {
+    name: String,
+    os: String,
+    release: String,
+    is_source: bool,
+    url: String,
+    #[serde(default)]
+    md5_sum: String,
+    #[serde(default)]
+    sha256_sum: String,
+}
 
 #[derive(Debug, Deserialize)]
 struct PythonRuntimeIndex {
@@ -280,16 +311,394 @@ struct PythonRuntime {
 }
 
 async fn fetch_python(client: &reqwest::Client, tool_id: &str) -> AppResult<VersionCatalog> {
-    let versions = fetch_python_indexes(|url| async move {
-        checked_json::<PythonRuntimeIndex>(client, &url).await
-    })
+    // Both API collections are unpaginated bulk responses. Never hydrate hundreds
+    // of releases separately: python.org also limits anonymous API requests.
+    let (releases, files, (runtimes, (legacy, ftp, early))) = futures_util::future::try_join3(
+        checked_json::<Vec<PythonRelease>>(client, PYTHON_RELEASE_SOURCE),
+        checked_json::<Vec<PythonReleaseFile>>(client, PYTHON_FILE_SOURCE),
+        futures_util::future::try_join(
+            fetch_python_indexes(|url| async move {
+                checked_json::<PythonRuntimeIndex>(client, &url).await
+            }),
+            futures_util::future::try_join3(
+                checked_text(client, PYTHON_LEGACY_SOURCE),
+                checked_text(client, PYTHON_FTP_SOURCE),
+                checked_text(client, PYTHON_EARLY_SOURCE),
+            ),
+        ),
+    )
     .await?;
+    if releases.is_empty() || files.is_empty() || runtimes.is_empty() {
+        return Err(AppError::InvalidSource(
+            "Python 官方历史目录或完整运行时索引为空，不能作为完整版本列表".into(),
+        ));
+    }
+    let archives = format!("{legacy}\n{early}");
+    let versions = build_python_history(releases, files, runtimes, &archives, &ftp)?;
     Ok(catalog(
         tool_id,
-        "Python.org 完整开发运行时",
-        PYTHON_RUNTIME_SOURCE,
+        PYTHON_HISTORY_NAME,
+        PYTHON_RELEASE_SOURCE,
         versions,
     ))
+}
+
+fn build_python_history(
+    releases: Vec<PythonRelease>,
+    files: Vec<PythonReleaseFile>,
+    runtimes: Vec<RemoteVersion>,
+    legacy_html: &str,
+    ftp_html: &str,
+) -> AppResult<Vec<RemoteVersion>> {
+    let mut files_by_release = HashMap::<String, Vec<PythonReleaseFile>>::new();
+    for file in files {
+        if file.os.ends_with("/os/1/") && !file.is_source {
+            files_by_release
+                .entry(file.release.clone())
+                .or_default()
+                .push(file);
+        }
+    }
+    let mut versions = HashMap::<String, RemoteVersion>::new();
+    for release in releases {
+        if !release.is_published || !matches!(release.version, 2 | 3) {
+            continue;
+        }
+        let version = release
+            .name
+            .strip_prefix("Python ")
+            .and_then(normalize_python_history_version)
+            .filter(|version| version.starts_with(&format!("{}.", release.version)))
+            .ok_or_else(|| AppError::InvalidSource("Python 官方发布记录的版本号无效".into()))?;
+        if release.slug.is_empty()
+            || !release
+                .slug
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+        {
+            return Err(AppError::InvalidSource(
+                "Python 官方发布记录的说明页地址无效".into(),
+            ));
+        }
+        let mut remote = RemoteVersion {
+            install_unavailable_reason: None,
+            version: version.clone(),
+            channel: if release.pre_release {
+                "preview"
+            } else {
+                "stable"
+            }
+            .into(),
+            published_at: release.release_date,
+            architecture: "source".into(),
+            download_url: None,
+            checksum_algorithm: None,
+            checksum: None,
+            notes_url: Some(format!(
+                "https://www.python.org/downloads/release/{}/",
+                release.slug
+            )),
+        };
+        remote.install_unavailable_reason =
+            Some("此版本的官方发布记录未提供适合本机的完整 Windows x64/x86 安装包".into());
+        let release_files = files_by_release
+            .remove(&release.resource_uri)
+            .unwrap_or_default();
+        let mut candidates = Vec::new();
+        for file in release_files {
+            let Some((url, architecture)) = python_installer_file(&version, &file) else {
+                continue;
+            };
+            if !python_supported_installer_format(&version, &url) {
+                remote.install_unavailable_reason =
+                    Some("官方完整安装包采用尚未支持的旧式 EXE 格式；可通过官网归档查看".into());
+                continue;
+            }
+            let Some((algorithm, checksum)) = python_file_checksum(&file) else {
+                remote.install_unavailable_reason =
+                    Some("官方安装包未提供有效的 SHA256 或 MD5 校验值，暂不能安全安装".into());
+                continue;
+            };
+            candidates.push((architecture, url, algorithm, checksum));
+        }
+        candidates.sort_by(|left, right| {
+            let rank = |candidate: &(String, String, String, String)| {
+                (candidate.0 != "x86_64", candidate.2 != "sha256")
+            };
+            rank(left).cmp(&rank(right)).then(left.1.cmp(&right.1))
+        });
+        if let Some((architecture, url, algorithm, checksum)) = candidates.first() {
+            if candidates.iter().skip(1).any(|candidate| {
+                candidate.1 == *url && (candidate.2 != *algorithm || candidate.3 != *checksum)
+            }) {
+                return Err(AppError::InvalidSource(
+                    "Python 官方目录对同一安装包给出了冲突的校验值".into(),
+                ));
+            }
+            remote.architecture = architecture.clone();
+            remote.download_url = Some(url.clone());
+            remote.checksum_algorithm = Some(algorithm.clone());
+            remote.checksum = Some(checksum.clone());
+            remote.install_unavailable_reason = None;
+        }
+        if versions.insert(version, remote).is_some() {
+            return Err(AppError::InvalidSource(
+                "Python 官方发布目录包含重复版本".into(),
+            ));
+        }
+    }
+    if versions.is_empty() {
+        return Err(AppError::InvalidSource(
+            "Python 官方发布目录不含 Python 2/3".into(),
+        ));
+    }
+    merge_python_archives(&mut versions, legacy_html, ftp_html)?;
+    // Full PythonCore ZIPs retain their official SHA-256, and always take
+    // precedence over the traditional installer of the same release.
+    for mut runtime in runtimes {
+        if let Some(release) = versions.get(&runtime.version) {
+            runtime.published_at = release.published_at.clone();
+            runtime.notes_url = release.notes_url.clone();
+        }
+        versions.insert(runtime.version.clone(), runtime);
+    }
+    Ok(versions.into_values().collect())
+}
+
+fn normalize_python_history_version(version: &str) -> Option<String> {
+    let suffix_start = version
+        .find(|character: char| character.is_ascii_alphabetic())
+        .unwrap_or(version.len());
+    let (base, suffix) = version.split_at(suffix_start);
+    let parts = base.split('.').collect::<Vec<_>>();
+    if !(2..=3).contains(&parts.len())
+        || !matches!(parts[0], "0" | "1" | "2" | "3")
+        || parts
+            .iter()
+            .any(|part| part.is_empty() || !part.bytes().all(|byte| byte.is_ascii_digit()))
+    {
+        return None;
+    }
+    let suffix = if suffix.is_empty() {
+        String::new()
+    } else {
+        let (marker, number) = ["rc", "a", "b", "c"]
+            .into_iter()
+            .find_map(|marker| suffix.strip_prefix(marker).map(|number| (marker, number)))?;
+        if number.is_empty() || !number.bytes().all(|byte| byte.is_ascii_digit()) {
+            return None;
+        }
+        format!("{}{number}", if marker == "c" { "rc" } else { marker })
+    };
+    Some(format!(
+        "{base}{}{suffix}",
+        if parts.len() == 2 { ".0" } else { "" }
+    ))
+}
+
+fn python_release_base(version: &str) -> &str {
+    version
+        .split(|character: char| character.is_ascii_alphabetic())
+        .next()
+        .unwrap_or(version)
+}
+
+fn python_download_url(value: &str) -> Option<String> {
+    let mut url = url::Url::parse(value).ok()?;
+    if !matches!(url.scheme(), "http" | "https")
+        || url.host_str() != Some("www.python.org")
+        || url.port_or_known_default() != Some(if url.scheme() == "http" { 80 } else { 443 })
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+        || !url.path().starts_with("/ftp/python/")
+        || url.path().contains('%')
+    {
+        return None;
+    }
+    if url.scheme() == "http" {
+        url.set_port(None).ok()?;
+        url.set_scheme("https").ok()?;
+    }
+    Some(url.to_string())
+}
+
+fn python_installer_architecture(version: &str, value: &str) -> Option<&'static str> {
+    let url = url::Url::parse(value).ok()?;
+    let relative = url.path().strip_prefix("/ftp/python/")?;
+    let (directory, filename) = relative.split_once('/')?;
+    let base = python_release_base(version);
+    let short_base = base.strip_suffix(".0").unwrap_or(base);
+    if directory != base && directory != short_base {
+        return None;
+    }
+    let short_version = format!("{short_base}{}", &version[base.len()..]);
+    for spelling in [version, short_version.as_str()] {
+        for (suffix, architecture) in [
+            ("-amd64.exe", "x86_64"),
+            (".amd64.msi", "x86_64"),
+            (".exe", "x86"),
+            (".msi", "x86"),
+            ("-1.exe", "x86"),
+        ] {
+            if filename.eq_ignore_ascii_case(&format!("python-{spelling}{suffix}")) {
+                return Some(architecture);
+            }
+        }
+    }
+    None
+}
+
+fn python_installer_file(version: &str, file: &PythonReleaseFile) -> Option<(String, String)> {
+    let name = file.name.to_ascii_lowercase();
+    if !name.contains("installer")
+        || ["web", "embed", "debug", "database"]
+            .iter()
+            .any(|excluded| name.contains(excluded))
+    {
+        return None;
+    }
+    let url = python_download_url(&file.url)?;
+    let architecture = python_installer_architecture(version, &url)?;
+    Some((url, architecture.to_string()))
+}
+
+fn python_supported_installer_format(version: &str, url: &str) -> bool {
+    if url.to_ascii_lowercase().ends_with(".msi") {
+        return true;
+    }
+    let parts = python_release_base(version).split('.').collect::<Vec<_>>();
+    parts.first() == Some(&"3")
+        && parts
+            .get(1)
+            .and_then(|minor| minor.parse::<u32>().ok())
+            .is_some_and(|minor| minor >= 5)
+}
+
+fn python_file_checksum(file: &PythonReleaseFile) -> Option<(String, String)> {
+    if !file.sha256_sum.is_empty() {
+        return valid_sha256(&file.sha256_sum)
+            .then(|| ("sha256".into(), file.sha256_sum.to_ascii_lowercase()));
+    }
+    valid_hex_digest(&file.md5_sum, 32).then(|| ("md5".into(), file.md5_sum.to_ascii_lowercase()))
+}
+
+fn merge_python_archives(
+    versions: &mut HashMap<String, RemoteVersion>,
+    legacy_html: &str,
+    ftp_html: &str,
+) -> AppResult<()> {
+    let links = Regex::new(r#"(?i)\bhref\s*=\s*["']([^"']+)["']"#)
+        .map_err(|error| AppError::Message(error.to_string()))?;
+    let early_links = Regex::new(
+        r#"(?is)<a\b[^>]*\bhref\s*=\s*["']([^"']+)["'][^>]*>\s*Python\s+([^<\s]+)\s*</a>"#,
+    )
+    .map_err(|error| AppError::Message(error.to_string()))?;
+    let mut early_count = 0;
+    for capture in early_links.captures_iter(legacy_html) {
+        let Some(version) = normalize_python_history_version(&capture[2]) else {
+            continue;
+        };
+        let Some(notes) = url::Url::parse(PYTHON_EARLY_SOURCE)
+            .ok()
+            .and_then(|source| source.join(&capture[1]).ok())
+            .filter(|notes| notes.as_str().starts_with(PYTHON_EARLY_SOURCE))
+        else {
+            continue;
+        };
+        early_count += 1;
+        versions.entry(version.clone()).or_insert_with(|| {
+            python_archive_row(
+                version,
+                notes.to_string(),
+                "官方历史发布页可查，尚无可验证的 Windows 安装包元数据",
+            )
+        });
+    }
+    let mut legacy_count = 0;
+    for capture in links.captures_iter(legacy_html) {
+        let filename = &capture[1];
+        let Some(stem) = filename
+            .strip_suffix(".tar.gz")
+            .or_else(|| filename.strip_suffix(".tgz"))
+        else {
+            continue;
+        };
+        let raw = match stem {
+            "py152" => "1.5.2",
+            "pyth151" => "1.5.1",
+            stem => match stem
+                .strip_prefix("python-")
+                .or_else(|| stem.strip_prefix("python"))
+                .or_else(|| stem.strip_prefix("Python-"))
+            {
+                Some(version) => version,
+                None => continue,
+            },
+        };
+        let Some(version) = normalize_python_history_version(raw) else {
+            continue;
+        };
+        legacy_count += 1;
+        versions.entry(version.clone()).or_insert_with(|| {
+            python_archive_row(
+                version,
+                PYTHON_LEGACY_SOURCE.to_string(),
+                "官方源码归档可查，尚无可验证的 Windows 安装包元数据",
+            )
+        });
+    }
+    let mut ftp_count = 0;
+    for capture in links.captures_iter(ftp_html) {
+        let Some(directory) = capture[1].strip_suffix('/') else {
+            continue;
+        };
+        let Some(version) = normalize_python_history_version(directory) else {
+            continue;
+        };
+        ftp_count += 1;
+        // A directory also contains prereleases (e.g. 3.16.0a1). It is not
+        // evidence that the final version has been published.
+        if versions
+            .keys()
+            .any(|known| python_release_base(known) == version)
+        {
+            continue;
+        }
+        versions.entry(version.clone()).or_insert_with(|| {
+            let mut row = python_archive_row(
+                version,
+                format!("{PYTHON_FTP_SOURCE}{directory}/"),
+                "官方历史目录可查，发布数据库未提供可验证的 Windows 安装包元数据",
+            );
+            row.channel = "archive".into();
+            row
+        });
+    }
+    if legacy_count == 0 || ftp_count == 0 || early_count == 0 {
+        return Err(AppError::InvalidSource(
+            "Python 官方历史归档未返回可识别的版本目录".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn python_archive_row(version: String, notes_url: String, reason: &str) -> RemoteVersion {
+    let preview = version.bytes().any(|byte| byte.is_ascii_alphabetic());
+    let mut remote = RemoteVersion {
+        install_unavailable_reason: None,
+        version,
+        channel: if preview { "preview" } else { "stable" }.into(),
+        published_at: None,
+        architecture: "source".into(),
+        download_url: None,
+        checksum_algorithm: None,
+        checksum: None,
+        notes_url: Some(notes_url),
+    };
+    remote.install_unavailable_reason = Some(reason.into());
+    remote
 }
 
 async fn fetch_python_indexes<F, Fut>(mut fetch_index: F) -> AppResult<Vec<RemoteVersion>>
@@ -387,6 +796,7 @@ fn python_runtime_version(runtime: PythonRuntime) -> Option<RemoteVersion> {
         .filter(|hash| valid_sha256(hash))?
         .to_ascii_lowercase();
     Some(RemoteVersion {
+        install_unavailable_reason: None,
         notes_url: Some(format!(
             "https://www.python.org/downloads/release/python-{}/",
             runtime.version.replace('.', "")
@@ -418,17 +828,76 @@ fn python_stable_minor(version: &str) -> Option<&str> {
 }
 
 pub(crate) fn is_supported_python_runtime(remote: &RemoteVersion) -> bool {
-    python_stable_minor(&remote.version).is_some()
+    if remote.install_unavailable_reason.is_some()
+        || normalize_python_history_version(&remote.version).as_deref()
+            != Some(remote.version.as_str())
+        || !(remote.version.starts_with("2.") || remote.version.starts_with("3."))
+    {
+        return false;
+    }
+    let Some(download_url) = remote.download_url.as_deref() else {
+        return false;
+    };
+    let valid_sha = remote
+        .checksum_algorithm
+        .as_deref()
+        .is_some_and(|algorithm| algorithm.eq_ignore_ascii_case("sha256"))
+        && remote.checksum.as_deref().is_some_and(valid_sha256);
+    if python_stable_minor(&remote.version).is_some()
         && remote.architecture == "x86_64"
-        && remote
-            .download_url
-            .as_deref()
-            .is_some_and(|url| python_full_runtime_url(&remote.version, url))
-        && remote
+        && python_full_runtime_url(&remote.version, download_url)
+    {
+        return valid_sha;
+    }
+    (valid_sha
+        || (remote
             .checksum_algorithm
             .as_deref()
-            .is_some_and(|algorithm| algorithm.eq_ignore_ascii_case("sha256"))
-        && remote.checksum.as_deref().is_some_and(valid_sha256)
+            .is_some_and(|algorithm| algorithm.eq_ignore_ascii_case("md5"))
+            && remote
+                .checksum
+                .as_deref()
+                .is_some_and(|checksum| valid_hex_digest(checksum, 32))))
+        && python_download_url(download_url).as_deref() == Some(download_url)
+        && python_installer_architecture(&remote.version, download_url)
+            == Some(remote.architecture.as_str())
+        && python_supported_installer_format(&remote.version, download_url)
+}
+
+pub(crate) fn is_complete_python_catalog(catalog: &VersionCatalog) -> bool {
+    if catalog.tool_id != "python"
+        || catalog.source_name != PYTHON_HISTORY_NAME
+        || catalog.source_url != PYTHON_RELEASE_SOURCE
+        || catalog.versions.is_empty()
+    {
+        return false;
+    }
+    let mut seen = HashSet::new();
+    catalog.versions.iter().all(|remote| {
+        if !seen.insert(&remote.version)
+            || normalize_python_history_version(&remote.version).as_deref()
+                != Some(remote.version.as_str())
+        {
+            return false;
+        }
+        if is_supported_python_runtime(remote) {
+            return true;
+        }
+        remote.download_url.is_none()
+            && remote.checksum_algorithm.is_none()
+            && remote.checksum.is_none()
+            && remote.architecture == "source"
+            && remote
+                .install_unavailable_reason
+                .as_deref()
+                .is_some_and(|reason| !reason.trim().is_empty())
+            && remote.notes_url.as_deref().is_some_and(|notes| {
+                notes == PYTHON_LEGACY_SOURCE
+                    || notes.starts_with(PYTHON_EARLY_SOURCE)
+                    || notes.starts_with("https://www.python.org/downloads/release/")
+                    || notes.starts_with(PYTHON_FTP_SOURCE)
+            })
+    })
 }
 
 #[derive(Debug, Deserialize)]
@@ -486,6 +955,7 @@ async fn fetch_adoptium(client: &reqwest::Client, tool_id: &str) -> AppResult<Ve
                     .into_iter()
                     .next();
                 Ok::<_, AppError>(asset.map(|asset| RemoteVersion {
+                    install_unavailable_reason: None,
                     version: asset.version.openjdk_version,
                     channel: if is_lts {
                         "LTS".to_string()
@@ -541,6 +1011,7 @@ async fn fetch_go(client: &reqwest::Client, tool_id: &str) -> AppResult<VersionC
                     && file.filename.ends_with(".zip")
             })?;
             Some(RemoteVersion {
+                install_unavailable_reason: None,
                 version: release.version.trim_start_matches("go").to_string(),
                 channel: if release.stable { "stable" } else { "preview" }.to_string(),
                 published_at: None,
@@ -587,6 +1058,7 @@ async fn fetch_rust(client: &reqwest::Client, tool_id: &str) -> AppResult<Versio
     .next()
     .map(str::to_string);
     let versions = vec![RemoteVersion {
+        install_unavailable_reason: None,
         version: version.to_string(),
         channel: "stable".to_string(),
         published_at: date.map(str::to_string),
@@ -625,6 +1097,7 @@ fn build_node_versions(releases: Vec<NodeRelease>) -> Vec<RemoteVersion> {
         .map(|release| {
             let filename = format!("node-{}-win-x64.zip", release.version);
             RemoteVersion {
+                install_unavailable_reason: None,
                 version: release.version.trim_start_matches('v').to_string(),
                 channel: if release.lts.is_string() {
                     "LTS"
@@ -658,11 +1131,17 @@ pub(crate) async fn ensure_install_metadata(
     remote: &mut RemoteVersion,
 ) -> AppResult<()> {
     if tool_id == "python" {
+        if let Some(reason) = &remote.install_unavailable_reason {
+            return Err(AppError::InvalidSource(format!(
+                "Python {} 暂不能安装：{reason}",
+                remote.version
+            )));
+        }
         return if is_supported_python_runtime(remote) {
             Ok(())
         } else {
             Err(AppError::InvalidSource(
-                "Python 发行包不是已校验的官方完整开发运行时，请刷新版本列表；嵌入式包不支持完整 pip/venv 开发环境".to_string(),
+                "Python 发行包不是已校验的官方完整运行时或安装包，请刷新版本列表；嵌入式包不支持完整开发环境".to_string(),
             ))
         };
     }
@@ -727,7 +1206,11 @@ async fn fill_node_checksum(
 }
 
 fn valid_sha256(value: &str) -> bool {
-    value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+    valid_hex_digest(value, 64)
+}
+
+fn valid_hex_digest(value: &str, length: usize) -> bool {
+    value.len() == length && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 #[derive(Debug, Deserialize)]
@@ -759,6 +1242,7 @@ async fn fetch_gradle(client: &reqwest::Client, tool_id: &str) -> AppResult<Vers
                 && (release.final_.unwrap_or(false) || release.active_rc)
         })
         .map(|release| RemoteVersion {
+            install_unavailable_reason: None,
             version: release.version,
             channel: if release.active_rc { "RC" } else { "stable" }.to_string(),
             published_at: Some(release.build_time),
@@ -795,6 +1279,7 @@ async fn fetch_maven(client: &reqwest::Client, tool_id: &str) -> AppResult<Versi
                     .ok()
                     .and_then(|value| value.split_whitespace().next().map(str::to_string));
                 RemoteVersion {
+                    install_unavailable_reason: None,
                     version,
                     channel: "stable".to_string(),
                     published_at: None,
@@ -883,6 +1368,7 @@ async fn fetch_dotnet(client: &reqwest::Client, tool_id: &str) -> AppResult<Vers
                                 && file.name.ends_with("-win-x64.zip")
                         })?;
                         Some(RemoteVersion {
+                            install_unavailable_reason: None,
                             version: sdk.version,
                             channel: format!(
                                 "{} {}",
@@ -944,6 +1430,7 @@ async fn fetch_ruby(client: &reqwest::Client, tool_id: &str) -> AppResult<Versio
                 })
                 .unwrap_or((None, None));
             Some(RemoteVersion {
+                install_unavailable_reason: None,
                 version,
                 channel: if release.prerelease {
                     "preview"
@@ -996,6 +1483,7 @@ async fn fetch_php(client: &reqwest::Client, tool_id: &str) -> AppResult<Version
             let version = capture.get(2)?.as_str();
             let checksum = checksum_map.get(&filename.to_ascii_lowercase()).cloned();
             Some(RemoteVersion {
+                install_unavailable_reason: None,
                 version: version.to_string(),
                 channel: "stable NTS".to_string(),
                 published_at: None,
@@ -1061,6 +1549,7 @@ async fn fetch_github_release(
                 })
                 .unwrap_or((None, None));
             Some(RemoteVersion {
+                install_unavailable_reason: None,
                 version: release.tag_name.trim_start_matches('v').to_string(),
                 channel: if release.prerelease {
                     "preview"
@@ -1417,6 +1906,7 @@ fn parse_android_repository(xml: &str, package: AndroidPackage) -> AppResult<Vec
             .and_then(|capture| capture.get(2))
             .map(|value| value.as_str().to_string());
         versions.push(RemoteVersion {
+            install_unavailable_reason: None,
             version,
             channel: if body.contains("<preview>") || body.contains(r#"channelRef ref="channel-2""#)
             {
@@ -2039,6 +2529,349 @@ mod tests {
         );
     }
 
+    fn python_release_fixture(version: &str, preview: bool) -> PythonRelease {
+        PythonRelease {
+            name: format!("Python {version}"),
+            slug: format!("python-{}", version.replace('.', "")),
+            version: version.split('.').next().unwrap().parse().unwrap(),
+            is_published: true,
+            pre_release: preview,
+            release_date: Some("2026-10-17T00:00:00Z".into()),
+            resource_uri: format!("https://www.python.org/api/v2/downloads/release/{version}/"),
+        }
+    }
+
+    fn python_installer_fixture(version: &str, architecture: &str) -> PythonReleaseFile {
+        let suffix = if architecture == "x86_64" {
+            ".amd64.msi"
+        } else {
+            ".msi"
+        };
+        PythonReleaseFile {
+            name: format!(
+                "Windows {} MSI installer",
+                if architecture == "x86_64" {
+                    "x86-64"
+                } else {
+                    "x86"
+                }
+            ),
+            os: "https://www.python.org/api/v2/downloads/os/1/".into(),
+            release: python_release_fixture(version, false).resource_uri,
+            is_source: false,
+            url: format!(
+                "https://www.python.org/ftp/python/{}/python-{version}{suffix}",
+                python_release_base(version)
+            ),
+            md5_sum: "a".repeat(32),
+            sha256_sum: String::new(),
+        }
+    }
+
+    const PYTHON_LEGACY_FIXTURE: &str = r#"
+        <a class="reference external" href="1.6.1">Python 1.6.1</a>
+        <a class="reference external" href="1.5">Python 1.5.2</a>
+        <a href="python1.0.1.tar.gz">source</a>
+        <a href="py152.tgz">source</a>
+        <a href="python-1.5.2c1.tar.gz">source</a>
+        <a href="lib1.2.tar.gz">not an interpreter</a>
+    "#;
+    const PYTHON_FTP_FIXTURE: &str = r#"
+        <a href="2.1/">archived directory</a>
+        <a href="3.16.0/">also contains prereleases</a>
+        <a href="contrib/">not a version</a>
+    "#;
+
+    #[test]
+    fn python_history_merges_bulk_releases_previews_archives_and_prefers_full_zip() {
+        let releases = vec![
+            python_release_fixture("2.7.18", false),
+            python_release_fixture("3.10.11", false),
+            python_release_fixture("3.10.0rc1", true),
+            python_release_fixture("3.10.22", false),
+            python_release_fixture("3.15.0", false),
+            python_release_fixture("3.16.0a1", true),
+        ];
+        let mut exe = python_installer_fixture("3.10.11", "x86_64");
+        exe.name = "Windows installer (64-bit)".into();
+        exe.url = "https://www.python.org/ftp/python/3.10.11/python-3.10.11-amd64.exe".into();
+        let mut zip_replacement = python_installer_fixture("3.15.0", "x86_64");
+        zip_replacement.md5_sum = "b".repeat(32);
+        let versions = build_python_history(
+            releases,
+            vec![
+                python_installer_fixture("2.7.18", "x86_64"),
+                exe,
+                python_installer_fixture("3.10.0rc1", "x86_64"),
+                zip_replacement,
+            ],
+            vec![python_runtime_version(python_runtime_fixture("3.15.0")).unwrap()],
+            PYTHON_LEGACY_FIXTURE,
+            PYTHON_FTP_FIXTURE,
+        )
+        .unwrap();
+        let versions = versions
+            .into_iter()
+            .map(|remote| (remote.version.clone(), remote))
+            .collect::<HashMap<_, _>>();
+        assert_eq!(versions.len(), 11);
+        assert_eq!(
+            versions["2.7.18"].checksum_algorithm.as_deref(),
+            Some("md5")
+        );
+        assert_eq!(
+            versions["3.10.11"].checksum_algorithm.as_deref(),
+            Some("md5")
+        );
+        assert_eq!(versions["3.10.0rc1"].channel, "preview");
+        assert!(is_supported_python_runtime(&versions["3.10.0rc1"]));
+        assert_eq!(
+            versions["3.15.0"].checksum_algorithm.as_deref(),
+            Some("sha256")
+        );
+        assert!(
+            versions["3.15.0"]
+                .download_url
+                .as_ref()
+                .unwrap()
+                .ends_with("-amd64.zip")
+        );
+        assert_eq!(
+            versions["3.15.0"].published_at.as_deref(),
+            Some("2026-10-17T00:00:00Z")
+        );
+        assert!(versions["3.10.22"].download_url.is_none());
+        assert!(versions["3.10.22"].install_unavailable_reason.is_some());
+        assert_eq!(versions["1.5.2rc1"].channel, "preview");
+        assert!(versions["1.0.1"].download_url.is_none());
+        assert_eq!(
+            versions["1.6.1"].notes_url.as_deref(),
+            Some("https://www.python.org/download/releases/1.6.1")
+        );
+        assert_eq!(
+            versions["1.5.2"].notes_url.as_deref(),
+            Some("https://www.python.org/download/releases/1.5")
+        );
+        assert_eq!(versions["2.1.0"].channel, "archive");
+        assert!(!versions.contains_key("3.16.0"));
+        let history = catalog(
+            "python",
+            PYTHON_HISTORY_NAME,
+            PYTHON_RELEASE_SOURCE,
+            versions.into_values().collect(),
+        );
+        assert!(is_complete_python_catalog(&history));
+    }
+
+    #[test]
+    fn python_history_prefers_x64_then_checksum_and_supports_x86_when_needed() {
+        let mut x86 = python_installer_fixture("2.7.18", "x86");
+        x86.sha256_sum = "b".repeat(64);
+        let mut x86_only = python_installer_fixture("2.4.0", "x86");
+        x86_only.url = "https://www.python.org/ftp/python/2.4/python-2.4.msi".into();
+        let versions = build_python_history(
+            vec![
+                python_release_fixture("2.7.18", false),
+                python_release_fixture("2.4.0", false),
+            ],
+            vec![x86, python_installer_fixture("2.7.18", "x86_64"), x86_only],
+            vec![],
+            PYTHON_LEGACY_FIXTURE,
+            PYTHON_FTP_FIXTURE,
+        )
+        .unwrap();
+        let x64 = versions
+            .iter()
+            .find(|remote| remote.version == "2.7.18")
+            .unwrap();
+        assert_eq!(x64.architecture, "x86_64");
+        assert_eq!(x64.checksum_algorithm.as_deref(), Some("md5"));
+        let x86 = versions
+            .iter()
+            .find(|remote| remote.version == "2.4.0")
+            .unwrap();
+        assert_eq!(x86.architecture, "x86");
+        assert!(is_supported_python_runtime(x86));
+    }
+
+    #[test]
+    fn python_installer_metadata_rejects_embedding_web_wrong_versions_and_untrusted_urls() {
+        let version = "3.10.11";
+        for (name, url) in [
+            (
+                "Windows embeddable package (64-bit)",
+                "https://www.python.org/ftp/python/3.10.11/python-3.10.11-amd64.exe",
+            ),
+            (
+                "Windows x86-64 web-based installer",
+                "https://www.python.org/ftp/python/3.10.11/python-3.10.11-amd64.exe",
+            ),
+            (
+                "Windows debug installer",
+                "https://www.python.org/ftp/python/3.10.11/python-3.10.11-amd64.exe",
+            ),
+            (
+                "Windows installer (64-bit)",
+                "https://evil.invalid/ftp/python/3.10.11/python-3.10.11-amd64.exe",
+            ),
+            (
+                "Windows installer (64-bit)",
+                "https://www.python.org/ftp/python/3.10.10/python-3.10.10-amd64.exe",
+            ),
+            (
+                "Windows installer (64-bit)",
+                "https://www.python.org/ftp/python/3.10.11/python-3.10.11-embed-amd64.zip",
+            ),
+            (
+                "Windows installer (64-bit)",
+                "https://www.python.org/ftp/python/3.10.11/python-3.10.11-amd64-webinstall.exe",
+            ),
+            (
+                "Windows installer (64-bit)",
+                "http://www.python.org:8080/ftp/python/3.10.11/python-3.10.11-amd64.exe",
+            ),
+            (
+                "Windows installer (64-bit)",
+                "https://user@www.python.org/ftp/python/3.10.11/python-3.10.11-amd64.exe",
+            ),
+        ] {
+            let mut file = python_installer_fixture(version, "x86_64");
+            file.name = name.into();
+            file.url = url.into();
+            assert!(python_installer_file(version, &file).is_none(), "{url}");
+        }
+        let mut historical = python_installer_fixture("3.3.4", "x86_64");
+        historical.url = "http://www.python.org/ftp/python/3.3.4/python-3.3.4.amd64.msi".into();
+        assert_eq!(
+            python_installer_file("3.3.4", &historical).unwrap().0,
+            "https://www.python.org/ftp/python/3.3.4/python-3.3.4.amd64.msi"
+        );
+        let mut short = python_installer_fixture("3.0.0", "x86_64");
+        short.url = "https://www.python.org/ftp/python/3.0/python-3.0.amd64.msi".into();
+        assert!(python_installer_file("3.0.0", &short).is_some());
+    }
+
+    #[test]
+    fn python_history_keeps_unverified_and_old_exe_rows_with_precise_reasons() {
+        let mut unsigned = python_installer_fixture("2.7.18", "x86_64");
+        unsigned.md5_sum.clear();
+        let mut old_exe = python_installer_fixture("2.3.5", "x86");
+        old_exe.name = "Windows installer".into();
+        old_exe.url = "https://www.python.org/ftp/python/2.3.5/Python-2.3.5.exe".into();
+        let versions = build_python_history(
+            vec![
+                python_release_fixture("2.7.18", false),
+                python_release_fixture("2.3.5", false),
+            ],
+            vec![unsigned, old_exe],
+            vec![],
+            PYTHON_LEGACY_FIXTURE,
+            PYTHON_FTP_FIXTURE,
+        )
+        .unwrap();
+        assert!(versions.iter().all(|remote| remote.download_url.is_none()));
+        assert!(
+            versions
+                .iter()
+                .find(|remote| remote.version == "2.7.18")
+                .unwrap()
+                .install_unavailable_reason
+                .as_ref()
+                .unwrap()
+                .contains("校验值")
+        );
+        assert!(
+            versions
+                .iter()
+                .find(|remote| remote.version == "2.3.5")
+                .unwrap()
+                .install_unavailable_reason
+                .as_ref()
+                .unwrap()
+                .contains("旧式 EXE")
+        );
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let mut blocked = versions
+            .into_iter()
+            .find(|remote| remote.version == "2.7.18")
+            .unwrap();
+        let error = runtime
+            .block_on(ensure_install_metadata(
+                &local_client(),
+                "python",
+                &mut blocked,
+            ))
+            .unwrap_err();
+        assert!(error.to_string().contains("校验值"));
+    }
+
+    #[test]
+    fn python_history_uses_official_sha256_and_does_not_hide_malformed_hashes_with_md5() {
+        let mut file = python_installer_fixture("2.7.18", "x86_64");
+        file.sha256_sum = "B".repeat(64);
+        assert_eq!(
+            python_file_checksum(&file),
+            Some(("sha256".into(), "b".repeat(64)))
+        );
+        file.sha256_sum = "invalid official hash".into();
+        assert!(python_file_checksum(&file).is_none());
+        file.sha256_sum.clear();
+        file.md5_sum = "A".repeat(32);
+        assert_eq!(
+            python_file_checksum(&file),
+            Some(("md5".into(), "a".repeat(32)))
+        );
+        file.md5_sum = "invalid".into();
+        assert!(python_file_checksum(&file).is_none());
+    }
+
+    #[test]
+    fn python_history_rejects_conflicting_hashes_and_old_or_corrupted_cache() {
+        let first = python_installer_fixture("2.7.18", "x86_64");
+        let mut conflicting = python_installer_fixture("2.7.18", "x86_64");
+        conflicting.md5_sum = "b".repeat(32);
+        let error = build_python_history(
+            vec![python_release_fixture("2.7.18", false)],
+            vec![first, conflicting],
+            vec![],
+            PYTHON_LEGACY_FIXTURE,
+            PYTHON_FTP_FIXTURE,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("冲突"));
+        let full = python_runtime_version(python_runtime_fixture("3.15.0")).unwrap();
+        let old = catalog(
+            "python",
+            "Python.org 完整开发运行时",
+            PYTHON_RUNTIME_SOURCE,
+            vec![full.clone()],
+        );
+        assert!(!is_complete_python_catalog(&old));
+        let mut current = catalog(
+            "python",
+            PYTHON_HISTORY_NAME,
+            PYTHON_RELEASE_SOURCE,
+            vec![full],
+        );
+        assert!(is_complete_python_catalog(&current));
+        current.versions[0].download_url =
+            Some("https://evil.invalid/python-3.15.0-amd64.zip".into());
+        assert!(!is_complete_python_catalog(&current));
+        current.versions[0].download_url = None;
+        current.versions[0].install_unavailable_reason = Some("no file".into());
+        assert!(!is_complete_python_catalog(&current));
+        assert!(
+            build_python_history(
+                vec![python_release_fixture("2.7.18", false)],
+                vec![],
+                vec![],
+                "unrecognized HTML",
+                PYTHON_FTP_FIXTURE
+            )
+            .is_err()
+        );
+    }
+
     fn python_runtime_fixture(version: &str) -> PythonRuntime {
         let minor = version.split('.').nth(1).unwrap();
         PythonRuntime {
@@ -2290,7 +3123,15 @@ mod tests {
                                 .is_some_and(|url| url.starts_with("https://"))
                         }) =>
                 {
-                    println!("{tool_id}: {} Windows downloads", catalog.versions.len());
+                    let downloads = catalog
+                        .versions
+                        .iter()
+                        .filter(|version| version.download_url.is_some())
+                        .count();
+                    println!(
+                        "{tool_id}: {} versions, {downloads} Windows downloads",
+                        catalog.versions.len()
+                    );
                 }
                 Ok(catalog) if catalog.versions.is_empty() => {
                     failures.push(format!("{tool_id}: returned an empty catalog"));

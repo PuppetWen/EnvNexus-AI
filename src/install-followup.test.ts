@@ -102,7 +102,7 @@ beforeEach(() => {
   backendMock.confirmApplicationUpdateStarted.mockResolvedValue(false);
   backendMock.fetchVersions.mockResolvedValue({
     toolId: "java", sourceName: "Adoptium", fetchedAt: installPlan.createdAt, cached: false,
-    versions: [{ version: "21.0.8", channel: "LTS", architecture: "x64" }],
+    versions: [{ version: "21.0.8", channel: "LTS", architecture: "x64", downloadUrl: "https://api.adoptium.net/21.0.8.zip" }],
   });
   backendMock.previewInstall.mockResolvedValue(installPlan);
   backendMock.applyPlan.mockResolvedValue(installResult);

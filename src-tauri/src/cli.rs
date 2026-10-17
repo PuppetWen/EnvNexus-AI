@@ -8,7 +8,7 @@ use serde::Serialize;
 use crate::{
     error::{AppError, AppResult},
     installer::{Installer, OperationResult},
-    model::{EnvironmentScope, OperationPlan, PlannedAction, ToolInventory},
+    model::{EnvironmentScope, OperationPlan, PlannedAction, RemoteVersion, ToolInventory},
     plans::PlanService,
     plugins::PluginRegistry,
     scanner,
@@ -76,20 +76,36 @@ async fn run(mut args: Vec<String>) -> AppResult<()> {
                 1,
                 "用法：EnvNexus-AI.exe versions <tool> [--refresh]",
             )?);
-            let catalog = crate::catalogs::CatalogService::default()
+            let options = VersionListOptions::parse(&args[2..])?;
+            let mut catalog = crate::catalogs::CatalogService::default()
                 .load(&registry, &data_root, tool_id, refresh)
                 .await?;
+            let total = catalog.versions.len();
+            options.apply(&mut catalog.versions);
             if json {
                 print_json(&catalog)
             } else {
                 println!(
-                    "{} 官方版本（{}，查询于 {}）：",
-                    tool_id, catalog.source_name, catalog.fetched_at
+                    "{} 官方版本（{}，显示 {}/{}，查询于 {}）：",
+                    tool_id,
+                    catalog.source_name,
+                    catalog.versions.len(),
+                    total,
+                    catalog.fetched_at
                 );
                 for version in catalog.versions {
                     println!(
-                        "  {:<18} {:<10} {}",
-                        version.version, version.channel, version.architecture
+                        "  {:<18} {:<10} {:<8} {}",
+                        version.version,
+                        version.channel,
+                        version.architecture,
+                        version.install_unavailable_reason.as_deref().unwrap_or(
+                            if version.download_url.is_some() {
+                                "可安装"
+                            } else {
+                                "无 Windows 安装包"
+                            }
+                        )
                     );
                 }
                 Ok(())
@@ -611,6 +627,86 @@ fn required_arg<'a>(args: &'a [String], index: usize, usage: &str) -> AppResult<
         .ok_or_else(|| AppError::Message(usage.to_string()))
 }
 
+#[derive(Default)]
+struct VersionListOptions {
+    query: String,
+    channel: String,
+    installable_only: bool,
+    sort: String,
+}
+
+impl VersionListOptions {
+    fn parse(args: &[String]) -> AppResult<Self> {
+        let mut options = Self::default();
+        let mut index = 0;
+        while let Some(argument) = args.get(index) {
+            if argument == "--installable" {
+                options.installable_only = true;
+                index += 1;
+                continue;
+            }
+            let value = args
+                .get(index + 1)
+                .filter(|value| !value.starts_with("--"))
+                .ok_or_else(|| AppError::Message(format!("{argument} 需要参数值")))?;
+            match argument.as_str() {
+                "--query" => options.query = value.to_ascii_lowercase(),
+                "--channel"
+                    if ["all", "stable", "preview", "archive"].contains(&value.as_str()) =>
+                {
+                    options.channel.clone_from(value)
+                }
+                "--sort"
+                    if ["version-desc", "version-asc", "date-desc", "date-asc"]
+                        .contains(&value.as_str()) =>
+                {
+                    options.sort.clone_from(value)
+                }
+                _ => {
+                    return Err(AppError::Message(format!(
+                        "无效的版本筛选参数：{argument} {value}"
+                    )));
+                }
+            }
+            index += 2;
+        }
+        Ok(options)
+    }
+
+    fn apply(&self, versions: &mut Vec<RemoteVersion>) {
+        versions.retain(|remote| {
+            remote.version.to_ascii_lowercase().contains(&self.query)
+                && (self.channel.is_empty()
+                    || self.channel == "all"
+                    || remote.channel.eq_ignore_ascii_case(&self.channel))
+                && (!self.installable_only
+                    || (remote.download_url.is_some()
+                        && remote.install_unavailable_reason.is_none()))
+        });
+        versions.sort_by(|left, right| {
+            let version = crate::versioning::compare_version_strings(&left.version, &right.version);
+            match self.sort.as_str() {
+                "version-asc" => version,
+                "date-desc" | "date-asc" => match (&left.published_at, &right.published_at) {
+                    (Some(left_date), Some(right_date)) => {
+                        let date = left_date.cmp(right_date);
+                        (if self.sort == "date-asc" {
+                            date
+                        } else {
+                            date.reverse()
+                        })
+                        .then(version.reverse())
+                    }
+                    (Some(_), None) => std::cmp::Ordering::Less,
+                    (None, Some(_)) => std::cmp::Ordering::Greater,
+                    (None, None) => version.reverse(),
+                },
+                _ => version.reverse(),
+            }
+        });
+    }
+}
+
 fn remove_flag(args: &mut Vec<String>, flag: &str) -> bool {
     let present = args.iter().any(|argument| argument == flag);
     args.retain(|argument| argument != flag);
@@ -639,6 +735,8 @@ list/diagnose 默认读取桌面 App 保存的上次快照。
   EnvNexus-AI.exe command-scripts prepare [--json]
   jdk-list [--json]
   jdk-versions [--refresh] [--json]
+  python-versions [--query 3.10] [--channel all|stable|preview|archive] [--installable]
+                  [--sort version-desc|version-asc|date-desc|date-asc] [--refresh] [--json]
   jdk-root get
   jdk-root set <absolute-path>
   jdk-install <version> [--yes] [--json]
@@ -697,5 +795,53 @@ mod tests {
         ];
         assert!(remove_flag(&mut args, "--yes"));
         assert_eq!(args, ["install", "python"]);
+    }
+
+    #[test]
+    fn version_filters_keep_history_and_sort_semantically() {
+        let fixture =
+            |version: &str, channel: &str, date: Option<&str>, unavailable: bool| RemoteVersion {
+                version: version.into(),
+                channel: channel.into(),
+                published_at: date.map(String::from),
+                architecture: "x86_64".into(),
+                download_url: (!unavailable).then(|| "https://www.python.org/example.msi".into()),
+                checksum_algorithm: None,
+                checksum: None,
+                notes_url: None,
+                install_unavailable_reason: unavailable.then(|| "仅源码".into()),
+            };
+        let history = vec![
+            fixture("3.10.11", "stable", Some("2023-04-05"), false),
+            fixture("2.7.18", "stable", Some("2020-04-20"), false),
+            fixture("3.10.22", "stable", Some("2026-10-01"), true),
+            fixture("3.15.0rc1", "preview", Some("2026-08-01"), false),
+            fixture("1.6", "archive", None, true),
+        ];
+        let mut versions = history.clone();
+        VersionListOptions::default().apply(&mut versions);
+        assert_eq!(versions.len(), 5);
+        assert_eq!(versions.last().unwrap().version, "1.6");
+        let mut versions = history.clone();
+        let args = ["--query", "3.10", "--installable", "--sort", "version-asc"].map(String::from);
+        VersionListOptions::parse(&args)
+            .unwrap()
+            .apply(&mut versions);
+        assert_eq!(
+            versions
+                .iter()
+                .map(|row| row.version.as_str())
+                .collect::<Vec<_>>(),
+            ["3.10.11"]
+        );
+        let mut versions = history;
+        let args = ["--channel", "stable", "--sort", "date-asc"].map(String::from);
+        VersionListOptions::parse(&args)
+            .unwrap()
+            .apply(&mut versions);
+        assert_eq!(versions.first().unwrap().version, "2.7.18");
+        assert_eq!(versions.last().unwrap().version, "3.10.22");
+        assert!(VersionListOptions::parse(&["--sort".into(), "bad".into()]).is_err());
+        assert!(VersionListOptions::parse(&["--query".into()]).is_err());
     }
 }

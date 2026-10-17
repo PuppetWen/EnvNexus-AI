@@ -366,6 +366,7 @@ try {
             # The command engine returns versions in numeric descending order.
             # Stable includes LTS/current and excludes prerelease channel/version labels.
             $taskRemote = @($taskCatalog.versions | Where-Object {
+                $_.downloadUrl -and -not $_.installUnavailableReason -and $_.channel -ne 'archive' -and
                 $_.channel -notmatch '(?i)preview|alpha|beta|nightly|snapshot|early.?access|(^|[\s._-])rc([\s._-]|\d|$)' -and
                 $_.version -notmatch '(?i)(?:\d|[._-])(?:a|alpha|b|beta|rc|pre|preview|dev|snapshot|nightly|ea)(?:\d|[._-]|$)'
             }) | Select-Object -First 1

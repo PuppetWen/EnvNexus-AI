@@ -150,6 +150,9 @@ impl PlanService {
         remote: &RemoteVersion,
         root: PathBuf,
     ) -> AppResult<OperationPlan> {
+        if let Some(reason) = &remote.install_unavailable_reason {
+            return Err(AppError::InvalidSource(reason.clone()));
+        }
         let root = crate::paths::canonicalize_simplified(&root).map_err(|error| {
             AppError::Message(format!("安装根目录无法访问（{}）：{error}", root.display()))
         })?;
@@ -184,6 +187,7 @@ impl PlanService {
                 "该官方源没有在 API 中提供可用校验值；执行前应单独评估供应链风险。".to_string(),
             );
         }
+        append_python_release_warnings(descriptor.id, remote, &mut warnings);
         if root
             .to_string_lossy()
             .to_ascii_lowercase()
@@ -352,6 +356,9 @@ impl PlanService {
         root: PathBuf,
         destination: PathBuf,
     ) -> AppResult<OperationPlan> {
+        if let Some(reason) = &remote.install_unavailable_reason {
+            return Err(AppError::InvalidSource(reason.clone()));
+        }
         let root = crate::paths::canonicalize_simplified(&root)?;
         let destination = crate::paths::canonicalize_simplified(&destination)?;
         if !destination.starts_with(&root)
@@ -378,6 +385,7 @@ impl PlanService {
         if remote.checksum.is_none() {
             warnings.push("官方清单未提供校验值，修复计划保留供应链警告。".to_string());
         }
+        append_python_release_warnings(descriptor.id, remote, &mut warnings);
         let plan = OperationPlan {
             id: id.clone(),
             tool_id: descriptor.id.to_string(),
@@ -877,6 +885,32 @@ impl PlanService {
         let bytes = serde_json::to_vec_pretty(&backup)?;
         atomic_write(&path, &bytes)?;
         Ok(path)
+    }
+}
+
+fn append_python_release_warnings(
+    tool_id: &str,
+    remote: &RemoteVersion,
+    warnings: &mut Vec<String>,
+) {
+    if tool_id != "python" {
+        return;
+    }
+    if remote
+        .checksum_algorithm
+        .as_deref()
+        .is_some_and(|algorithm| algorithm.eq_ignore_ascii_case("md5"))
+    {
+        warnings.push("该历史发行包使用 Python 官方提供的 MD5 校验值；它不等同于现代 SHA-256 或发行签名验证。".to_string());
+    }
+    if remote.channel == "preview" {
+        warnings.push("所选版本是官方预览版。".to_string());
+    }
+    if !crate::python_features::has_bundled_pip(&remote.version) {
+        warnings.push("此历史版本未内置 ensurepip/pip；将安装该版本的官方解释器和随包组件，不自动下载不兼容的最新版 pip。".to_string());
+    }
+    if !crate::python_features::has_builtin_venv(&remote.version) {
+        warnings.push("此历史版本没有内置 venv 模块；不将不存在的功能当作安装失败。".to_string());
     }
 }
 
@@ -1783,6 +1817,7 @@ mod tests {
             checksum_algorithm: None,
             checksum: None,
             notes_url: None,
+            install_unavailable_reason: None,
         };
         let mut plan = PlanService::new(temp.path().join("data"))
             .preview_install(descriptor.descriptor(), &remote, temp.path().to_path_buf())

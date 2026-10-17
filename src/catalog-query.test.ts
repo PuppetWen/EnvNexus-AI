@@ -38,12 +38,4 @@ describe("official version catalog queries", () => {
     );
   });
 
-  it("renders every returned version inside a themed internal scroll area", () => {
-    expect(appSource).toMatch(/catalog\.versions\s*\.map\(/);
-    expect(appSource).toContain("catalog.versions.length");
-    expect(styles).toMatch(
-      /\.tool-detail-section \.remote-stack\s*\{[^}]*overflow-y: auto;[^}]*scrollbar-gutter: stable;/s,
-    );
-  });
-
 });

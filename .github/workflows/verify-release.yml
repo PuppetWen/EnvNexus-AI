@@ -156,6 +156,13 @@ jobs:
           & ./scripts/Smoke-Python.ps1 *>&1 | Tee-Object -FilePath artifacts/ci-logs/python-smoke.log
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+      - name: Verify historical Python catalogs, filters, and MSI/EXE installations
+        if: github.event_name != 'pull_request'
+        shell: pwsh
+        run: |
+          & ./scripts/Smoke-Python-History.ps1 *>&1 | Tee-Object -FilePath artifacts/ci-logs/python-history-smoke.log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
       - name: Check command mode and generated scripts using an isolated data directory
         shell: pwsh
         run: |

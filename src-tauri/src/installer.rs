@@ -12,6 +12,7 @@ use std::{
 
 use chrono::Utc;
 use futures_util::StreamExt;
+use md5::Md5;
 use reqwest::{StatusCode, header};
 use serde::{Deserialize, Serialize};
 use sha1::Sha1;
@@ -28,9 +29,13 @@ use crate::{
     error::{AppError, AppResult},
     model::{InstallRequest, PlannedAction},
     process::{output_text, run_capture, run_capture_with_env},
+    python_features::{has_builtin_venv, has_bundled_pip},
 };
 
 const DOWNLOAD_MAX_ATTEMPTS: u32 = 8;
+
+#[path = "python_legacy.rs"]
+mod python_legacy;
 const DOWNLOAD_BUFFER_BYTES: usize = 256 * 1024;
 const PARALLEL_DOWNLOAD_MIN_BYTES: u64 = 8 * 1024 * 1024;
 const PARALLEL_DOWNLOAD_STREAMS: u64 = 4;
@@ -1216,6 +1221,17 @@ fn hash_file(path: &Path, algorithm: &str) -> AppResult<String> {
     let mut reader = BufReader::new(File::open(path)?);
     let mut buffer = vec![0u8; 1024 * 1024];
     match algorithm.to_ascii_lowercase().as_str() {
+        "md5" => {
+            let mut hasher = Md5::new();
+            loop {
+                let count = reader.read(&mut buffer)?;
+                if count == 0 {
+                    break;
+                }
+                hasher.update(&buffer[..count]);
+            }
+            Ok(hex::encode(hasher.finalize()))
+        }
         "sha256" => {
             let mut hasher = Sha256::new();
             loop {
@@ -1278,21 +1294,24 @@ fn prepare_staging(
         .and_then(|name| name.to_str())
         .unwrap_or_default()
         .to_ascii_lowercase();
-    let extraction = if tool_id == "rust" && filename.ends_with(".exe") {
-        install_rust(tool_id, version, archive, &staging)
-    } else if filename.ends_with(".zip") {
-        extract_zip(archive, &staging)
-    } else if filename.ends_with(".tar.gz") || filename.ends_with(".tgz") {
-        extract_tar_gz(archive, &staging)
-    } else if tool_id == "git" && filename.ends_with(".7z.exe") {
-        extract_git_sfx(archive, &staging)
-    } else if filename.ends_with(".7z") {
-        extract_7z(archive, &staging)
-    } else {
-        Err(AppError::InvalidSource(format!(
-            "不支持的发行包格式：{filename}"
-        )))
-    };
+    let extraction =
+        if tool_id == "python" && (filename.ends_with(".exe") || filename.ends_with(".msi")) {
+            python_legacy::extract(archive, &staging)
+        } else if tool_id == "rust" && filename.ends_with(".exe") {
+            install_rust(tool_id, version, archive, &staging)
+        } else if filename.ends_with(".zip") {
+            extract_zip(archive, &staging)
+        } else if filename.ends_with(".tar.gz") || filename.ends_with(".tgz") {
+            extract_tar_gz(archive, &staging)
+        } else if tool_id == "git" && filename.ends_with(".7z.exe") {
+            extract_git_sfx(archive, &staging)
+        } else if filename.ends_with(".7z") {
+            extract_7z(archive, &staging)
+        } else {
+            Err(AppError::InvalidSource(format!(
+                "不支持的发行包格式：{filename}"
+            )))
+        };
     if let Err(error) = extraction {
         safe_remove_directory(&staging, root);
         return Err(error);
@@ -1486,7 +1505,7 @@ async fn initialize_and_verify_installation(
         operation_id,
         "verify",
         if request.tool_id == "python" {
-            "正在最终目录离线配置 pip 并验证 Python、venv 与开发组件"
+            "正在最终目录验证 Python 与该历史版本自带的开发能力"
         } else {
             "正在验证安装后的版本命令"
         },
@@ -1682,23 +1701,34 @@ fn verify_python_pip_launcher(
     environment: &[(&str, &std::ffi::OsStr)],
     timeout: Duration,
 ) -> AppResult<()> {
-    if !program.is_file() {
-        return Err(AppError::Message(format!(
-            "Python 开发环境缺少 pip 启动器：{}",
-            program.display()
-        )));
-    }
-    let output = run_capture_with_env(
+    verify_python_pip_launcher_args(
         program,
+        root,
         &[
             "--isolated",
             "--disable-pip-version-check",
             "--no-cache-dir",
             "--version",
         ],
-        timeout,
         environment,
-    )?;
+        timeout,
+    )
+}
+
+fn verify_python_pip_launcher_args(
+    program: &Path,
+    root: &Path,
+    args: &[&str],
+    environment: &[(&str, &std::ffi::OsStr)],
+    timeout: Duration,
+) -> AppResult<()> {
+    if !program.is_file() {
+        return Err(AppError::Message(format!(
+            "Python 开发环境缺少 pip 启动器：{}",
+            program.display()
+        )));
+    }
+    let output = run_capture_with_env(program, args, timeout, environment)?;
     verify_probe_output(program, &output)?;
     let expected = format!(
         "{}\\",
@@ -1720,7 +1750,217 @@ fn verify_python_pip_launcher(
     Ok(())
 }
 
+fn legacy_python_flags(version: &str) -> Vec<&'static str> {
+    // -s was introduced with the user site directory in Python 2.6. Python 2.4
+    // and 2.5 have no user site to suppress and do not understand this switch.
+    if version.starts_with("2.4") || version.starts_with("2.5") {
+        vec!["-E"]
+    } else {
+        vec!["-E", "-s"]
+    }
+}
+
+fn legacy_python_runtime_files(root: &Path, version: &str) -> AppResult<Vec<PathBuf>> {
+    for entry in fs::read_dir(root)? {
+        let name = entry?.file_name().to_string_lossy().to_ascii_lowercase();
+        if name.starts_with("python") && name.ends_with("._pth") {
+            return Err(AppError::InvalidSource(
+                "历史完整安装不接受嵌入式路径配置".to_string(),
+            ));
+        }
+    }
+    let tkinter = if version.starts_with("2.") {
+        "Lib/lib-tk/Tkinter.py"
+    } else {
+        "Lib/tkinter/__init__.py"
+    };
+    let mut required = vec![
+        "python.exe",
+        "Lib/os.py",
+        "include/Python.h",
+        "Lib/idlelib/__init__.py",
+        tkinter,
+    ];
+    if has_builtin_venv(version) {
+        required.push("Lib/venv/__init__.py");
+    }
+    if has_bundled_pip(version) {
+        required.push("Lib/ensurepip/__init__.py");
+    }
+    for relative in required {
+        if !root.join(relative).is_file() {
+            return Err(AppError::InvalidSource(format!(
+                "历史 Python 完整运行时缺少必要文件：{relative}"
+            )));
+        }
+    }
+    if !fs::read_dir(root.join("libs"))?.flatten().any(|entry| {
+        entry
+            .path()
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("lib"))
+    }) {
+        return Err(AppError::InvalidSource(
+            "历史 Python 完整运行时缺少开发导入库".to_string(),
+        ));
+    }
+    if !has_bundled_pip(version) {
+        return Ok(Vec::new());
+    }
+    let mut wheels = Vec::new();
+    let mut pip_count = 0;
+    let mut setuptools_count = 0;
+    for entry in fs::read_dir(root.join("Lib/ensurepip/_bundled"))? {
+        let entry = entry?;
+        let name = entry.file_name().to_string_lossy().to_ascii_lowercase();
+        if entry.file_type()?.is_file() && name.ends_with(".whl") {
+            if name.starts_with("pip-") {
+                pip_count += 1;
+                wheels.push(entry.path());
+            } else if name.starts_with("setuptools-") {
+                setuptools_count += 1;
+                wheels.push(entry.path());
+            }
+        }
+    }
+    if pip_count != 1
+        || setuptools_count > 1
+        || (version.starts_with("2.") && setuptools_count != 1)
+    {
+        return Err(AppError::InvalidSource(
+            "历史 Python 的内置 pip/setuptools wheel 缺失或不唯一，已拒绝联网补装".to_string(),
+        ));
+    }
+    wheels.sort();
+    Ok(wheels)
+}
+
+fn run_legacy_python_module(
+    python: &Path,
+    flags: &[&str],
+    module: &str,
+    args: &[&str],
+    environment: &[(&str, &std::ffi::OsStr)],
+    timeout: Duration,
+) -> AppResult<()> {
+    let mut command = flags.to_vec();
+    command.extend_from_slice(&[
+        "-c", "import os,runpy,sys; os.environ.pop('ENSUREPIP_OPTIONS',None); module=sys.argv.pop(1); runpy.run_module(module,run_name='__main__',alter_sys=True)", module,
+    ]);
+    command.extend_from_slice(args);
+    run_python_setup_command(python, &command, environment, timeout)
+}
+
+fn initialize_legacy_python_runtime(request: &InstallRequest) -> AppResult<()> {
+    let wheels = legacy_python_runtime_files(&request.destination, &request.version)?;
+    let workspace = PythonSetupWorkspace::create(request)?;
+    let result = (|| {
+        let environment = python_setup_environment(
+            request,
+            &workspace.directory,
+            current_process_environment()?,
+        );
+        let environment = environment
+            .iter()
+            .map(|(key, value)| (key.as_str(), value.as_os_str()))
+            .collect::<Vec<_>>();
+        let python = request.destination.join("python.exe");
+        let flags = legacy_python_flags(&request.version);
+        let timeout = Duration::from_secs(120);
+        let root = request.destination.to_string_lossy();
+        let tkinter = if request.version.starts_with("2.") {
+            "Tkinter"
+        } else {
+            "tkinter"
+        };
+        let mut probe = flags.clone();
+        probe.extend_from_slice(&[
+            "-c", "import os,sys,platform; root=os.path.normcase(os.path.realpath(sys.argv[1])); assert os.path.normcase(os.path.realpath(sys.prefix))==root; assert platform.python_version()==sys.argv[2]; __import__(sys.argv[3]); __import__('idlelib')",
+            &root, &request.version, tkinter,
+        ]);
+        run_python_setup_command(&python, &probe, &environment, timeout)?;
+        if has_bundled_pip(&request.version) {
+            run_legacy_python_module(
+                &python,
+                &flags,
+                "ensurepip",
+                &["--upgrade", "--default-pip"],
+                &environment,
+                timeout,
+            )?;
+            // Recreate launchers only at their final path. The bundled wheels
+            // are the only inputs; never upgrade old Python to today's pip.
+            let wheel_paths = wheels
+                .iter()
+                .map(|path| path.to_string_lossy().into_owned())
+                .collect::<Vec<_>>();
+            let mut install = vec!["install", "--no-index", "--force-reinstall", "--no-deps"];
+            install.extend(wheel_paths.iter().map(String::as_str));
+            run_legacy_python_module(&python, &flags, "pip", &install, &environment, timeout)?;
+            verify_python_pip_launcher_args(
+                &request.destination.join("Scripts/pip.exe"),
+                &request.destination,
+                &["--version"],
+                &environment,
+                timeout,
+            )?;
+            run_legacy_python_module(
+                &python,
+                &flags,
+                "pip",
+                &["--version"],
+                &environment,
+                timeout,
+            )?;
+        }
+        if has_builtin_venv(&request.version) {
+            let venv = workspace.directory.join("venv");
+            let venv_text = venv.to_string_lossy();
+            // Python 3.3 has venv but not --copies/ensurepip. Default creation
+            // copies on Windows and works across the historical venv versions.
+            run_legacy_python_module(
+                &python,
+                &flags,
+                "venv",
+                &[&venv_text],
+                &environment,
+                timeout,
+            )?;
+            let mut probe = flags.clone();
+            probe.extend_from_slice(&[
+                "-c", "import os,sys; assert os.path.normcase(os.path.realpath(sys.prefix))==os.path.normcase(os.path.realpath(sys.argv[1])); assert os.path.normcase(os.path.realpath(sys.base_prefix))==os.path.normcase(os.path.realpath(sys.argv[2])); assert sys.prefix!=sys.base_prefix",
+                &venv_text,&root,
+            ]);
+            run_python_setup_command(
+                &venv.join("Scripts/python.exe"),
+                &probe,
+                &environment,
+                timeout,
+            )?;
+            if has_bundled_pip(&request.version) {
+                verify_python_pip_launcher_args(
+                    &venv.join("Scripts/pip.exe"),
+                    &venv,
+                    &["--version"],
+                    &environment,
+                    timeout,
+                )?;
+            }
+        }
+        Ok(())
+    })();
+    match (result, workspace.cleanup()) {
+        (Err(error), _) | (Ok(()), Err(error)) => Err(error),
+        (Ok(()), Ok(())) => Ok(()),
+    }
+}
+
 fn initialize_python_runtime(request: &InstallRequest) -> AppResult<()> {
+    let filename = download_filename(&request.download_url)?.to_ascii_lowercase();
+    if filename.ends_with(".exe") || filename.ends_with(".msi") {
+        return initialize_legacy_python_runtime(request);
+    }
     // Console launchers and pyvenv.cfg contain absolute interpreter paths. Only
     // initialize them after commit_staging has moved Python to its final path.
     let wheel = python_bundled_pip_wheel(&request.destination)?;
@@ -1773,7 +2013,7 @@ fn initialize_python_runtime(request: &InstallRequest) -> AppResult<()> {
             &[
                 "-I",
                 "-c",
-                "import pathlib,pip,sys,venv,ensurepip,tkinter,idlelib; root=pathlib.Path(sys.argv[1]).resolve(); assert pathlib.Path(sys.prefix).resolve()==root; assert root in pathlib.Path(pip.__file__).resolve().parents; assert '.'.join(map(str,sys.version_info[:3]))==sys.argv[2]",
+                "import pathlib,pip,sys,venv,ensurepip,tkinter,idlelib,platform; root=pathlib.Path(sys.argv[1]).resolve(); assert pathlib.Path(sys.prefix).resolve()==root; assert root in pathlib.Path(pip.__file__).resolve().parents; assert platform.python_version()==sys.argv[2]",
                 &root_text,
                 &request.version,
             ],
@@ -2323,6 +2563,73 @@ mod tests {
                 .to_string()
                 .contains("嵌入式")
         );
+    }
+
+    fn historical_python_fixture(root: &Path, version: &str) {
+        let tkinter = if version.starts_with("2.") {
+            "Lib/lib-tk/Tkinter.py"
+        } else {
+            "Lib/tkinter/__init__.py"
+        };
+        let mut files = vec![
+            "python.exe",
+            "Lib/os.py",
+            "include/Python.h",
+            "Lib/idlelib/__init__.py",
+            "libs/python.lib",
+            tkinter,
+        ];
+        if has_builtin_venv(version) {
+            files.push("Lib/venv/__init__.py");
+        }
+        if has_bundled_pip(version) {
+            files.extend([
+                "Lib/ensurepip/__init__.py",
+                "Lib/ensurepip/_bundled/pip-19.2.3-py2.py3-none-any.whl",
+                "Lib/ensurepip/_bundled/setuptools-41.2.0-py2.py3-none-any.whl",
+            ]);
+        }
+        for file in files {
+            let file = root.join(file);
+            fs::create_dir_all(file.parent().unwrap()).unwrap();
+            fs::write(file, b"fixture").unwrap();
+        }
+    }
+
+    #[test]
+    fn legacy_python_preflight_follows_real_pip_venv_and_tkinter_capabilities() {
+        for version in [
+            "2.4.4", "2.7.8", "2.7.18", "3.0.1", "3.3.5", "3.4.4", "3.10.11",
+        ] {
+            let root = tempdir().unwrap();
+            historical_python_fixture(root.path(), version);
+            let wheels = legacy_python_runtime_files(root.path(), version).unwrap();
+            assert_eq!(
+                wheels.len(),
+                if has_bundled_pip(version) { 2 } else { 0 },
+                "{version}"
+            );
+            if version.starts_with("2.") {
+                assert!(!root.path().join("Lib/venv").exists());
+            }
+        }
+        assert_eq!(legacy_python_flags("2.4.4"), ["-E"]);
+        assert_eq!(legacy_python_flags("2.7.18"), ["-E", "-s"]);
+    }
+
+    #[test]
+    fn python_two_requires_both_official_bundled_wheels_and_rejects_embed() {
+        let root = tempdir().unwrap();
+        historical_python_fixture(root.path(), "2.7.18");
+        fs::remove_file(
+            root.path()
+                .join("Lib/ensurepip/_bundled/setuptools-41.2.0-py2.py3-none-any.whl"),
+        )
+        .unwrap();
+        assert!(legacy_python_runtime_files(root.path(), "2.7.18").is_err());
+        historical_python_fixture(root.path(), "2.7.18");
+        fs::write(root.path().join("python27._pth"), b"python27.zip\n.").unwrap();
+        assert!(legacy_python_runtime_files(root.path(), "2.7.18").is_err());
     }
 
     #[test]
@@ -3002,7 +3309,11 @@ mod tests {
                 .versions
                 .into_iter()
                 .find(|version| {
-                    version.download_url.is_some()
+                    version.channel == "stable"
+                        && version
+                            .download_url
+                            .as_deref()
+                            .is_some_and(|url| url.ends_with(".zip"))
                         && version.checksum_algorithm.as_deref() == Some("sha256")
                         && version.checksum.is_some()
                 })

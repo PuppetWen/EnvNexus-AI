@@ -172,6 +172,9 @@ impl CatalogService {
             .ok_or_else(|| {
                 AppError::Message("所选版本不在官方版本清单中，请刷新版本列表".to_string())
             })?;
+        if let Some(reason) = &snapshot.install_unavailable_reason {
+            return Err(AppError::InvalidSource(reason.clone()));
+        }
         // Metadata hydration and background refresh share the same write gate.
         let gate = self.query_gate(root, tool_id)?;
         let _guard = gate.lock().await;
@@ -250,6 +253,7 @@ mod tests {
                 checksum_algorithm: None,
                 checksum: None,
                 notes_url: None,
+                install_unavailable_reason: None,
             }],
         }
     }

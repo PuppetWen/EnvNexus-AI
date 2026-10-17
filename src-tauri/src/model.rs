@@ -112,6 +112,8 @@ pub struct RemoteVersion {
     pub checksum_algorithm: Option<String>,
     pub checksum: Option<String>,
     pub notes_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub install_unavailable_reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
