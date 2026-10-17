@@ -35,7 +35,8 @@ $taskCommandIndex = 0
 $taskEnvironmentNames = @(
     'ENVNEXUS_AI_DATA_ROOT','TEMP','TMP','PIP_CACHE_DIR','PIP_CONFIG_FILE','PIP_NO_INDEX',
     'PIP_DISABLE_PIP_VERSION_CHECK','PYTHONUSERBASE','PYTHONPYCACHEPREFIX',
-    'PYTHONHOME','PYTHONPATH','PYTHONSTARTUP','XDG_CACHE_HOME','UV_CACHE_DIR'
+    'PYTHONHOME','PYTHONPATH','PYTHONSTARTUP','XDG_CACHE_HOME','UV_CACHE_DIR',
+    'PIP_TARGET','PIP_PREFIX','PIP_ROOT','PIP_USER','PIP_LOG','HOME','USERPROFILE','PYTHONIOENCODING'
 )
 $taskPreviousEnvironment = @{}
 foreach ($taskName in $taskEnvironmentNames) {
@@ -107,7 +108,22 @@ function Get-UserEnvironmentFingerprint {
 }
 
 function Set-TemporaryEnvironment([string]$Directory) {
-    foreach ($taskChild in @('tmp','pip-cache','user-base','pycache','xdg','uv')) { New-RunDirectory (Join-Path $Directory $taskChild) }
+    foreach ($taskChild in @('tmp','pip-cache','user-base','pycache','xdg','uv','sentinels','fake-home','clean-home','untrusted','trusted')) { New-RunDirectory (Join-Path $Directory $taskChild) }
+    $script:taskUntrustedDirectory = Assert-RunChildPath (Join-Path $Directory 'untrusted')
+    $script:taskTrustedDirectory = Assert-RunChildPath (Join-Path $Directory 'trusted')
+    $script:taskCleanHome = Assert-RunChildPath (Join-Path $Directory 'clean-home')
+    $taskSentinels = Assert-RunChildPath (Join-Path $Directory 'sentinels')
+    $taskFakeHome = Assert-RunChildPath (Join-Path $Directory 'fake-home')
+    $taskDistutils = "[install]`ninstall_lib=$taskSentinels/distutils-lib`ninstall_scripts=$taskSentinels/distutils-scripts`nroot=$taskSentinels/distutils-root`n"
+    foreach ($taskConfig in @((Join-Path $taskFakeHome 'pydistutils.cfg'),(Join-Path $script:taskUntrustedDirectory 'setup.cfg'))) {
+        [IO.File]::WriteAllText((Assert-RunChildPath $taskConfig), $taskDistutils, [Text.UTF8Encoding]::new($false))
+    }
+    foreach ($taskModule in @('platform','runpy','pip')) {
+        # Plain Python 2.4 syntax; relative sentinel paths remain ASCII even
+        # when the interpreter itself is installed under a Unicode root.
+        $taskSource = "import os`nopen(os.path.join(os.path.dirname(os.path.dirname(__file__)), 'sentinels', 'module-$taskModule.txt'), 'w').write('untrusted module imported')`nraise RuntimeError('untrusted smoke module imported')`n"
+        [IO.File]::WriteAllText((Assert-RunChildPath (Join-Path $script:taskUntrustedDirectory "$taskModule.py")), $taskSource, [Text.UTF8Encoding]::new($false))
+    }
     $taskPipConfig = Assert-RunChildPath (Join-Path $Directory 'pip.ini')
     [IO.File]::WriteAllText($taskPipConfig, '', [Text.UTF8Encoding]::new($false))
     $taskSettings = [ordered]@{
@@ -116,13 +132,34 @@ function Set-TemporaryEnvironment([string]$Directory) {
         PIP_NO_INDEX='1'; PIP_DISABLE_PIP_VERSION_CHECK='1'; PYTHONUSERBASE=(Join-Path $Directory 'user-base')
         PYTHONPYCACHEPREFIX=(Join-Path $Directory 'pycache'); PYTHONHOME=$null; PYTHONPATH=$null; PYTHONSTARTUP=$null
         XDG_CACHE_HOME=(Join-Path $Directory 'xdg'); UV_CACHE_DIR=(Join-Path $Directory 'uv')
+        HOME=$taskFakeHome; USERPROFILE=$taskFakeHome; PYTHONIOENCODING='utf-8'
+        PIP_TARGET=(Join-Path $taskSentinels 'pip-target'); PIP_PREFIX=(Join-Path $taskSentinels 'pip-prefix')
+        PIP_ROOT=(Join-Path $taskSentinels 'pip-root'); PIP_USER=(Join-Path $taskSentinels 'pip-user'); PIP_LOG=(Join-Path $taskSentinels 'pip.log')
     }
     foreach ($taskName in $taskSettings.Keys) { [Environment]::SetEnvironmentVariable($taskName, $taskSettings[$taskName], 'Process') }
 }
 
+function Assert-NoSetupPollution([string]$Directory) {
+    $taskSentinels = Assert-RunChildPath (Join-Path $Directory 'sentinels')
+    $taskUnexpected = @(Get-ChildItem -LiteralPath $taskSentinels -Force -Recurse -ErrorAction Stop)
+    if ($taskUnexpected.Count) { throw "Python setup used an untrusted module or an inherited installation target: $($taskUnexpected.FullName -join ', ')" }
+    $taskUntrusted = Assert-RunChildPath (Join-Path $Directory 'untrusted')
+    $taskFakeHome = Assert-RunChildPath (Join-Path $Directory 'fake-home')
+    foreach ($taskItem in @(Get-ChildItem -LiteralPath $taskUntrusted -Force -Recurse) + @(Get-ChildItem -LiteralPath $taskFakeHome -Force -Recurse)) {
+        $taskAllowed = if ($taskItem.DirectoryName -ieq $taskUntrusted) { @('platform.py','runpy.py','pip.py','setup.cfg') } elseif ($taskItem.DirectoryName -ieq $taskFakeHome) { @('pydistutils.cfg') } else { @() }
+        if ($taskItem.PSIsContainer -or $taskItem.Name -notin $taskAllowed) { throw "Python setup wrote to an untrusted working directory or fake user home: $($taskItem.FullName)" }
+    }
+    Save-JsonReport ([ordered]@{
+        status='passed'; sentinelCount=0; untrustedCwd=$taskUntrusted; fakeHome=$taskFakeHome
+        inheritedVariables=@('PIP_TARGET','PIP_PREFIX','PIP_ROOT','PIP_USER','PIP_LOG')
+        untrustedModules=@('platform','runpy','pip'); distutilsConfigurations=@('pydistutils.cfg','setup.cfg')
+    }) (Join-Path $taskCommandReport 'setup-isolation.json')
+}
+
 function Invoke-CheckedCommand([string]$Program, [string[]]$CommandArguments, [string]$Label) {
     $taskProgram = Get-NormalizedAbsolutePath $Program
-    if ($taskProgram -ine (Get-NormalizedAbsolutePath $Executable)) {
+    $taskIsApp = $taskProgram -ieq (Get-NormalizedAbsolutePath $Executable)
+    if (-not $taskIsApp) {
         $null = Assert-RunChildPath $taskProgram
         if ([IO.Path]::GetFileName($taskProgram) -notin @('python.exe','pip.exe')) { throw 'Only isolated Python interpreters and pip launchers may be executed.' }
     }
@@ -130,11 +167,36 @@ function Invoke-CheckedCommand([string]$Program, [string[]]$CommandArguments, [s
     $taskLog = Join-Path $taskCommandReport ('{0:D2}-{1}.json' -f $script:taskCommandIndex,$Label)
     $taskWatch = [Diagnostics.Stopwatch]::StartNew()
     $taskExit = -1
-    try { $taskOutput = & $taskProgram @CommandArguments 2>&1; $taskExit = $LASTEXITCODE }
+    $taskChildEnvironment = @{}
+    $taskEncoding = [Console]::OutputEncoding
+    $taskLocationPushed = $false
+    try {
+        # Only the application is exposed to the deliberate setup pollution.
+        # Independent runtime checks use a clean home and trusted working
+        # directory so their own venv creation cannot consume these traps.
+        if (-not $taskIsApp) {
+            foreach ($taskName in @('PIP_TARGET','PIP_PREFIX','PIP_ROOT','PIP_USER','PIP_LOG','HOME','USERPROFILE')) {
+                $taskChildEnvironment[$taskName] = [Environment]::GetEnvironmentVariable($taskName, 'Process')
+                $taskValue = if ($taskName -in @('HOME','USERPROFILE')) { $script:taskCleanHome } else { $null }
+                [Environment]::SetEnvironmentVariable($taskName, $taskValue, 'Process')
+            }
+        }
+        $taskWorkingDirectory = if ($taskIsApp) { $script:taskUntrustedDirectory } else { $script:taskTrustedDirectory }
+        Push-Location -LiteralPath (Assert-RunChildPath $taskWorkingDirectory)
+        $taskLocationPushed = $true
+        [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
+        $taskOutput = & $taskProgram @CommandArguments 2>&1
+        $taskExit = $LASTEXITCODE
+    }
     catch { $taskOutput = @($_.Exception.Message) }
+    finally {
+        if ($taskLocationPushed) { Pop-Location }
+        [Console]::OutputEncoding = $taskEncoding
+        foreach ($taskName in $taskChildEnvironment.Keys) { [Environment]::SetEnvironmentVariable($taskName, $taskChildEnvironment[$taskName], 'Process') }
+    }
     $taskWatch.Stop()
     $taskText = $taskOutput -join [Environment]::NewLine
-    Save-JsonReport ([ordered]@{ program=$taskProgram; arguments=$CommandArguments; exitCode=$taskExit; seconds=[Math]::Round($taskWatch.Elapsed.TotalSeconds,2); output=$taskText }) $taskLog
+    Save-JsonReport ([ordered]@{ program=$taskProgram; arguments=$CommandArguments; workingDirectory=$taskWorkingDirectory; deliberatelyPollutedSetup=$taskIsApp; exitCode=$taskExit; seconds=[Math]::Round($taskWatch.Elapsed.TotalSeconds,2); output=$taskText }) $taskLog
     if ($taskExit -ne 0) { throw "Python history command failed ($Label, exit $taskExit): $taskText" }
     $taskText
 }
@@ -250,13 +312,24 @@ function Read-ProbeFields([string]$Text) {
     $taskFields
 }
 
+# Native output is decoded as UTF-8 by Invoke-CheckedCommand. Explicit byte
+# output also works with Python 2.4 and -E, which ignores PYTHONIOENCODING.
+$taskUtf8ProbeOutput = @'
+import sys
+def emit(name, value):
+    if not isinstance(value, type(u'')):
+        value = value.decode(sys.getfilesystemencoding() or 'mbcs')
+    stream = getattr(sys.stdout, 'buffer', sys.stdout)
+    stream.write((u'%s=%s\n' % (name, value)).encode('utf-8'))
+'@
+
 function Test-HistoricalRuntime([string]$Installation, [string]$Scenario, [string]$Version, [bool]$HasPip, [bool]$HasVenv) {
     $taskPython = Assert-RunChildPath (Join-Path $Installation 'python.exe')
     $taskFlags = if ($Version.StartsWith('2.4.')) { @('-E') } else { @('-E','-s') }
     $taskStandardModule = if ($Version.StartsWith('2.4.')) { 'os' } else { 'json' }
     # This source deliberately uses Python 2.4 syntax: no with, json, pathlib,
     # f-strings, print function dependency, or newer interpreter switches.
-    $taskProbe = @'
+    $taskProbe = $taskUtf8ProbeOutput + "`n" + @'
 import os, sys, platform
 root = os.path.normcase(os.path.realpath(sys.argv[1]))
 assert os.path.normcase(os.path.realpath(sys.prefix)) == root
@@ -265,17 +338,21 @@ actual = '%d.%d.%d' % tuple(sys.version_info[:3])
 assert actual == sys.argv[2]
 assert platform.python_version() == sys.argv[2]
 __import__(sys.argv[3])
-sys.stdout.write('version=' + actual + '\nprefix=' + sys.prefix + '\nexecutable=' + sys.executable + '\nstdlib=' + sys.argv[3] + '\n')
+emit('version', actual)
+emit('prefix', sys.prefix)
+emit('executable', sys.executable)
+emit('stdlib', sys.argv[3])
 '@
     $taskRuntime = Read-ProbeFields (Invoke-CheckedCommand -Program $taskPython -CommandArguments @($taskFlags + @('-c',$taskProbe,$Installation,$Version,$taskStandardModule)) -Label 'runtime')
     if ($taskRuntime.version -cne $Version -or -not $taskRuntime.prefix) { throw 'The historical interpreter probe did not return the selected version and prefix.' }
     $taskChecks = [ordered]@{ version=$Version; runtime=$taskRuntime; pip='not-bundled-by-release'; venv='not-bundled-by-release' }
     if ($HasPip) {
-        $taskPipProbe = @'
+        $taskPipProbe = $taskUtf8ProbeOutput + "`n" + @'
 import os, sys, pip
 root = os.path.normcase(os.path.realpath(sys.argv[1]))
 assert os.path.normcase(os.path.realpath(pip.__file__)).startswith(root + os.sep)
-sys.stdout.write('version=' + pip.__version__ + '\nmodule=' + pip.__file__ + '\n')
+emit('version', pip.__version__)
+emit('module', pip.__file__)
 '@
         $taskPipModule = Read-ProbeFields (Invoke-CheckedCommand -Program $taskPython -CommandArguments @($taskFlags + @('-c',$taskPipProbe,$Installation)) -Label 'pip-module')
         $taskPipList = Invoke-CheckedCommand -Program $taskPython -CommandArguments @($taskFlags + @('-m','pip','--disable-pip-version-check','--no-cache-dir','list')) -Label 'pip-module-list'
@@ -290,7 +367,7 @@ sys.stdout.write('version=' + pip.__version__ + '\nmodule=' + pip.__file__ + '\n
         # Python 3.3 venv naturally has no pip and has no --without-pip flag.
         $null = Invoke-CheckedCommand -Program $taskPython -CommandArguments @($taskFlags + @('-m','venv',$taskVenv)) -Label 'create-venv'
         $taskVenvPython = Assert-RunChildPath (Join-Path $taskVenv 'Scripts/python.exe')
-        $taskVenvProbe = @'
+        $taskVenvProbe = $taskUtf8ProbeOutput + "`n" + @'
 import os, sys
 env = os.path.normcase(os.path.realpath(sys.argv[1]))
 root = os.path.normcase(os.path.realpath(sys.argv[2]))
@@ -299,7 +376,9 @@ assert os.path.normcase(os.path.realpath(sys.base_prefix)) == root
 assert sys.prefix != sys.base_prefix
 assert os.path.normcase(os.path.realpath(sys.executable)).startswith(env + os.sep)
 assert 2 + 2 == 4
-sys.stdout.write('prefix=' + sys.prefix + '\nbasePrefix=' + sys.base_prefix + '\nprogramResult=4\n')
+emit('prefix', sys.prefix)
+emit('basePrefix', sys.base_prefix)
+emit('programResult', '4')
 '@
         $taskVenvRuntime = Read-ProbeFields (Invoke-CheckedCommand -Program $taskVenvPython -CommandArguments @($taskFlags + @('-c',$taskVenvProbe,$taskVenv,$Installation)) -Label 'venv-runtime')
         if (-not $taskVenvRuntime.prefix -or $taskVenvRuntime.programResult -cne '4') { throw 'The historical venv did not execute its isolated interpreter.' }
@@ -348,7 +427,7 @@ $taskResults = @(
     [ordered]@{ version='3.0.1'; pip=$false; venv=$false }, [ordered]@{ version='3.3.5'; pip=$false; venv=$true },
     [ordered]@{ version='3.4.4'; pip=$true; venv=$true }, [ordered]@{ version='3.10.11'; pip=$true; venv=$true }
 ) | ForEach-Object {
-    [ordered]@{ version=$_.version; expectsPip=$_.pip; expectsVenv=$_.venv; status='not-started'; stage='prepare'; installationPath=$null; sourceUrl=$null; runtime=$null; userEnvironment='not-checked'; cleanup='not-started'; error=$null }
+    [ordered]@{ version=$_.version; expectsPip=$_.pip; expectsVenv=$_.venv; status='not-started'; stage='prepare'; installationPath=$null; sourceUrl=$null; runtime=$null; setupIsolation='not-checked'; userEnvironment='not-checked'; cleanup='not-started'; error=$null }
 }
 $taskSummary = [ordered]@{
     artifactRoot=$taskRun; executable=$Executable; status='running'; complete=$false; startedAt=[DateTime]::UtcNow.ToString('o'); finishedAt=$null
@@ -381,12 +460,16 @@ try {
     foreach ($taskResult in $taskResults) {
         $taskVersion = [string]$taskResult.version
         $taskScenario = Join-Path $taskRun "versions/$taskVersion"
-        $taskRoot = Join-Path $taskScenario 'tools'
+        # Exercise old pip launchers in both non-ASCII scripts and Unicode paths.
+        $taskRootName = if ($taskVersion -in @('2.7.18','3.4.4')) { 'tools-开发-é' } else { 'tools' }
+        $taskRoot = Join-Path $taskScenario $taskRootName
+        $taskIsolationReady = $false
         $taskCommandReport = Join-Path $taskReports $taskVersion
         try {
             New-RunDirectory $taskCommandReport
             New-RunDirectory $taskRoot
             Set-TemporaryEnvironment (Join-Path $taskScenario 'temporary')
+            $taskIsolationReady = $true
             $taskResult.stage = 'catalog-selection'
             if (-not $taskCatalog) { throw 'The complete official catalog was not available.' }
             $taskRemote = @($taskCatalog.versions | Where-Object version -ceq $taskVersion)
@@ -413,13 +496,23 @@ try {
             $taskResult.status = 'failed'; $taskResult.error = $_.Exception.Message
             $taskSummary.errors += "$taskVersion : $($_.Exception.Message)"
         } finally {
+            if ($taskIsolationReady) {
+                try {
+                    Assert-NoSetupPollution (Join-Path $taskScenario 'temporary')
+                    $taskResult.setupIsolation = 'passed'
+                } catch {
+                    $taskResult.setupIsolation = 'failed'; $taskResult.status = 'failed'
+                    $taskResult.error = @($taskResult.error,$_.Exception.Message) | Where-Object { $_ } | Join-String -Separator ' | '
+                    $taskSummary.errors += $_.Exception.Message
+                }
+            }
             try {
                 $taskResult.userEnvironment = if ($taskSummary.userEnvironmentBefore -and (Get-UserEnvironmentFingerprint) -ceq $taskSummary.userEnvironmentBefore) { 'unchanged' } else { 'changed-or-unverified' }
                 if ($taskResult.userEnvironment -cne 'unchanged') { throw 'Installing a historical interpreter unexpectedly changed the user registry environment.' }
             } catch { $taskResult.status = 'failed'; $taskResult.error = @($taskResult.error,$_.Exception.Message) | Where-Object { $_ } | Join-String -Separator ' | '; $taskSummary.errors += $_.Exception.Message }
             $taskCleanupErrors = @()
-            foreach ($taskChild in @('tools','venv','temporary')) {
-                try { Remove-RunDirectory (Join-Path $taskScenario $taskChild) } catch { $taskCleanupErrors += $_.Exception.Message }
+            foreach ($taskCleanupPath in @($taskRoot,(Join-Path $taskScenario 'venv'),(Join-Path $taskScenario 'temporary'))) {
+                try { Remove-RunDirectory $taskCleanupPath } catch { $taskCleanupErrors += $_.Exception.Message }
             }
             $taskResult.cleanup = if ($taskCleanupErrors.Count -eq 0) { 'passed' } else { 'failed' }
             if ($taskCleanupErrors.Count) { $taskResult.status = 'failed'; $taskSummary.errors += $taskCleanupErrors }

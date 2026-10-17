@@ -28,7 +28,7 @@ use crate::{
     environment::{EnvironmentMap, current_process_environment},
     error::{AppError, AppResult},
     model::{InstallRequest, PlannedAction},
-    process::{output_text, run_capture, run_capture_with_env},
+    process::{output_text, run_capture, run_capture_sanitized, run_capture_with_env},
     python_features::{has_builtin_venv, has_bundled_pip},
 };
 
@@ -40,6 +40,20 @@ const DOWNLOAD_BUFFER_BYTES: usize = 256 * 1024;
 const PARALLEL_DOWNLOAD_MIN_BYTES: u64 = 8 * 1024 * 1024;
 const PARALLEL_DOWNLOAD_STREAMS: u64 = 4;
 const DOWNLOAD_PROGRESS_INTERVAL: Duration = Duration::from_millis(200);
+
+// This syntax also runs on Python 2.7. Clear pip's option variables before
+// importing runpy or pip, then retain only settings created by our own setup.
+const PYTHON_SETUP_MODULE_WRAPPER: &str = concat!(
+    "import os,sys; safe=dict((k,os.environ[k]) for k in ",
+    "('PIP_CACHE_DIR','PIP_BUILD_TRACKER','PIP_NO_INPUT','PIP_NO_INDEX','PIP_DISABLE_PIP_VERSION_CHECK') if k in os.environ); ",
+    "[os.environ.pop(k,None) for k in list(os.environ) if k.upper().startswith('PIP_')]; ",
+    "os.environ.update(safe); os.environ['PIP_CONFIG_FILE']=os.devnull; ",
+    "os.environ.pop('ENSUREPIP_OPTIONS',None); ",
+    "exec(\"if sys.version_info[0] < 3:\\n import codecs\\n sys.stdout=codecs.getwriter('utf-8')(sys.stdout)\\n sys.stderr=codecs.getwriter('utf-8')(sys.stderr)\\n sys.stdout.encoding=sys.stderr.encoding='utf-8'\\nelse:\\n import io\\n sys.stdout=io.TextIOWrapper(sys.stdout.detach(),encoding='utf-8',errors='backslashreplace',line_buffering=True)\\n sys.stderr=io.TextIOWrapper(sys.stderr.detach(),encoding='utf-8',errors='backslashreplace',line_buffering=True)\\n\"); ",
+    "exec(\"try:\\n import distutils.dist as _d\\n _d.Distribution.find_config_files=lambda self,*a,**k: []\\nexcept ImportError:\\n pass\\n\"); ",
+    "import runpy; module=sys.argv.pop(1); ",
+    "runpy.run_module(module,run_name='__main__',alter_sys=True)"
+);
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -1625,6 +1639,13 @@ fn python_setup_environment(
     current: EnvironmentMap,
 ) -> Vec<(String, OsString)> {
     let mut environment = installation_process_environment(request, current);
+    // Fresh registry values must not reintroduce pip destination, config, or
+    // logging options after the inherited PIP_* variables are removed at spawn.
+    environment.retain(|(name, _)| {
+        !name
+            .get(..4)
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("PIP_"))
+    });
     let overrides = [
         ("TEMP", workspace.join("temp").into_os_string()),
         ("TMP", workspace.join("temp").into_os_string()),
@@ -1646,7 +1667,9 @@ fn python_setup_environment(
         ("PYTHONPYCACHEPREFIX", OsString::new()),
         ("PYTHONNOUSERSITE", OsString::from("1")),
         ("PYTHONSAFEPATH", OsString::from("1")),
+        ("PYTHONIOENCODING", OsString::from("utf-8")),
         ("PIP_NO_INPUT", OsString::from("1")),
+        ("PIP_NO_INDEX", OsString::from("1")),
         ("PIP_DISABLE_PIP_VERSION_CHECK", OsString::from("1")),
         (
             "PIP_CONFIG_FILE",
@@ -1672,7 +1695,7 @@ fn run_python_setup_command(
             program.display()
         )));
     }
-    let output = run_capture_with_env(program, args, timeout, environment)?;
+    let output = run_capture_sanitized(program, args, timeout, environment, &["PIP_"])?;
     verify_probe_output(program, &output)
 }
 
@@ -1685,12 +1708,7 @@ fn run_python_setup_module(
 ) -> AppResult<()> {
     // Merely setting ENSUREPIP_OPTIONS to an empty value still suppresses pip.exe.
     // Remove it inside this child, including before venv starts its own ensurepip.
-    let mut command = vec![
-        "-I",
-        "-c",
-        "import os,runpy,sys; os.environ.pop('ENSUREPIP_OPTIONS',None); module=sys.argv.pop(1); runpy.run_module(module,run_name='__main__',alter_sys=True)",
-        module,
-    ];
+    let mut command = vec!["-I", "-c", PYTHON_SETUP_MODULE_WRAPPER, module];
     command.extend_from_slice(args);
     run_python_setup_command(python, &command, environment, timeout)
 }
@@ -1728,7 +1746,7 @@ fn verify_python_pip_launcher_args(
             program.display()
         )));
     }
-    let output = run_capture_with_env(program, args, timeout, environment)?;
+    let output = run_capture_sanitized(program, args, timeout, environment, &["PIP_"])?;
     verify_probe_output(program, &output)?;
     let expected = format!(
         "{}\\",
@@ -1845,9 +1863,7 @@ fn run_legacy_python_module(
     timeout: Duration,
 ) -> AppResult<()> {
     let mut command = flags.to_vec();
-    command.extend_from_slice(&[
-        "-c", "import os,runpy,sys; os.environ.pop('ENSUREPIP_OPTIONS',None); module=sys.argv.pop(1); runpy.run_module(module,run_name='__main__',alter_sys=True)", module,
-    ]);
+    command.extend_from_slice(&["-c", PYTHON_SETUP_MODULE_WRAPPER, module]);
     command.extend_from_slice(args);
     run_python_setup_command(python, &command, environment, timeout)
 }
@@ -1919,11 +1935,16 @@ fn initialize_legacy_python_runtime(request: &InstallRequest) -> AppResult<()> {
             let venv_text = venv.to_string_lossy();
             // Python 3.3 has venv but not --copies/ensurepip. Default creation
             // copies on Windows and works across the historical venv versions.
+            let creation_args = if has_bundled_pip(&request.version) {
+                vec!["--without-pip", venv_text.as_ref()]
+            } else {
+                vec![venv_text.as_ref()]
+            };
             run_legacy_python_module(
                 &python,
                 &flags,
                 "venv",
-                &[&venv_text],
+                &creation_args,
                 &environment,
                 timeout,
             )?;
@@ -1939,6 +1960,15 @@ fn initialize_legacy_python_runtime(request: &InstallRequest) -> AppResult<()> {
                 timeout,
             )?;
             if has_bundled_pip(&request.version) {
+                // Venv's internal ensurepip child would lose the distutils guard.
+                run_legacy_python_module(
+                    &venv.join("Scripts/python.exe"),
+                    &flags,
+                    "ensurepip",
+                    &["--upgrade", "--default-pip"],
+                    &environment,
+                    timeout,
+                )?;
                 verify_python_pip_launcher_args(
                     &venv.join("Scripts/pip.exe"),
                     &venv,
@@ -2039,7 +2069,14 @@ fn initialize_python_runtime(request: &InstallRequest) -> AppResult<()> {
         run_python_setup_module(
             &python,
             "venv",
-            &["--copies", &venv_text],
+            &["--copies", "--without-pip", &venv_text],
+            &environment,
+            timeout,
+        )?;
+        run_python_setup_module(
+            &venv.join("Scripts/python.exe"),
+            "ensurepip",
+            &["--upgrade", "--default-pip"],
             &environment,
             timeout,
         )?;
@@ -2653,6 +2690,12 @@ mod tests {
                 ("PYTHONPATH".into(), r"C:\foreign-modules".into()),
                 ("Temp".into(), r"C:\foreign-temp".into()),
                 ("PIP_CACHE_DIR".into(), r"C:\foreign-cache".into()),
+                ("pIp_TaRgEt".into(), r"C:\foreign-target".into()),
+                ("PIP_ROOT".into(), r"C:\foreign-root".into()),
+                ("pip_prefix".into(), r"C:\foreign-prefix".into()),
+                ("PIP_USER".into(), "1".into()),
+                ("PIP_LOG".into(), r"C:\foreign-log".into()),
+                ("pip_config_file".into(), r"C:\foreign-pip.ini".into()),
                 ("PATH".into(), "unchanged".into()),
             ]),
         );
@@ -2671,6 +2714,12 @@ mod tests {
             ("PYTHONHOME", OsString::new()),
             ("PYTHONPATH", OsString::new()),
             ("PYTHONNOUSERSITE", OsString::from("1")),
+            ("PYTHONIOENCODING", OsString::from("utf-8")),
+            ("PIP_NO_INDEX", OsString::from("1")),
+            (
+                "PIP_CONFIG_FILE",
+                OsString::from(if cfg!(windows) { "nul" } else { "/dev/null" }),
+            ),
             ("PATH", OsString::from("unchanged")),
         ] {
             let matches = environment
@@ -2679,6 +2728,20 @@ mod tests {
                 .collect::<Vec<_>>();
             assert_eq!(matches.len(), 1);
             assert_eq!(matches[0].1, expected);
+        }
+        for name in [
+            "PIP_TARGET",
+            "PIP_ROOT",
+            "PIP_PREFIX",
+            "PIP_USER",
+            "PIP_LOG",
+        ] {
+            assert!(
+                !environment
+                    .iter()
+                    .any(|(key, _)| key.eq_ignore_ascii_case(name)),
+                "{name}"
+            );
         }
     }
 

@@ -4,12 +4,18 @@ pub(crate) fn has_bundled_pip(version: &str) -> bool {
     let Some((major, minor, patch)) = release_numbers(version) else {
         return false;
     };
-    major > 3 || (major == 3 && minor >= 4) || (major == 2 && minor == 7 && patch >= 9)
+    // ensurepip was added during the 3.4 development cycle, after its alphas.
+    // Those official preview packages are still valid historical interpreters.
+    major > 3
+        || (major == 3 && minor >= 4 && !version.starts_with("3.4.0a"))
+        || (major == 2 && minor == 7 && patch >= 9)
 }
 
 pub(crate) fn has_builtin_venv(version: &str) -> bool {
-    release_numbers(version)
-        .is_some_and(|(major, minor, _)| major > 3 || (major == 3 && minor >= 3))
+    release_numbers(version).is_some_and(|(major, minor, _)| {
+        major > 3
+            || (major == 3 && minor >= 3 && !["3.3.0a1", "3.3.0a2", "3.3.0a3"].contains(&version))
+    })
 }
 
 fn release_numbers(version: &str) -> Option<(u32, u32, u32)> {
@@ -35,6 +41,10 @@ mod tests {
             ("2.7.18", true, false),
             ("3.2.5", false, false),
             ("3.3.5", false, true),
+            ("3.3.0a1", false, false),
+            ("3.3.0a4", false, true),
+            ("3.4.0a1", false, true),
+            ("3.4.0b1", true, true),
             ("3.4.0", true, true),
             ("3.10.11", true, true),
             ("3.15.0rc2", true, true),

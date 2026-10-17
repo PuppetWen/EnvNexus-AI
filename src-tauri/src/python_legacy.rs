@@ -21,6 +21,9 @@ use sha2::{Digest, Sha256, Sha512};
 
 use crate::error::{AppError, AppResult};
 
+#[path = "python_cab.rs"]
+mod python_cab;
+
 const MAX_ARCHIVE: u64 = 512 * 1024 * 1024;
 const MAX_FILE: u64 = 512 * 1024 * 1024;
 const MAX_TOTAL: u64 = 20 * 1024 * 1024 * 1024;
@@ -672,19 +675,24 @@ fn extract_msi(bytes: Vec<u8>, output: &mut ExtractionOutput<'_>) -> AppResult<(
                 .filter(|name| !name.is_empty())
                 .ok_or_else(|| invalid("不接受 MSI 外部 CAB"))?;
             let cabinet_bytes = limited_bytes(package.read_stream(stream_name)?, MAX_ARCHIVE)?;
-            let (mut cabinet, entries) = cabinet_files(&cabinet_bytes)?;
-            for (id, size) in entries {
-                if let Some((path, expected, seq)) = files.get(&id) {
+            let selected = files
+                .iter()
+                .filter(|(_, (_, _, seq))| *seq > previous && *seq <= last)
+                .map(|(id, _)| id.clone())
+                .collect::<HashSet<_>>();
+            python_cab::for_each_file(&cabinet_bytes, &selected, |id, content| {
+                if let Some((path, expected, seq)) = files.get(id) {
                     if *seq <= previous
                         || *seq > last
-                        || *expected != size
-                        || !extracted.insert(id.clone())
+                        || *expected != content.len() as u64
+                        || !extracted.insert(id.to_string())
                     {
                         return Err(invalid("MSI 与 CAB 文件映射冲突"));
                     }
-                    output.write(path, size, cabinet.read_file(&id)?)?;
+                    output.write(path, *expected, Cursor::new(content))?;
                 }
-            }
+                Ok(())
+            })?;
         }
         previous = last;
     }
