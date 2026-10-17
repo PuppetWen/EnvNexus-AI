@@ -93,7 +93,7 @@ Python 3.6 之前的 Windows 运行时及随包 Tcl/Tk 需要 ASCII 安装路径
 
 新增 `Smoke-Python-History.ps1` 仅允许在 Windows GitHub CI runner 的隔离工作区执行。CI7 已通过十个版本：`2.0.1`、`2.1.3`、`2.2.3`、`2.3.5`、`2.4.4`、`2.7.18`、`3.0.1`、`3.3.5`、`3.4.4`、`3.10.11`，检查官方目录、筛选排序、Wise EXE / MSI / Burn EXE 静态提取、随包能力、用户环境指纹、配置污染隔离和有界清理。正式发行包中的 Python 2.7.9+ / 3.4+ 使用原包自带 pip，Python 3.3+ 检查内置 venv；更早版本不联网补装最新版 pip。预览版按实际组件区分，例如 3.3 早期 alpha 不要求 venv，3.4 alpha 不要求 ensurepip；这十个稳定版本的验收不能代替全部历史或预览版验收。测试包、缓存和临时文件均留在隔离工作区所在的 D / E 盘，不写全局用户缓存，也不修改 HKCU。
 
-本轮证据来自提交 `ba2c54e` 的 [CI7](https://github.com/PuppetWen/EnvNexus-AI/actions/runs/39025514788)：184 项 Rust、62 项前端、4 项 Node 测试，以及实时官方源、十个历史 Python、现代 Python 新装与旧嵌入式包原路径修复、15/15 类工具真实安装均已通过。[独立草稿资产验证](https://github.com/PuppetWen/EnvNexus-AI/actions/runs/39027005455)的下载、清单及 Rust 签名验证也已通过；公开发行和公开下载回读尚待完成。完整范围及未验证边界见[测试报告](TEST_REPORT.md)，0.1.6 的结果单独保留为历史记录。
+本轮证据来自提交 `ba2c54e` 的 [CI7](https://github.com/PuppetWen/EnvNexus-AI/actions/runs/39025514788)：184 项 Rust、62 项前端、4 项 Node 测试，以及实时官方源、十个历史 Python、现代 Python 新装与旧嵌入式包原路径修复、15/15 类工具真实安装均已通过。[独立草稿资产验证](https://github.com/PuppetWen/EnvNexus-AI/actions/runs/39027005455)的下载、清单及 Rust 签名验证也已通过；[v0.1.7](https://github.com/PuppetWen/EnvNexus-AI/releases/tag/v0.1.7) 已公开发布，六项公开资产及自动更新入口回读均通过。完整范围及未验证边界见[测试报告](TEST_REPORT.md)，0.1.6 的结果单独保留为历史记录。
 
 ## 开发运行
 

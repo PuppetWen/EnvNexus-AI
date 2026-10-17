@@ -58,7 +58,7 @@ Python 3.6 之前的 Windows 运行时及随包 Tcl/Tk 需要仅含 ASCII 字符
 
 正式发行包中，Python 2.7.9+、Python 3.4+ 使用随包 pip/ensurepip，Python 3.3+ 保留内置 venv；预览版按实际发行组件区分，例如部分早期 alpha 尚无 venv 或 ensurepip。原包没有的功能不会被伪造，也不会联网补装最新版 pip。官网仅提供 MD5 的历史包会在安装计划中明确标记为弱校验，不冒充 SHA-256 或发行签名验证。
 
-历史 pip 从原包随带的 wheel 离线初始化，使用受管根目录内的短私有临时目录并隔离外部配置；安装后验证最终路径的 pip 命令和该版本具备的 venv 能力。[CI7 功能验证](https://github.com/PuppetWen/EnvNexus-AI/actions/runs/39025514788)已通过 184 项 Rust、62 项前端、4 项 Node 测试、十个历史 Python 安装、现代 Python 新装与旧嵌入式安装原路径修复，以及 15/15 类工具真实安装；[独立草稿签名验证](https://github.com/PuppetWen/EnvNexus-AI/actions/runs/39027005455)也已通过。公开发行及公开下载回读尚待完成，范围和未验证边界见[测试报告](docs/TEST_REPORT.md)。
+历史 pip 从原包随带的 wheel 离线初始化，使用受管根目录内的短私有临时目录并隔离外部配置；安装后验证最终路径的 pip 命令和该版本具备的 venv 能力。[CI7 功能验证](https://github.com/PuppetWen/EnvNexus-AI/actions/runs/39025514788)已通过 184 项 Rust、62 项前端、4 项 Node 测试、十个历史 Python 安装、现代 Python 新装与旧嵌入式安装原路径修复，以及 15/15 类工具真实安装；[独立草稿签名验证](https://github.com/PuppetWen/EnvNexus-AI/actions/runs/39027005455)也已通过。[v0.1.7](https://github.com/PuppetWen/EnvNexus-AI/releases/tag/v0.1.7) 已公开发布，六项公开资产及自动更新入口回读均通过，范围和未验证边界见[测试报告](docs/TEST_REPORT.md)。
 
 ### AI 在哪里起作用
 
@@ -157,7 +157,7 @@ Windows runtimes before Python 3.6 and their bundled Tcl/Tk require an ASCII-onl
 
 For final releases, Python 2.7.9+ and Python 3.4+ use bundled pip/ensurepip, and Python 3.3+ retains built-in venv. Preview releases are checked against their actual components; some early alphas predate venv or ensurepip. Missing features are not fabricated or filled by downloading a current pip. Historical packages published with only MD5 are explicitly identified as using a weak checksum, distinct from SHA-256 or release-signature verification.
 
-Historical pip is initialized offline from bundled wheels, using a short private workspace inside the managed root and isolated external configuration. Final-path pip launchers and the release's available venv features are checked. [CI7 functional checks](https://github.com/PuppetWen/EnvNexus-AI/actions/runs/39025514788) passed 184 Rust, 62 frontend, and 4 Node tests, ten historical Python installations, modern Python installation and in-place embedded-package repair, and 15/15 tool installations. [Independent draft-asset signature verification](https://github.com/PuppetWen/EnvNexus-AI/actions/runs/39027005455) also passed. Public release and public-download checks remain pending; see the [test report](docs/TEST_REPORT.md) for coverage and remaining limits.
+Historical pip is initialized offline from bundled wheels, using a short private workspace inside the managed root and isolated external configuration. Final-path pip launchers and the release's available venv features are checked. [CI7 functional checks](https://github.com/PuppetWen/EnvNexus-AI/actions/runs/39025514788) passed 184 Rust, 62 frontend, and 4 Node tests, ten historical Python installations, modern Python installation and in-place embedded-package repair, and 15/15 tool installations. [Independent draft-asset signature verification](https://github.com/PuppetWen/EnvNexus-AI/actions/runs/39027005455) also passed. [Version 0.1.7](https://github.com/PuppetWen/EnvNexus-AI/releases/tag/v0.1.7) is public; all six public assets and the latest-update endpoint passed anonymous download, exact-hash, and signature checks; see the [test report](docs/TEST_REPORT.md) for coverage and remaining limits.
 
 ### What AI does
 

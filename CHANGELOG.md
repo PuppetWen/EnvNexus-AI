@@ -12,7 +12,7 @@
 - 历史包优先使用官网 SHA-256；只有 MD5 时使用官网原值校验，并在安装计划中明确提示弱校验，不冒充 SHA-256 或发行签名。没有有效校验元数据时保留目录条目并阻止自动安装。
 - 按实际发行组件保留原有能力：正式发行包中的 Python 2.7.9+ / 3.4+ 使用随包 pip/ensurepip，Python 3.3+ 保留内置 venv；预览版单独区分早期 alpha 等组件边界。原包没有的功能不联网补装，也不误报为损坏。完整包安装、原路径修复与独立 PATH 确认继续使用事务边界。
 - 历史 pip 直接从随包 wheel 离线初始化，在受管根目录内使用短私有临时目录并隔离外部 pip/distutils 配置；传播真实退出码，验证最终安装路径的 pip 入口、模块、列表和对应 venv 能力。
-- [CI7](https://github.com/PuppetWen/EnvNexus-AI/actions/runs/39025514788) 已通过历史目录、筛选排序及十个历史 Python 的隔离安装：`2.0.1`、`2.1.3`、`2.2.3`、`2.3.5`、`2.4.4`、`2.7.18`、`3.0.1`、`3.3.5`、`3.4.4`、`3.10.11`；同时通过 184 项 Rust、62 项前端、4 项 Node 测试、现代 Python 新装与旧嵌入式安装原路径修复、15/15 类工具真实安装。[独立草稿签名验证](https://github.com/PuppetWen/EnvNexus-AI/actions/runs/39027005455)已通过，公开发行和公开下载回读尚待完成。详见[测试报告](docs/TEST_REPORT.md)；0.1.6 记录继续作为历史证据保留。
+- [CI7](https://github.com/PuppetWen/EnvNexus-AI/actions/runs/39025514788) 已通过历史目录、筛选排序及十个历史 Python 的隔离安装：`2.0.1`、`2.1.3`、`2.2.3`、`2.3.5`、`2.4.4`、`2.7.18`、`3.0.1`、`3.3.5`、`3.4.4`、`3.10.11`；同时通过 184 项 Rust、62 项前端、4 项 Node 测试、现代 Python 新装与旧嵌入式安装原路径修复、15/15 类工具真实安装。[独立草稿签名验证](https://github.com/PuppetWen/EnvNexus-AI/actions/runs/39027005455)已通过，[v0.1.7](https://github.com/PuppetWen/EnvNexus-AI/releases/tag/v0.1.7) 已公开发布，六项公开资产及自动更新入口回读均通过。详见[测试报告](docs/TEST_REPORT.md)；0.1.6 记录继续作为历史证据保留。
 
 ## 0.1.6 — 2026-10-15
 

@@ -30,7 +30,7 @@ Python 3.6 之前的 Windows 运行时及随包 Tcl/Tk 需要仅含 ASCII 字符
 
 安装保留对应发行包的完整标准库和随包能力：正式发行包中的 Python 2.7.9+、Python 3.4+ 使用随包 pip/ensurepip，Python 3.3+ 保留内置 venv；预览版按实际组件验收，部分早期 alpha 尚无 venv 或 ensurepip。原包没有的功能不会被伪造，不会联网补装最新版 pip；诊断也会区分原本不具备的功能和真正损坏的安装。旧版解释器及第三方包能否运行仍取决于当前 Windows 与其兼容性。
 
-历史 pip 从原包随带的 wheel 离线初始化，使用受管根目录内的短私有临时目录并隔离外部配置；安装后验证最终路径的 pip 命令和该版本具备的 venv 能力。[CI7 功能验证](https://github.com/PuppetWen/EnvNexus-AI/actions/runs/39025514788)已通过 184 项 Rust、62 项前端、4 项 Node 测试、十个历史 Python 安装、现代 Python 新装与旧嵌入式安装原路径修复，以及 15/15 类工具真实安装；[独立草稿签名验证](https://github.com/PuppetWen/EnvNexus-AI/actions/runs/39027005455)也已通过。公开发行及公开下载回读尚待完成，范围和未验证边界见[测试报告](docs/TEST_REPORT.md)。
+历史 pip 从原包随带的 wheel 离线初始化，使用受管根目录内的短私有临时目录并隔离外部配置；安装后验证最终路径的 pip 命令和该版本具备的 venv 能力。[CI7 功能验证](https://github.com/PuppetWen/EnvNexus-AI/actions/runs/39025514788)已通过 184 项 Rust、62 项前端、4 项 Node 测试、十个历史 Python 安装、现代 Python 新装与旧嵌入式安装原路径修复，以及 15/15 类工具真实安装；[独立草稿签名验证](https://github.com/PuppetWen/EnvNexus-AI/actions/runs/39027005455)也已通过。[v0.1.7](https://github.com/PuppetWen/EnvNexus-AI/releases/tag/v0.1.7) 已公开发布，六项公开资产及自动更新入口回读均通过，范围和未验证边界见[测试报告](docs/TEST_REPORT.md)。
 
 ## 全机扫描与增量刷新
 

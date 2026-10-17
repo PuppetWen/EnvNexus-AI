@@ -57,7 +57,7 @@
 
 15 类实际版本为：Python `3.15.0`、Java `27+35`、Go `1.27.2`、Rust `1.99.1`、Node.js `26.12.0`、Git `2.56.0.windows.2`、Android Command-line Tools `23.0`、NDK `30.0.16248370`、Gradle `9.8.1`、CMake `4.4.4`、ADB `37.0.1`、Maven `3.10.0`、.NET SDK `10.0.402`、Ruby `4.0.7-1`、PHP `8.5.11`。仅 ADB 实际应用用户环境计划并恢复，其余 14 类验证切换预览；安装完成仍需单独确认环境变更，系统 PATH 遮蔽保护继续生效。
 
-`release/SHA256SUMS.txt` 与 CI7 `installer-payload.json` 中的主程序摘要一致；当前本地产物摘要如下，公开下载回读仍待完成。
+`release/SHA256SUMS.txt` 与 CI7 `installer-payload.json` 中的主程序摘要一致；以下产物摘要已通过公开下载逐文件回读核对。
 
 | 资产 | SHA-256 |
 | --- | --- |
@@ -65,7 +65,11 @@
 | `EnvNexus-AI_0.1.7_x64-portable.exe` / NSIS 安装后主程序 | `879b28b2d659fad121da7d077186f15ffca9675d1f5ce51e340d9f4ccb8dfb4c` |
 | `latest.json` | `45dc83ddf69ace74a73439ff5864c683976c8da570b7a42130ca82fecb98d982` |
 
-独立签名验证 [39027005455](https://github.com/PuppetWen/EnvNexus-AI/actions/runs/39027005455) 已以 `COMPLETED / SUCCESS` 完成，完成时间为 `2026-10-17T11:06:57Z`；六项资产下载、版本/URL/完整 SHA-256 清单检查、应用内公钥的真实 Rust updater 签名验证及报告上传和缓存收尾均通过。正式公开发布、最终合并提交/标签对应关系及无凭据公开六资产回读仍待确认。
+独立签名验证 [39027005455](https://github.com/PuppetWen/EnvNexus-AI/actions/runs/39027005455) 已以 `COMPLETED / SUCCESS` 完成，完成时间为 `2026-10-17T11:06:57Z`；六项资产下载、版本/URL/完整 SHA-256 清单检查、应用内公钥的真实 Rust updater 签名验证及报告上传和缓存收尾均通过。
+
+[PR #6](https://github.com/PuppetWen/EnvNexus-AI/pull/6) 于 `2026-10-17T11:11:50Z` 合并到 `main`，合并提交为 `d625dcb2a40b6b26c611d4233ddd8604796883e4`。与已通过 CI7 的 `ba2c54e` 比较仅六份文档不同；`v0.1.7` 标签已核对指向该合并提交。[v0.1.7](https://github.com/PuppetWen/EnvNexus-AI/releases/tag/v0.1.7) 于 `2026-10-17T11:16:52Z` 正式公开发布。
+
+不携带 GitHub 凭据重新下载安装包、便携包、两个 `.sig`、`latest.json` 和 `SHA256SUMS.txt` 六项公开资产，逐文件 SHA-256 与本机已验证资产一致，两个下载包再次通过签名验证。公开自动更新入口 `releases/latest/download/latest.json` 返回 `0.1.7`，SHA-256 为 `45dc83ddf69ace74a73439ff5864c683976c8da570b7a42130ca82fecb98d982`，与已签名发行清单一致。原始本机结果保存于 `artifacts/history-public-readback-result.json`；构建、下载和临时验证文件均位于项目 E 盘目录，CI 隔离文件位于 runner 的 D 盘工作区。
 
 以上十个稳定历史版本通过不表示全部 662 条版本、所有预览版组件、第三方包、原生扩展编译或 IDE 集成都已验证；pip/venv 按原发行版实际能力验收，没有为旧版补装现代 pip 或 virtualenv。历史包使用的官方 MD5 属于弱校验，不能等同于 SHA-256 或发行签名。此轮没有在用户开发机执行 Python PATH 切换或绕过 AppControl 启动新 GUI；Android SDK 覆盖 Command-line Tools，不含平台镜像或模拟器。
 
