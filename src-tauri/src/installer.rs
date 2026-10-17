@@ -52,6 +52,9 @@ const PYTHON_SETUP_MODULE_WRAPPER: &str = concat!(
     "exec(\"if sys.version_info[0] < 3:\\n import codecs\\n sys.stdout=codecs.getwriter('utf-8')(sys.stdout)\\n sys.stderr=codecs.getwriter('utf-8')(sys.stderr)\\n sys.stdout.encoding=sys.stderr.encoding='utf-8'\\nelse:\\n import io\\n sys.stdout=io.TextIOWrapper(sys.stdout.detach(),encoding='utf-8',errors='backslashreplace',line_buffering=True)\\n sys.stderr=io.TextIOWrapper(sys.stderr.detach(),encoding='utf-8',errors='backslashreplace',line_buffering=True)\\n\"); ",
     "exec(\"try:\\n import distutils.dist as _d\\n _d.Distribution.find_config_files=lambda self,*a,**k: []\\nexcept ImportError:\\n pass\\n\"); ",
     "import runpy; module=sys.argv.pop(1); ",
+    // ensurepip intentionally clears PIP_ settings. Restore only the owned
+    // whitelist afterwards so its pip subprocess also keeps all caches on E.
+    "exec(\"if module=='ensurepip':\\n import ensurepip as _ep\\n _original_disable=_ep._disable_pip_configuration_settings\\n def _private_disable():\\n  _original_disable()\\n  os.environ.update(safe)\\n  os.environ['PIP_CONFIG_FILE']=os.devnull\\n _ep._disable_pip_configuration_settings=_private_disable\\n\"); ",
     "runpy.run_module(module,run_name='__main__',alter_sys=True)"
 );
 
@@ -1560,7 +1563,13 @@ impl PythonSetupWorkspace {
             directory,
             managed_root: request.root.clone(),
         };
-        for name in ["temp", "pip-cache", "pip-build-tracker", "user-base"] {
+        for name in [
+            "temp",
+            "pip-cache",
+            "pip-build-tracker",
+            "user-base",
+            "home",
+        ] {
             fs::create_dir(workspace.directory.join(name))?;
         }
         Ok(workspace)
@@ -1653,6 +1662,10 @@ fn python_setup_environment(
         ("TEMP", workspace.join("temp").into_os_string()),
         ("TMP", workspace.join("temp").into_os_string()),
         ("TMPDIR", workspace.join("temp").into_os_string()),
+        // Some ensurepip versions start another interpreter. Its distutils
+        // configuration lookup must also resolve to this private home.
+        ("HOME", workspace.join("home").into_os_string()),
+        ("USERPROFILE", workspace.join("home").into_os_string()),
         (
             "PIP_CACHE_DIR",
             workspace.join("pip-cache").into_os_string(),
@@ -2783,6 +2796,8 @@ mod tests {
                 ("pythonhome".into(), r"C:\other-python".into()),
                 ("PYTHONPATH".into(), r"C:\foreign-modules".into()),
                 ("Temp".into(), r"C:\foreign-temp".into()),
+                ("home".into(), r"C:\foreign-home".into()),
+                ("UserProfile".into(), r"C:\foreign-profile".into()),
                 ("PIP_CACHE_DIR".into(), r"C:\foreign-cache".into()),
                 ("pIp_TaRgEt".into(), r"C:\foreign-target".into()),
                 ("PIP_ROOT".into(), r"C:\foreign-root".into()),
@@ -2797,6 +2812,8 @@ mod tests {
             ("TEMP", workspace.join("temp").into_os_string()),
             ("TMP", workspace.join("temp").into_os_string()),
             ("TMPDIR", workspace.join("temp").into_os_string()),
+            ("HOME", workspace.join("home").into_os_string()),
+            ("USERPROFILE", workspace.join("home").into_os_string()),
             (
                 "PIP_CACHE_DIR",
                 workspace.join("pip-cache").into_os_string(),

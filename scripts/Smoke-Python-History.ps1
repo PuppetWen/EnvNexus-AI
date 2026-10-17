@@ -315,7 +315,7 @@ function Read-ProbeFields([string]$Text) {
 }
 
 # Native output is decoded as UTF-8 by Invoke-CheckedCommand. Explicit byte
-# output also works with Python 2.4 and -E, which ignores PYTHONIOENCODING.
+# output also works with Python 2.0; later -E probes ignore PYTHONIOENCODING.
 $taskUtf8ProbeOutput = @'
 import sys
 def emit(name, value):
@@ -323,8 +323,9 @@ def emit(name, value):
         stream = getattr(sys.stdout, 'buffer', sys.stdout)
         stream.write(('%s=%s\n' % (name, value)).encode('utf-8'))
     else:
-        if not isinstance(value, unicode):
-            value = value.decode(getattr(sys, 'getfilesystemencoding', lambda: 'mbcs')() or 'mbcs')
+        # In Python 2.0/2.1 unicode is a factory function and str has no decode.
+        if not isinstance(value, type(unicode(''))):
+            value = unicode(value, getattr(sys, 'getfilesystemencoding', lambda: 'mbcs')() or 'mbcs')
         sys.stdout.write((unicode('%s=%s\n') % (name, value)).encode('utf-8'))
 '@
 
@@ -332,13 +333,13 @@ function Test-HistoricalRuntime([string]$Installation, [string]$Scenario, [strin
     $taskPython = Assert-RunChildPath (Join-Path $Installation 'python.exe')
     [string[]]$taskFlags = if ($Version -match '^2\.[01]\.') { @('-S') } elseif ($Version -match '^2\.[23]\.') { @('-E','-S') } elseif ($Version.StartsWith('2.4.')) { @('-E') } else { @('-E','-s') }
     $taskStandardModule = if ($Version -match '^2\.[0-4]\.') { 'os' } else { 'json' }
-    # This source deliberately uses Python 2.4 syntax: no with, json, pathlib,
+    # This source deliberately uses Python 2.0 syntax: no with, json, pathlib,
     # f-strings, print function dependency, or newer interpreter switches.
     $taskProbe = $taskUtf8ProbeOutput + "`n" + @'
 import os, sys
-root = os.path.normcase(os.path.realpath(sys.argv[1]))
-assert os.path.normcase(os.path.realpath(sys.prefix)) == root
-assert os.path.normcase(os.path.realpath(sys.executable)).startswith(root + os.sep)
+root = os.path.normcase(os.path.abspath(sys.argv[1]))
+assert os.path.normcase(os.path.abspath(sys.prefix)) == root
+assert os.path.normcase(os.path.abspath(sys.executable)).startswith(root + os.sep)
 actual = '%d.%d.%d' % tuple(sys.version_info[:3])
 assert actual == sys.argv[2]
 __import__(sys.argv[3])

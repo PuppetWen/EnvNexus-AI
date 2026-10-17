@@ -444,14 +444,17 @@ pub(super) fn extract(bytes: &[u8], output: &mut ExtractionOutput<'_>) -> AppRes
         )));
     }
     let (files, base, mut declared) = parsed.pop().unwrap();
-    let mut archive = zip::ZipArchive::new(Cursor::new(bytes))?;
+    let mut archive = zip::ZipArchive::new(Cursor::new(bytes))
+        .map_err(|error| invalid(format!("读取 Wise ZIP 中央目录失败：{error}")))?;
     if archive.len() > MAX_FILES {
         return Err(invalid("Wise ZIP 文件数量超过限制"));
     }
     let mut offsets = HashMap::new();
     let mut ranges = Vec::new();
     for index in 0..archive.len() {
-        let entry = archive.by_index(index)?;
+        let entry = archive
+            .by_index(index)
+            .map_err(|error| invalid(format!("读取 Wise ZIP 条目失败：{error}")))?;
         let offset =
             usize::try_from(entry.header_start()).map_err(|_| invalid("Wise ZIP 偏移溢出"))?;
         if offsets.insert(offset, index).is_some() {
@@ -519,7 +522,9 @@ pub(super) fn extract(bytes: &[u8], output: &mut ExtractionOutput<'_>) -> AppRes
         }) {
             return Err(invalid(format!("Wise 未映射文件：{}", entry.name)));
         }
-        let mut file = archive.by_index(index)?;
+        let mut file = archive
+            .by_index(index)
+            .map_err(|error| invalid(format!("读取 Wise ZIP 辅助条目失败：{error}")))?;
         let content = limited_bytes(&mut file, MAX_SCRIPT)?;
         if content.len() as u64 != entry.size {
             return Err(invalid("Wise 辅助文件大小不匹配"));
