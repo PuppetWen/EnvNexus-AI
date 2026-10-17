@@ -8,8 +8,8 @@
 //! and checked against the original python.org EXE bytes.
 
 use super::{
-    ExtractionOutput, MAX_ARCHIVE, MAX_FILE, MAX_FILES, checked_range, invalid, limited_bytes,
-    single_name, u16_at, u32_at,
+    ExtractionOutput, MAX_ARCHIVE, MAX_FILE, MAX_FILES, checked_range, invalid, single_name,
+    u16_at, u32_at,
 };
 use crate::error::AppResult;
 use std::{
@@ -107,6 +107,109 @@ fn inflate(bytes: &[u8], entry: &LocalZip, limit: u64) -> AppResult<Vec<u8>> {
         return Err(invalid("Wise ZIP 压缩长度、文件大小或 CRC 校验失败"));
     }
     Ok(value)
+}
+
+fn central_entries(bytes: &[u8]) -> AppResult<HashMap<usize, LocalZip>> {
+    // ZIP32 EOCD has a bounded 16-bit comment. Inspect only this footer window,
+    // requiring the declared comment to end exactly at EOF. This is standard
+    // ZIP structure parsing, not a search through the EXE for payloads.
+    let mut footers = Vec::new();
+    let window = bytes.len().saturating_sub(22 + u16::MAX as usize);
+    for position in window..bytes.len().saturating_sub(21) {
+        if bytes.get(position..position + 4) == Some(b"PK\x05\x06")
+            && position + 22 + u16_at(bytes, position + 20)? as usize == bytes.len()
+        {
+            footers.push(position);
+        }
+    }
+    if footers.len() != 1 {
+        return Err(invalid("Wise ZIP 没有唯一且完整的中央目录结束记录"));
+    }
+    let footer = footers[0];
+    let count = u16_at(bytes, footer + 10)? as usize;
+    if u16_at(bytes, footer + 4)? != 0
+        || u16_at(bytes, footer + 6)? != 0
+        || u16_at(bytes, footer + 8)? as usize != count
+        || count == 0
+        || count == u16::MAX as usize
+        || count > MAX_FILES
+    {
+        return Err(invalid("Wise ZIP 多磁盘、ZIP64 或文件数量不受支持"));
+    }
+    let directory_size = u32_at(bytes, footer + 12)? as usize;
+    let directory_offset = u32_at(bytes, footer + 16)? as usize;
+    let directory = checked_range(directory_offset, directory_size, bytes.len())?;
+    if directory.end != footer {
+        return Err(invalid("Wise ZIP 中央目录边界不匹配"));
+    }
+    let mut position = directory.start;
+    let mut entries = HashMap::new();
+    let mut ranges = Vec::new();
+    for _ in 0..count {
+        checked_range(position, 46, directory.end)?;
+        if bytes.get(position..position + 4) != Some(b"PK\x01\x02")
+            || u16_at(bytes, position + 6)? > 20
+            || u16_at(bytes, position + 10)? != 8
+            || u16_at(bytes, position + 34)? != 0
+        {
+            return Err(invalid("Wise ZIP 中央目录格式不受支持"));
+        }
+        let flags = u16_at(bytes, position + 8)?;
+        if flags & !0x0800 != 0 {
+            return Err(invalid("Wise ZIP 中央目录含加密或描述符标记"));
+        }
+        let filename_size = u16_at(bytes, position + 28)? as usize;
+        let extra_size = u16_at(bytes, position + 30)? as usize;
+        let comment_size = u16_at(bytes, position + 32)? as usize;
+        let name_range = checked_range(position + 46, filename_size, directory.end)?;
+        let extra = checked_range(name_range.end, extra_size, directory.end)?;
+        let record_end = checked_range(extra.end, comment_size, directory.end)?.end;
+        let mut extra_position = extra.start;
+        while extra_position < extra.end {
+            checked_range(extra_position, 4, extra.end)?;
+            if u16_at(bytes, extra_position)? == 1 {
+                return Err(invalid("Wise ZIP64 扩展不受支持"));
+            }
+            extra_position = checked_range(
+                extra_position + 4,
+                u16_at(bytes, extra_position + 2)? as usize,
+                extra.end,
+            )?
+            .end;
+        }
+        let attributes = u32_at(bytes, position + 38)?;
+        if attributes & 0x10 != 0 || (attributes >> 16) & 0o170000 == 0o120000 {
+            return Err(invalid("Wise ZIP 含目录或符号链接条目"));
+        }
+        let offset = u32_at(bytes, position + 42)? as usize;
+        let local = local_zip(bytes, offset)?;
+        if local.end > directory.start
+            || &bytes[name_range] != local.name.as_bytes()
+            || local.size != u64::from(u32_at(bytes, position + 24)?)
+            || local.compressed as u64 != u64::from(u32_at(bytes, position + 20)?)
+            || local.crc != u32_at(bytes, position + 16)?
+            // Wise sets its private 0x8000 bit only in the local header.
+            || u16_at(bytes, offset + 6)? & !0x8000 != flags
+        {
+            return Err(invalid("Wise ZIP 中央目录与本地文件头不一致"));
+        }
+        ranges.push((offset, local.end));
+        // Duplicate basenames are normal in Wise: __INIT__.PY, README, etc.
+        // Preserve every physical entry; generic ZipArchive indexes by name
+        // and silently replaces earlier entries that have the same basename.
+        if entries.insert(offset, local).is_some() {
+            return Err(invalid("Wise ZIP 条目偏移重复"));
+        }
+        position = record_end;
+    }
+    if position != directory.end {
+        return Err(invalid("Wise ZIP 中央目录长度或文件数量不匹配"));
+    }
+    ranges.sort_unstable();
+    if ranges.windows(2).any(|pair| pair[0].1 > pair[1].0) {
+        return Err(invalid("Wise ZIP 文件区域重叠"));
+    }
+    Ok(entries)
 }
 
 struct Script<'a> {
@@ -444,44 +547,7 @@ pub(super) fn extract(bytes: &[u8], output: &mut ExtractionOutput<'_>) -> AppRes
         )));
     }
     let (files, base, mut declared) = parsed.pop().unwrap();
-    let mut archive = zip::ZipArchive::new(Cursor::new(bytes))
-        .map_err(|error| invalid(format!("读取 Wise ZIP 中央目录失败：{error}")))?;
-    if archive.len() > MAX_FILES {
-        return Err(invalid("Wise ZIP 文件数量超过限制"));
-    }
-    let mut offsets = HashMap::new();
-    let mut ranges = Vec::new();
-    for index in 0..archive.len() {
-        let entry = archive
-            .by_index(index)
-            .map_err(|error| invalid(format!("读取 Wise ZIP 条目失败：{error}")))?;
-        let offset =
-            usize::try_from(entry.header_start()).map_err(|_| invalid("Wise ZIP 偏移溢出"))?;
-        if offsets.insert(offset, index).is_some() {
-            return Err(invalid("Wise ZIP 条目偏移重复"));
-        }
-        if entry.is_dir()
-            || entry
-                .unix_mode()
-                .is_some_and(|mode| mode & 0o170000 == 0o120000)
-        {
-            return Err(invalid("Wise ZIP 含目录或符号链接条目"));
-        }
-        let local = local_zip(bytes, offset)?;
-        ranges.push((offset, local.end));
-        if entry.name() != local.name
-            || entry.size() != local.size
-            || entry.compressed_size() != local.compressed as u64
-            || entry.crc32() != local.crc
-            || entry.compression() != zip::CompressionMethod::Deflated
-        {
-            return Err(invalid("Wise ZIP 中央目录与本地文件头不一致"));
-        }
-    }
-    ranges.sort_unstable();
-    if ranges.windows(2).any(|pair| pair[0].1 > pair[1].0) {
-        return Err(invalid("Wise ZIP 文件区域重叠"));
-    }
+    let entries = central_entries(bytes)?;
     let mut selected = Vec::new();
     for file in files {
         let start = base
@@ -494,9 +560,12 @@ pub(super) fn extract(bytes: &[u8], output: &mut ExtractionOutput<'_>) -> AppRes
         if entry.end != end
             || entry.size != file.size
             || !declared.insert(start)
-            || !offsets.contains_key(&start)
+            || !entries.contains_key(&start)
         {
-            return Err(invalid("WiseScript 与 ZIP 文件没有一一对应"));
+            return Err(invalid(format!(
+                "WiseScript 与 ZIP 文件没有一一对应：{}，文件头偏移 {start}，声明结束 {end}，实际结束 {}，声明大小 {}，实际大小 {}",
+                file.path, entry.end, file.size, entry.size
+            )));
         }
         if let Some(relative) = destination(&file.path, &entry.name)? {
             if !matching_name(&relative, &entry.name) {
@@ -510,11 +579,10 @@ pub(super) fn extract(bytes: &[u8], output: &mut ExtractionOutput<'_>) -> AppRes
     }
     // All remaining central entries must be known Wise dialog/config assets.
     // An unreferenced runtime payload is an error, never silently omitted.
-    for (offset, index) in offsets {
+    for (offset, entry) in entries {
         if declared.contains(&offset) {
             continue;
         }
-        let entry = local_zip(bytes, offset)?;
         if !(1..=8).any(|number| {
             entry
                 .name
@@ -522,13 +590,7 @@ pub(super) fn extract(bytes: &[u8], output: &mut ExtractionOutput<'_>) -> AppRes
         }) {
             return Err(invalid(format!("Wise 未映射文件：{}", entry.name)));
         }
-        let mut file = archive
-            .by_index(index)
-            .map_err(|error| invalid(format!("读取 Wise ZIP 辅助条目失败：{error}")))?;
-        let content = limited_bytes(&mut file, MAX_SCRIPT)?;
-        if content.len() as u64 != entry.size {
-            return Err(invalid("Wise 辅助文件大小不匹配"));
-        }
+        inflate(bytes, &entry, MAX_SCRIPT)?;
     }
     // Fully validate every mapping before any destination file is created.
     for (path, entry) in selected {
@@ -542,6 +604,108 @@ pub(super) fn extract(bytes: &[u8], output: &mut ExtractionOutput<'_>) -> AppRes
 mod tests {
     use super::*;
     use std::io::Write;
+
+    fn duplicate_basename_zip() -> (Vec<u8>, Vec<usize>, usize) {
+        let mut bytes = b"MZ Wise engine prefix".to_vec();
+        let mut records = Vec::new();
+        let name = b"__INIT__.PY";
+        for content in [b"package alpha".as_slice(), b"package beta".as_slice()] {
+            let mut encoder =
+                flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::default());
+            encoder.write_all(content).unwrap();
+            let compressed = encoder.finish().unwrap();
+            let offset = bytes.len();
+            let crc = crc32(content);
+            bytes.extend_from_slice(b"PK\x03\x04");
+            for value in [20_u16, 0x8000, 8, 0, 0] {
+                bytes.extend_from_slice(&value.to_le_bytes());
+            }
+            for value in [crc, compressed.len() as u32, content.len() as u32] {
+                bytes.extend_from_slice(&value.to_le_bytes());
+            }
+            bytes.extend_from_slice(&(name.len() as u16).to_le_bytes());
+            bytes.extend_from_slice(&0_u16.to_le_bytes());
+            bytes.extend_from_slice(name);
+            bytes.extend_from_slice(&compressed);
+            records.push((offset, crc, compressed.len(), content.len()));
+        }
+        let directory = bytes.len();
+        for (offset, crc, compressed, size) in &records {
+            bytes.extend_from_slice(b"PK\x01\x02");
+            for value in [20_u16, 20, 0, 8, 0, 0] {
+                bytes.extend_from_slice(&value.to_le_bytes());
+            }
+            for value in [*crc, *compressed as u32, *size as u32] {
+                bytes.extend_from_slice(&value.to_le_bytes());
+            }
+            for value in [name.len() as u16, 0, 0, 0, 0] {
+                bytes.extend_from_slice(&value.to_le_bytes());
+            }
+            bytes.extend_from_slice(&32_u32.to_le_bytes());
+            bytes.extend_from_slice(&(*offset as u32).to_le_bytes());
+            bytes.extend_from_slice(name);
+        }
+        let footer = bytes.len();
+        let directory_size = footer - directory;
+        bytes.extend_from_slice(b"PK\x05\x06");
+        for value in [0_u16, 0, records.len() as u16, records.len() as u16] {
+            bytes.extend_from_slice(&value.to_le_bytes());
+        }
+        bytes.extend_from_slice(&(directory_size as u32).to_le_bytes());
+        bytes.extend_from_slice(&(directory as u32).to_le_bytes());
+        bytes.extend_from_slice(&0_u16.to_le_bytes());
+        (
+            bytes,
+            records.iter().map(|record| record.0).collect(),
+            footer,
+        )
+    }
+
+    #[test]
+    fn wise_central_directory_preserves_duplicate_basenames_by_physical_offset() {
+        let (bytes, offsets, _) = duplicate_basename_zip();
+        let entries = central_entries(&bytes).unwrap();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[&offsets[0]].name, entries[&offsets[1]].name);
+        assert_eq!(
+            inflate(&bytes, &entries[&offsets[0]], 100).unwrap(),
+            b"package alpha"
+        );
+        assert_eq!(
+            inflate(&bytes, &entries[&offsets[1]], 100).unwrap(),
+            b"package beta"
+        );
+    }
+
+    #[test]
+    fn wise_central_directory_rejects_duplicate_offsets_and_inconsistent_records() {
+        let (bytes, _, footer) = duplicate_basename_zip();
+        let directory = u32_at(&bytes, footer + 16).unwrap() as usize;
+        let second = directory + 46 + b"__INIT__.PY".len();
+        let mut corrupted = bytes.clone();
+        corrupted[second..second + 46 + b"__INIT__.PY".len()]
+            .copy_from_slice(&bytes[directory..second]);
+        assert!(central_entries(&corrupted).is_err());
+        for position in [
+            footer + 4,
+            footer + 8,
+            footer + 12,
+            directory + 16,
+            directory + 20,
+            directory + 24,
+            directory + 28,
+        ] {
+            let mut corrupted = bytes.clone();
+            corrupted[position] ^= 1;
+            assert!(central_entries(&corrupted).is_err(), "offset {position}");
+        }
+        let mut corrupted = bytes.clone();
+        corrupted[directory + 38] |= 0x10;
+        assert!(central_entries(&corrupted).is_err());
+        let mut corrupted = bytes;
+        corrupted.extend_from_slice(b"trailing-data");
+        assert!(central_entries(&corrupted).is_err());
+    }
 
     fn old_script() -> Vec<u8> {
         let mut bytes = vec![0; 18];

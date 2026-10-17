@@ -1552,13 +1552,36 @@ struct PythonSetupWorkspace {
 impl PythonSetupWorkspace {
     fn create(request: &InstallRequest) -> AppResult<Self> {
         validate_destination_boundary(&request.root, &request.destination)?;
-        let parent = request
-            .destination
-            .parent()
-            .ok_or_else(|| AppError::UnsafePath(request.destination.clone()))?;
-        let directory = parent.join(format!(".envpilot-python-{}", uuid::Uuid::new_v4()));
+        let filename = download_filename(&request.download_url)?.to_ascii_lowercase();
+        let legacy = filename.ends_with(".msi") || filename.ends_with(".exe");
+        let parent = if legacy {
+            request.root.as_path()
+        } else {
+            request
+                .destination
+                .parent()
+                .ok_or_else(|| AppError::UnsafePath(request.destination.clone()))?
+        };
+        // Old Python/zipimport and pip's unpack directories still use Win32
+        // path buffers. Keep owned temporary paths short without using TEMP on
+        // another disk. Atomic creation prevents a name collision overwriting
+        // another concurrent setup workspace.
+        let directory = loop {
+            let identifier = uuid::Uuid::new_v4();
+            let name = if legacy {
+                format!(".ep{}", &identifier.simple().to_string()[..12])
+            } else {
+                format!(".envpilot-python-{identifier}")
+            };
+            let directory = parent.join(name);
+            validate_destination_boundary(&request.root, &directory)?;
+            match fs::create_dir(&directory) {
+                Ok(()) => break directory,
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(error) => return Err(error.into()),
+            }
+        };
         validate_destination_boundary(&request.root, &directory)?;
-        fs::create_dir(&directory)?;
         let workspace = Self {
             directory,
             managed_root: request.root.clone(),
@@ -1909,10 +1932,167 @@ fn run_legacy_python_module(
     run_python_setup_command(python, &command, environment, timeout)
 }
 
+fn prepare_legacy_pip_bootstrap(wheels: &[PathBuf], workspace: &Path) -> AppResult<PathBuf> {
+    const MAX_WHEEL_FILES: usize = 20_000;
+    const MAX_WHEEL_BYTES: u64 = 128 * 1024 * 1024;
+    let bootstrap = workspace.join("b");
+    fs::create_dir(&bootstrap)?;
+    let mut files = std::collections::HashSet::new();
+    let mut total = 0_u64;
+    for wheel in wheels {
+        let mut archive = zip::ZipArchive::new(File::open(wheel)?).map_err(|error| {
+            AppError::InvalidSource(format!("内置 pip wheel ZIP 无效：{error}"))
+        })?;
+        if archive.len() > MAX_WHEEL_FILES {
+            return Err(AppError::InvalidSource("内置 pip wheel 条目过多".into()));
+        }
+        for index in 0..archive.len() {
+            let mut entry = archive.by_index(index).map_err(|error| {
+                AppError::InvalidSource(format!("读取内置 pip wheel 条目失败：{error}"))
+            })?;
+            let name = entry.name().trim_end_matches('/');
+            let mut relative = PathBuf::new();
+            for component in name.split('/') {
+                let device = component
+                    .split('.')
+                    .next()
+                    .unwrap_or("")
+                    .to_ascii_uppercase();
+                if component.is_empty()
+                    || matches!(component, "." | "..")
+                    || !component.is_ascii()
+                    || component.ends_with(['.', ' '])
+                    || component
+                        .bytes()
+                        .any(|byte| byte < 32 || b"\\:<>\"|?*".contains(&byte))
+                    || matches!(device.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+                    || (device.len() == 4
+                        && (device.starts_with("COM") || device.starts_with("LPT"))
+                        && matches!(device.as_bytes()[3], b'1'..=b'9'))
+                {
+                    return Err(AppError::InvalidSource(
+                        "内置 pip wheel 包含不安全路径".into(),
+                    ));
+                }
+                relative.push(component);
+            }
+            if entry
+                .unix_mode()
+                .is_some_and(|mode| mode & 0o170000 == 0o120000)
+            {
+                return Err(AppError::InvalidSource(
+                    "内置 pip wheel 包含符号链接".into(),
+                ));
+            }
+            let output = bootstrap.join(relative);
+            validate_destination_boundary(&bootstrap, &output)?;
+            if entry.is_dir() {
+                fs::create_dir_all(&output)?;
+                continue;
+            }
+            total = total
+                .checked_add(entry.size())
+                .filter(|size| *size <= MAX_WHEEL_BYTES)
+                .ok_or_else(|| AppError::InvalidSource("内置 pip wheel 解压大小超限".into()))?;
+            if !files.insert(name.to_ascii_lowercase()) || files.len() > MAX_WHEEL_FILES {
+                return Err(AppError::InvalidSource(
+                    "内置 pip wheel 路径重复或条目过多".into(),
+                ));
+            }
+            fs::create_dir_all(
+                output
+                    .parent()
+                    .ok_or_else(|| AppError::UnsafePath(output.clone()))?,
+            )?;
+            validate_destination_boundary(&bootstrap, &output)?;
+            let mut target = SyncOpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(output)?;
+            let expected = entry.size();
+            // Read through EOF so zip's CRC verification is not skipped.
+            let copied = std::io::copy(&mut (&mut entry).take(expected + 1), &mut target)?;
+            if copied != expected {
+                return Err(AppError::InvalidSource(
+                    "内置 pip wheel 文件大小不匹配".into(),
+                ));
+            }
+        }
+    }
+    if !bootstrap.join("pip/__main__.py").is_file() {
+        return Err(AppError::InvalidSource(
+            "内置 pip wheel 缺少可运行的 pip 模块".into(),
+        ));
+    }
+    Ok(bootstrap)
+}
+
+fn legacy_pip_bootstrap_source() -> String {
+    // -E/-I deliberately ignore PYTHONPATH. The private unpacked packages must
+    // be selected in-process, ahead of any unrelated installed pip. Running
+    // pip.__main__ also propagates its exit code, unlike old ensurepip which
+    // silently discarded pip.main's return status.
+    format!("import sys; sys.path.insert(0,sys.argv.pop(1)); {PYTHON_SETUP_MODULE_WRAPPER}")
+}
+
+fn bootstrap_legacy_pip(
+    python: &Path,
+    flags: &[&str],
+    wheels: &[PathBuf],
+    bootstrap: &Path,
+    environment: &[(&str, &std::ffi::OsStr)],
+    timeout: Duration,
+) -> AppResult<()> {
+    let command = legacy_pip_bootstrap_command(flags, wheels, bootstrap);
+    let command = command.iter().map(String::as_str).collect::<Vec<_>>();
+    run_python_setup_command(python, &command, environment, timeout)
+}
+
+fn legacy_pip_bootstrap_command(
+    flags: &[&str],
+    wheels: &[PathBuf],
+    bootstrap: &Path,
+) -> Vec<String> {
+    let source = legacy_pip_bootstrap_source();
+    let mut command = flags
+        .iter()
+        .map(|flag| (*flag).to_string())
+        .collect::<Vec<_>>();
+    command.extend([
+        "-B".into(),
+        "-c".into(),
+        source,
+        bootstrap.to_string_lossy().into_owned(),
+    ]);
+    command.extend(
+        [
+            "pip",
+            "install",
+            "--no-index",
+            "--no-cache-dir",
+            "--ignore-installed",
+            "--no-deps",
+            "--no-compile",
+        ]
+        .map(String::from),
+    );
+    command.extend(
+        wheels
+            .iter()
+            .map(|wheel| wheel.to_string_lossy().into_owned()),
+    );
+    command
+}
+
 fn initialize_legacy_python_runtime(request: &InstallRequest) -> AppResult<()> {
     let wheels = legacy_python_runtime_files(&request.destination, &request.version)?;
     let workspace = PythonSetupWorkspace::create(request)?;
     let result = (|| {
+        let bootstrap = if wheels.is_empty() {
+            None
+        } else {
+            Some(prepare_legacy_pip_bootstrap(&wheels, &workspace.directory)?)
+        };
         let early = ["2.0.", "2.1.", "2.2.", "2.3."]
             .iter()
             .any(|prefix| request.version.starts_with(prefix));
@@ -1966,23 +2146,18 @@ fn initialize_legacy_python_runtime(request: &InstallRequest) -> AppResult<()> {
             run_python_setup_command(&python, &probe, &environment, timeout)?;
         }
         if has_bundled_pip(&request.version) {
-            run_legacy_python_module(
-                &python,
-                &flags,
-                "ensurepip",
-                &["--upgrade", "--default-pip"],
-                &environment,
-                timeout,
-            )?;
-            // Recreate launchers only at their final path. The bundled wheels
-            // are the only inputs; never upgrade old Python to today's pip.
-            let wheel_paths = wheels
-                .iter()
-                .map(|path| path.to_string_lossy().into_owned())
-                .collect::<Vec<_>>();
-            let mut install = vec!["install", "--no-index", "--force-reinstall", "--no-deps"];
-            install.extend(wheel_paths.iter().map(String::as_str));
-            run_legacy_python_module(&python, &flags, "pip", &install, &environment, timeout)?;
+            // Old ensurepip can exit zero after SSL/import/install failures.
+            // Probe SSL explicitly, then import only statically unpacked,
+            // bundled wheels and propagate pip's actual __main__ exit code.
+            let mut ssl_probe = flags.clone();
+            ssl_probe.extend_from_slice(&["-c", "import ssl,_ssl"]);
+            run_python_setup_command(&python, &ssl_probe, &environment, timeout)?;
+            let bootstrap = bootstrap.as_deref().ok_or_else(|| {
+                AppError::InvalidSource("历史 Python 缺少内置 pip 启动目录".into())
+            })?;
+            bootstrap_legacy_pip(&python, &flags, &wheels, bootstrap, &environment, timeout)?;
+            // Bootstrap already installs these exact bundled versions into
+            // the final prefix and generates its absolute-path launchers.
             verify_python_pip_launcher_args(
                 &request.destination.join("Scripts/pip.exe"),
                 &request.destination,
@@ -1998,6 +2173,7 @@ fn initialize_legacy_python_runtime(request: &InstallRequest) -> AppResult<()> {
                 &environment,
                 timeout,
             )?;
+            run_legacy_python_module(&python, &flags, "pip", &["list"], &environment, timeout)?;
         }
         if has_builtin_venv(&request.version) {
             let venv = workspace.directory.join("venv");
@@ -2029,12 +2205,15 @@ fn initialize_legacy_python_runtime(request: &InstallRequest) -> AppResult<()> {
                 timeout,
             )?;
             if has_bundled_pip(&request.version) {
-                // Venv's internal ensurepip child would lose the distutils guard.
-                run_legacy_python_module(
+                // Bootstrap the venv directly as well: old ensurepip swallows
+                // errors and ZIP imports expand its private temporary paths.
+                bootstrap_legacy_pip(
                     &venv.join("Scripts/python.exe"),
                     &flags,
-                    "ensurepip",
-                    &["--upgrade", "--default-pip"],
+                    &wheels,
+                    bootstrap.as_deref().ok_or_else(|| {
+                        AppError::InvalidSource("历史 Python 缺少内置 pip 启动目录".into())
+                    })?,
                     &environment,
                     timeout,
                 )?;
@@ -2045,6 +2224,16 @@ fn initialize_legacy_python_runtime(request: &InstallRequest) -> AppResult<()> {
                     &environment,
                     timeout,
                 )?;
+                for arguments in [&["--version"][..], &["list"][..]] {
+                    run_legacy_python_module(
+                        &venv.join("Scripts/python.exe"),
+                        &flags,
+                        "pip",
+                        arguments,
+                        &environment,
+                        timeout,
+                    )?;
+                }
             }
         }
         Ok(())
@@ -2774,6 +2963,151 @@ mod tests {
         historical_python_fixture(root.path(), "2.7.18");
         fs::write(root.path().join("python27._pth"), b"python27.zip\n.").unwrap();
         assert!(legacy_python_runtime_files(root.path(), "2.7.18").is_err());
+    }
+
+    fn bootstrap_wheel_fixture(entries: &[(&str, &[u8])]) -> Vec<u8> {
+        let mut archive = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        for (name, body) in entries {
+            archive
+                .start_file(
+                    *name,
+                    zip::write::SimpleFileOptions::default()
+                        .compression_method(zip::CompressionMethod::Stored),
+                )
+                .unwrap();
+            archive.write_all(body).unwrap();
+        }
+        archive.finish().unwrap().into_inner()
+    }
+
+    #[test]
+    fn legacy_pip_bootstrap_unpacks_owned_packages_and_rejects_unsafe_or_duplicate_paths() {
+        let root = tempdir().unwrap();
+        let wheel = root.path().join("bundled.whl");
+        fs::write(
+            &wheel,
+            bootstrap_wheel_fixture(&[
+                ("pip/__main__.py", b"raise SystemExit(0)"),
+                ("pip/_vendor/urllib3/connectionpool.py", b"owned source"),
+            ]),
+        )
+        .unwrap();
+        let workspace = root.path().join("workspace");
+        fs::create_dir(&workspace).unwrap();
+        let bootstrap = prepare_legacy_pip_bootstrap(&[wheel.clone()], &workspace).unwrap();
+        assert_eq!(bootstrap, workspace.join("b"));
+        assert_eq!(
+            fs::read(bootstrap.join("pip/_vendor/urllib3/connectionpool.py")).unwrap(),
+            b"owned source"
+        );
+        for (index, name) in [
+            "../escape.py",
+            "pip/CON.py",
+            "pip/module.py:stream",
+            "pip/end. ",
+        ]
+        .iter()
+        .enumerate()
+        {
+            let workspace = root.path().join(format!("unsafe-{index}"));
+            fs::create_dir(&workspace).unwrap();
+            fs::write(&wheel, bootstrap_wheel_fixture(&[(name, b"unsafe")])).unwrap();
+            assert!(prepare_legacy_pip_bootstrap(&[wheel.clone()], &workspace).is_err());
+        }
+        let workspace = root.path().join("duplicate");
+        fs::create_dir(&workspace).unwrap();
+        fs::write(
+            &wheel,
+            bootstrap_wheel_fixture(&[("pip/__main__.py", b"owned")]),
+        )
+        .unwrap();
+        assert!(prepare_legacy_pip_bootstrap(&[wheel.clone(), wheel], &workspace).is_err());
+        assert!(!root.path().join("escape.py").exists());
+    }
+
+    #[test]
+    fn legacy_pip_bootstrap_rejects_bad_crc_declared_size_and_oversized_payloads() {
+        let root = tempdir().unwrap();
+        let wheel = root.path().join("bundled.whl");
+        let original = bootstrap_wheel_fixture(&[("pip/__main__.py", b"owned source")]);
+        let central = original
+            .windows(4)
+            .position(|value| value == b"PK\x01\x02")
+            .unwrap();
+        let data = 30 + "pip/__main__.py".len();
+        for index in 0..3 {
+            let mut broken = original.clone();
+            match index {
+                0 => broken[data] ^= 1,
+                1 => {
+                    broken[22..26].copy_from_slice(&2_u32.to_le_bytes());
+                    broken[central + 24..central + 28].copy_from_slice(&2_u32.to_le_bytes());
+                }
+                _ => {
+                    let size = (128_u32 * 1024 * 1024 + 1).to_le_bytes();
+                    broken[22..26].copy_from_slice(&size);
+                    broken[central + 24..central + 28].copy_from_slice(&size);
+                }
+            }
+            fs::write(&wheel, broken).unwrap();
+            let workspace = root.path().join(format!("broken-{index}"));
+            fs::create_dir(&workspace).unwrap();
+            assert!(prepare_legacy_pip_bootstrap(&[wheel.clone()], &workspace).is_err());
+            let output = workspace.join("b/pip/__main__.py");
+            if index == 1 && output.exists() {
+                assert!(fs::metadata(output).unwrap().len() <= 3);
+            }
+        }
+    }
+
+    #[test]
+    fn legacy_pip_bootstrap_selects_the_private_module_without_pythonpath() {
+        let bootstrap = PathBuf::from(r"E:\Environment\.ep123456789abc\b");
+        let wheels = [PathBuf::from(
+            r"E:\Environment\Python tools\pip-bundled.whl",
+        )];
+        let command = legacy_pip_bootstrap_command(&["-E", "-s"], &wheels, &bootstrap);
+        assert_eq!(&command[..4], ["-E", "-s", "-B", "-c"]);
+        assert!(command[4].contains("sys.path.insert(0,sys.argv.pop(1))"));
+        assert!(command[4].contains("runpy.run_module(module,run_name='__main__',alter_sys=True)"));
+        assert!(command[4].contains("find_config_files=lambda self,*a,**k: []"));
+        assert_eq!(command[5].as_str(), bootstrap.to_string_lossy().as_ref());
+        assert_eq!(&command[6..8], ["pip", "install"]);
+        for flag in [
+            "--no-index",
+            "--no-cache-dir",
+            "--ignore-installed",
+            "--no-deps",
+            "--no-compile",
+        ] {
+            assert!(command.iter().any(|argument| argument == flag));
+        }
+        assert_eq!(
+            command.last().unwrap().as_str(),
+            wheels[0].to_string_lossy().as_ref()
+        );
+    }
+
+    #[test]
+    fn legacy_setup_workspace_is_short_owned_and_cleaned() {
+        let root = tempdir().unwrap();
+        let request = InstallRequest {
+            tool_id: "python".into(),
+            version: "2.7.18".into(),
+            root: root.path().to_path_buf(),
+            destination: root.path().join("python/2.7.18"),
+            download_url: "https://www.python.org/ftp/python/2.7.18/python-2.7.18.amd64.msi".into(),
+            checksum_algorithm: None,
+            checksum: None,
+        };
+        let workspace = PythonSetupWorkspace::create(&request).unwrap();
+        assert_eq!(workspace.directory.parent(), Some(root.path()));
+        let name = workspace.directory.file_name().unwrap().to_string_lossy();
+        assert!(name.starts_with(".ep"));
+        assert_eq!(name.len(), 15);
+        assert!(workspace.directory.join("temp").is_dir());
+        workspace.cleanup().unwrap();
+        assert_eq!(fs::read_dir(root.path()).unwrap().count(), 0);
     }
 
     #[test]
