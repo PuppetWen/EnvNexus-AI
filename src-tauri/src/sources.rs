@@ -1,4 +1,7 @@
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{HashMap, HashSet},
+    io::Read,
+};
 
 use chrono::{DateTime, Duration, Utc};
 use futures_util::{StreamExt, stream};
@@ -106,10 +109,19 @@ async fn checked_text(client: &reqwest::Client, url: &str) -> AppResult<String> 
     for attempt in 0..3 {
         let (error, retryable) =
             match checked_response(client, url, "text/plain, text/html;q=0.9, */*;q=0.8").await {
-                Ok(response) => match response.text().await {
-                    Ok(text) if !text.is_empty() => return Ok(text),
-                    Ok(_) => (AppError::InvalidSource(format!("{url}：响应体为空")), true),
-                    Err(error) => (AppError::Http(error), true),
+                Ok(response) => match source_response_bytes(response, url).await {
+                    Ok(bytes) if bytes.is_empty() => {
+                        (AppError::InvalidSource(format!("{url}：响应体为空")), true)
+                    }
+                    Ok(bytes) => {
+                        return String::from_utf8(bytes).map_err(|error| {
+                            AppError::InvalidSource(format!("{url}：响应不是有效 UTF-8：{error}"))
+                        });
+                    }
+                    Err(error) => {
+                        let retryable = retryable_source_error(&error);
+                        (error, retryable)
+                    }
                 },
                 Err(error) => {
                     let retryable = retryable_source_error(&error);
@@ -137,7 +149,7 @@ where
                     .and_then(|value| value.to_str().ok())
                     .unwrap_or("未知 Content-Type")
                     .to_string();
-                match response.bytes().await {
+                match source_response_bytes(response, url).await {
                     Ok(bytes) if bytes.is_empty() => {
                         (AppError::InvalidSource(format!("{url}：响应体为空")), true)
                     }
@@ -153,7 +165,10 @@ where
                             )
                         }
                     },
-                    Err(error) => (AppError::Http(error), true),
+                    Err(error) => {
+                        let retryable = retryable_source_error(&error);
+                        (error, retryable)
+                    }
                 }
             }
             Err(error) => {
@@ -177,9 +192,90 @@ async fn checked_response(
     let response = client
         .get(url)
         .header(reqwest::header::ACCEPT, accept)
+        // Decode only source metadata here; binary/range downloads keep their
+        // original representation and Content-Length semantics.
+        .header(reqwest::header::ACCEPT_ENCODING, "gzip, identity")
         .send()
         .await?;
     checked_source_response(response)
+}
+
+const MAX_SOURCE_RESPONSE_BYTES: usize = 32 * 1024 * 1024;
+
+async fn source_response_bytes(response: reqwest::Response, source: &str) -> AppResult<Vec<u8>> {
+    let encoding = response
+        .headers()
+        .get(reqwest::header::CONTENT_ENCODING)
+        .map(|value| value.to_str())
+        .transpose()
+        .map_err(|_| AppError::InvalidSource(format!("{source}：Content-Encoding 无效")))?
+        .unwrap_or("identity")
+        .to_ascii_lowercase();
+    if !matches!(encoding.trim(), "identity" | "gzip" | "x-gzip") {
+        return Err(AppError::InvalidSource(format!(
+            "{source}：不支持 Content-Encoding {encoding}"
+        )));
+    }
+    if response
+        .content_length()
+        .is_some_and(|length| length > MAX_SOURCE_RESPONSE_BYTES as u64)
+    {
+        return Err(AppError::InvalidSource(format!(
+            "{source}：响应超过 {} 字节限制",
+            MAX_SOURCE_RESPONSE_BYTES
+        )));
+    }
+    let mut stream = response.bytes_stream();
+    let mut bytes = Vec::new();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk?;
+        if chunk.len() > MAX_SOURCE_RESPONSE_BYTES - bytes.len() {
+            return Err(AppError::InvalidSource(format!(
+                "{source}：响应超过 {} 字节限制",
+                MAX_SOURCE_RESPONSE_BYTES
+            )));
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    decode_source_body(bytes, &encoding, source, MAX_SOURCE_RESPONSE_BYTES)
+}
+
+fn decode_source_body(
+    bytes: Vec<u8>,
+    encoding: &str,
+    source: &str,
+    limit: usize,
+) -> AppResult<Vec<u8>> {
+    let oversized =
+        || AppError::InvalidSource(format!("{source}：压缩或解压后的响应超过 {limit} 字节限制"));
+    if bytes.len() > limit {
+        return Err(oversized());
+    }
+    match encoding.trim() {
+        "identity" => Ok(bytes),
+        "gzip" | "x-gzip" => {
+            let mut decoded = Vec::new();
+            let mut reader =
+                flate2::read::MultiGzDecoder::new(bytes.as_slice()).take(limit as u64 + 1);
+            reader.read_to_end(&mut decoded).map_err(|error| {
+                if error.kind() == std::io::ErrorKind::UnexpectedEof {
+                    AppError::Io(std::io::Error::new(
+                        error.kind(),
+                        format!("{source}：gzip 响应被截断：{error}"),
+                    ))
+                } else {
+                    AppError::InvalidSource(format!("{source}：gzip 响应无效：{error}"))
+                }
+            })?;
+            if decoded.len() > limit {
+                return Err(oversized());
+            }
+            Ok(decoded)
+        }
+        _ => Err(AppError::InvalidSource(format!(
+            "{source}：不支持 Content-Encoding {encoding}"
+        ))),
+    }
 }
 
 fn checked_source_response(response: reqwest::Response) -> AppResult<reqwest::Response> {
@@ -244,6 +340,7 @@ fn source_retry_time(
 fn retryable_source_error(error: &AppError) -> bool {
     match error {
         AppError::Http(error) => error.is_timeout() || error.is_connect() || error.is_body(),
+        AppError::Io(error) => error.kind() == std::io::ErrorKind::UnexpectedEof,
         AppError::SourceHttp {
             status,
             rate_limited: false,
@@ -331,9 +428,9 @@ async fn fetch_python(client: &reqwest::Client, tool_id: &str) -> AppResult<Vers
                     checked_json::<PythonRuntimeIndex>(client, &url).await
                 }),
                 futures_util::future::try_join3(
-                    checked_text(client, PYTHON_LEGACY_SOURCE),
-                    checked_text(client, PYTHON_FTP_SOURCE),
-                    checked_text(client, PYTHON_EARLY_SOURCE),
+                    checked_python_archive(client, PYTHON_LEGACY_SOURCE),
+                    checked_python_archive(client, PYTHON_FTP_SOURCE),
+                    checked_python_archive(client, PYTHON_EARLY_SOURCE),
                 ),
                 fetch_python_source_tags(client),
             ),
@@ -963,6 +1060,100 @@ fn python_file_checksum(file: &PythonReleaseFile) -> Option<(String, String)> {
     valid_hex_digest(&file.md5_sum, 32).then(|| ("md5".into(), file.md5_sum.to_ascii_lowercase()))
 }
 
+fn python_archive_filename_version(filename: &str) -> Option<String> {
+    let stem = filename
+        .strip_suffix(".tar.gz")
+        .or_else(|| filename.strip_suffix(".tgz"))?;
+    let raw = match stem {
+        "py152" => "1.5.2",
+        "pyth151" => "1.5.1",
+        stem => stem
+            .strip_prefix("python-")
+            .or_else(|| stem.strip_prefix("python"))
+            .or_else(|| stem.strip_prefix("Python-"))?,
+    };
+    normalize_python_history_version(raw)
+}
+
+fn python_early_archive_entry(href: &str, label: &str) -> Option<(String, String)> {
+    let version = normalize_python_history_version(label)?;
+    let notes = url::Url::parse(PYTHON_EARLY_SOURCE)
+        .ok()?
+        .join(href)
+        .ok()
+        .filter(|notes| notes.as_str().starts_with(PYTHON_EARLY_SOURCE))?;
+    Some((version, notes.to_string()))
+}
+
+async fn checked_python_archive(client: &reqwest::Client, source: &str) -> AppResult<String> {
+    checked_python_archive_with(source, || checked_text(client, source)).await
+}
+
+async fn checked_python_archive_with<F, Fut>(source: &str, mut fetch: F) -> AppResult<String>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = AppResult<String>>,
+{
+    for attempt in 0..3 {
+        // Retry only this malformed 200 response, not the large release APIs
+        // or other successful archive pages. The caller's overall deadline is
+        // unchanged, and an unrecognizable page is never cached as complete.
+        let page = fetch().await?;
+        match validate_python_archive_page(source, &page) {
+            Ok(()) => return Ok(page),
+            Err(error) if attempt == 2 => return Err(error),
+            Err(_) => retry_delay(attempt).await,
+        }
+    }
+    unreachable!("the last archive attempt returns its precise error")
+}
+
+fn validate_python_archive_page(source: &str, page: &str) -> AppResult<()> {
+    let links = Regex::new(r#"(?i)\bhref\s*=\s*["']([^"']+)["']"#)
+        .map_err(|error| AppError::Message(error.to_string()))?;
+    let count = if source == PYTHON_EARLY_SOURCE {
+        let early = Regex::new(
+            r#"(?is)<a\b[^>]*\bhref\s*=\s*["']([^"']+)["'][^>]*>\s*Python\s+([^<\s]+)\s*</a>"#,
+        )
+        .map_err(|error| AppError::Message(error.to_string()))?;
+        early
+            .captures_iter(page)
+            .filter(|capture| python_early_archive_entry(&capture[1], &capture[2]).is_some())
+            .count()
+    } else if source == PYTHON_LEGACY_SOURCE {
+        links
+            .captures_iter(page)
+            .filter(|capture| python_archive_filename_version(&capture[1]).is_some())
+            .count()
+    } else if source == PYTHON_FTP_SOURCE {
+        links
+            .captures_iter(page)
+            .filter(|capture| {
+                capture[1]
+                    .strip_suffix('/')
+                    .and_then(normalize_python_history_version)
+                    .is_some()
+            })
+            .count()
+    } else {
+        return Err(AppError::InvalidSource(format!(
+            "{source}：未知的 Python 历史归档来源"
+        )));
+    };
+    if count == 0 {
+        let title = Regex::new(r"(?is)<title[^>]*>([^<]*)</title>")
+            .map_err(|error| AppError::Message(error.to_string()))?
+            .captures(page)
+            .map(|capture| capture[1].trim().chars().take(120).collect::<String>())
+            .unwrap_or_else(|| "无 HTML 标题".into());
+        return Err(AppError::InvalidSource(format!(
+            "{source}：Python 官方历史归档识别到 0 个版本条目（响应 {} 字节；{title}）",
+            page.len()
+        )));
+    }
+    Ok(())
+}
+
 fn merge_python_archives(
     versions: &mut HashMap<String, RemoteVersion>,
     legacy_html: &str,
@@ -976,47 +1167,21 @@ fn merge_python_archives(
     .map_err(|error| AppError::Message(error.to_string()))?;
     let mut early_count = 0;
     for capture in early_links.captures_iter(legacy_html) {
-        let Some(version) = normalize_python_history_version(&capture[2]) else {
-            continue;
-        };
-        let Some(notes) = url::Url::parse(PYTHON_EARLY_SOURCE)
-            .ok()
-            .and_then(|source| source.join(&capture[1]).ok())
-            .filter(|notes| notes.as_str().starts_with(PYTHON_EARLY_SOURCE))
-        else {
+        let Some((version, notes)) = python_early_archive_entry(&capture[1], &capture[2]) else {
             continue;
         };
         early_count += 1;
         versions.entry(version.clone()).or_insert_with(|| {
             python_archive_row(
                 version,
-                notes.to_string(),
+                notes,
                 "官方历史发布页可查，尚无可验证的 Windows 安装包元数据",
             )
         });
     }
     let mut legacy_count = 0;
     for capture in links.captures_iter(legacy_html) {
-        let filename = &capture[1];
-        let Some(stem) = filename
-            .strip_suffix(".tar.gz")
-            .or_else(|| filename.strip_suffix(".tgz"))
-        else {
-            continue;
-        };
-        let raw = match stem {
-            "py152" => "1.5.2",
-            "pyth151" => "1.5.1",
-            stem => match stem
-                .strip_prefix("python-")
-                .or_else(|| stem.strip_prefix("python"))
-                .or_else(|| stem.strip_prefix("Python-"))
-            {
-                Some(version) => version,
-                None => continue,
-            },
-        };
-        let Some(version) = normalize_python_history_version(raw) else {
+        let Some(version) = python_archive_filename_version(&capture[1]) else {
             continue;
         };
         legacy_count += 1;
@@ -1056,9 +1221,9 @@ fn merge_python_archives(
         });
     }
     if legacy_count == 0 || ftp_count == 0 || early_count == 0 {
-        return Err(AppError::InvalidSource(
-            "Python 官方历史归档未返回可识别的版本目录".into(),
-        ));
+        return Err(AppError::InvalidSource(format!(
+            "Python 官方历史归档未返回可识别的版本目录：{PYTHON_LEGACY_SOURCE}={legacy_count}，{PYTHON_EARLY_SOURCE}={early_count}，{PYTHON_FTP_SOURCE}={ftp_count}"
+        )));
     }
     Ok(())
 }
@@ -2327,6 +2492,10 @@ mod tests {
 
     impl MockSource {
         fn new(responses: Vec<String>) -> Self {
+            Self::binary(responses.into_iter().map(String::into_bytes).collect())
+        }
+
+        fn binary(responses: Vec<Vec<u8>>) -> Self {
             let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
             listener.set_nonblocking(true).unwrap();
             let url = format!("http://{}", listener.local_addr().unwrap());
@@ -2432,7 +2601,7 @@ mod tests {
                             server_requests.lock().unwrap().push(request);
                             let response = &responses[index.min(responses.len() - 1)];
                             // Status-error tests may close the response without reading its body.
-                            let _ = stream.write_all(response.as_bytes());
+                            let _ = stream.write_all(response);
                             index += 1;
                         }
                         Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
@@ -2497,6 +2666,173 @@ mod tests {
             .timeout(std::time::Duration::from_secs(3))
             .build()
             .unwrap()
+    }
+
+    fn gzip_body(body: &[u8]) -> Vec<u8> {
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        encoder.write_all(body).unwrap();
+        encoder.finish().unwrap()
+    }
+
+    fn binary_response(headers: &str, body: &[u8]) -> Vec<u8> {
+        let mut response = format!(
+            "HTTP/1.1 200 OK\r\n{headers}Content-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        )
+        .into_bytes();
+        response.extend_from_slice(body);
+        response
+    }
+
+    #[test]
+    fn metadata_http_reads_plain_and_gzip_text_and_json() {
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            let text = "<a href=\"Python-0.9.1.tar.gz\">Python 0.9.1</a>";
+            let json = br#"{"versions":["3.15.0"]}"#;
+            for compressed in [false, true] {
+                let encoding = if compressed {
+                    "Content-Encoding: gzip\r\n"
+                } else {
+                    ""
+                };
+                let body = if compressed {
+                    gzip_body(text.as_bytes())
+                } else {
+                    text.as_bytes().to_vec()
+                };
+                let source = MockSource::binary(vec![binary_response(encoding, &body)]);
+                assert_eq!(
+                    checked_text(&local_client(), &source.url).await.unwrap(),
+                    text
+                );
+                assert_eq!(source.request_count(), 1);
+                assert!(
+                    source.requests.lock().unwrap()[0]
+                        .to_ascii_lowercase()
+                        .contains("accept-encoding: gzip, identity")
+                );
+                let body = if compressed {
+                    gzip_body(json)
+                } else {
+                    json.to_vec()
+                };
+                let source = MockSource::binary(vec![binary_response(encoding, &body)]);
+                let value = checked_json::<serde_json::Value>(&local_client(), &source.url)
+                    .await
+                    .unwrap();
+                assert_eq!(value["versions"][0], "3.15.0");
+                assert_eq!(source.request_count(), 1);
+            }
+        });
+    }
+
+    #[test]
+    fn metadata_gzip_limits_and_corruption_remain_strict() {
+        let source = "https://www.python.org/ftp/python/src/";
+        let encoded = gzip_body(b"normal metadata");
+        assert_eq!(
+            decode_source_body(encoded.clone(), "gzip", source, 256).unwrap(),
+            b"normal metadata"
+        );
+        let mut corrupt = encoded.clone();
+        let crc = corrupt.len() - 8;
+        corrupt[crc] ^= 1;
+        let error = decode_source_body(corrupt, "gzip", source, 256).unwrap_err();
+        assert!(error.to_string().contains(source));
+        assert!(!retryable_source_error(&error));
+        let error = decode_source_body(encoded[..encoded.len() - 4].to_vec(), "gzip", source, 256)
+            .unwrap_err();
+        assert!(retryable_source_error(&error));
+        assert!(decode_source_body(gzip_body(&[0; 512]), "gzip", source, 64).is_err());
+        assert!(decode_source_body(vec![0; 65], "identity", source, 64).is_err());
+        assert!(decode_source_body(vec![0; 65], "gzip", source, 64).is_err());
+        assert!(decode_source_body(encoded, "br", source, 256).is_err());
+    }
+
+    #[test]
+    fn metadata_truncated_gzip_retries_but_bad_encoding_or_utf8_does_not() {
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            let complete = gzip_body(br#"{"complete":true}"#);
+            let source = MockSource::binary(vec![
+                binary_response(
+                    "Content-Encoding: gzip\r\n",
+                    &complete[..complete.len() - 4],
+                ),
+                binary_response("Content-Encoding: gzip\r\n", &complete),
+            ]);
+            let value = checked_json::<serde_json::Value>(&local_client(), &source.url)
+                .await
+                .unwrap();
+            assert_eq!(value["complete"], true);
+            assert_eq!(source.request_count(), 2);
+            for (headers, body, detail) in [
+                (
+                    "Content-Encoding: br\r\n",
+                    b"body".as_slice(),
+                    "Content-Encoding br",
+                ),
+                ("", b"\xff\xfe".as_slice(), "UTF-8"),
+            ] {
+                let source = MockSource::binary(vec![binary_response(headers, body)]);
+                let error = checked_text(&local_client(), &source.url)
+                    .await
+                    .unwrap_err();
+                assert!(error.to_string().contains(&source.url));
+                assert!(error.to_string().contains(detail));
+                assert_eq!(source.request_count(), 1);
+            }
+        });
+    }
+
+    #[test]
+    fn python_archive_validation_identifies_each_required_page() {
+        for (source, page) in [
+            (PYTHON_LEGACY_SOURCE, PYTHON_LEGACY_FIXTURE),
+            (PYTHON_EARLY_SOURCE, PYTHON_LEGACY_FIXTURE),
+            (PYTHON_FTP_SOURCE, PYTHON_FTP_FIXTURE),
+        ] {
+            validate_python_archive_page(source, page).unwrap();
+            let error = validate_python_archive_page(
+                source,
+                "<html><title>Temporarily unavailable</title><a href=\"../\">../</a></html>",
+            )
+            .unwrap_err();
+            let message = error.to_string();
+            assert!(message.contains(source));
+            assert!(message.contains("0 个版本条目"));
+            assert!(message.contains("Temporarily unavailable"));
+        }
+    }
+
+    #[test]
+    fn python_archive_retries_only_the_unrecognized_page_and_preserves_final_error() {
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            let mut attempts = 0;
+            let page = checked_python_archive_with(PYTHON_LEGACY_SOURCE, || {
+                attempts += 1;
+                let body = if attempts == 1 {
+                    "<title>Temporary CDN response</title>"
+                } else {
+                    PYTHON_LEGACY_FIXTURE
+                };
+                async move { Ok(body.to_string()) }
+            })
+            .await
+            .unwrap();
+            assert_eq!(attempts, 2);
+            assert_eq!(page, PYTHON_LEGACY_FIXTURE);
+            let mut attempts = 0;
+            let error = checked_python_archive_with(PYTHON_EARLY_SOURCE, || {
+                attempts += 1;
+                async { Ok("<title>Changed archive page</title>".to_string()) }
+            })
+            .await
+            .unwrap_err();
+            assert_eq!(attempts, 3);
+            assert!(error.to_string().contains(PYTHON_EARLY_SOURCE));
+            assert!(error.to_string().contains("0 个版本条目"));
+            assert!(error.to_string().contains("Changed archive page"));
+        });
     }
 
     #[derive(Debug, Deserialize)]

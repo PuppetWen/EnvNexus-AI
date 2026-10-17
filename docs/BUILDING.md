@@ -83,7 +83,9 @@ pnpm icons:generate
 
 0.1.7 的 Python 查询并发合并官网发布 API、Windows 文件 API、完整 PythonCore 索引链、少量历史归档总表和官方 CPython 版本标签，保留 0.9、1.x、Python 2、旧 Python 3 和预览版；不逐版本请求下载元数据。CPython 官方仓库使用 Git v2：先验证 `version 2` / `ls-refs` 能力，再以 `ref-prefix refs/tags/v` 批量获取版本标签，不使用 GitHub API 分页或下载全部 pull refs。两个响应均验证状态、Content-Type、pkt-line 完整性及 32 MiB 读取上限。本轮网络样本中，标签响应为 41,706 字节（约 42 KB），包含 657 个版本标签；能力响应另为 191 字节。这是网络样本，不保证固定标签数量、响应大小或查询耗时。
 
-完整 ZIP 与官方 SHA-256 优先，同版本缺少该 ZIP 时可选择有有效官方 SHA-256 或 MD5 的完整 x64 / x86 MSI、WiX Burn EXE。Python 2.4 起的 MSI、Python 3.5 起的 Burn EXE 仅静态提取，不调用厂商安装器、MSI 自定义动作或全局运行库安装程序；Python 2.0–2.3 的 Wise EXE 静态提取正在补充，尚待本轮 CI 验收。仅源码、缺少 Windows 包或缺少可验证下载元数据的版本保留对应的不可自动安装原因；源码标签本身不证明该版有或没有 Windows 包。旧 NuGet 包和嵌入式包不冒充完整发行包，MD5 在安装计划中明确标注为弱校验，不等同于 SHA-256 或发行签名验证。
+完整 ZIP 与官方 SHA-256 优先，同版本缺少该 ZIP 时可选择有有效官方 SHA-256 或 MD5 的完整 x64 / x86 Wise EXE、MSI、WiX Burn EXE。Python 2.0–2.3 的 Wise EXE、Python 2.4 起的 MSI、Python 3.5 起的 Burn EXE 静态提取代码均已实现，不调用厂商安装器、MSI 自定义动作或全局运行库安装程序；本轮 CI 验收仍待完成。仅源码、缺少 Windows 包或缺少可验证下载元数据的版本保留对应的不可自动安装原因；源码标签本身不证明该版有或没有 Windows 包。旧 NuGet 包和嵌入式包不冒充完整发行包，MD5 在安装计划中明确标注为弱校验，不等同于 SHA-256 或发行签名验证。
+
+Python 3.6 之前的 Windows 运行时及随包 Tcl/Tk 需要 ASCII 安装路径，例如 `E:\Environment`。安装和修复计划在预览阶段检查路径，安装器执行入口及启动解释器前再次复核，避免在中文或重音字符路径中启动不兼容的旧运行时。历史 CI 对这些版本先验证非 ASCII 路径被拒绝且未生成安装，再使用 ASCII 路径安装；Python `3.10.11` 使用包含中文和重音字符的 `tools-开发-é` 目录验证 Unicode 场景。这些场景均仍待本轮 CI 完成。
 
 `Smoke-Python.ps1` 用于在 CI 中检查完整 Python 的 pip 命令入口、venv 和旧嵌入式安装的原路径修复；测试、缓存和临时目录限制在仓库下。具体通过结果以当次工作流和 `TEST_REPORT.md` 为准。
 
