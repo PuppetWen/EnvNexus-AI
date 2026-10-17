@@ -179,6 +179,10 @@ async fn checked_response(
         .header(reqwest::header::ACCEPT, accept)
         .send()
         .await?;
+    checked_source_response(response)
+}
+
+fn checked_source_response(response: reqwest::Response) -> AppResult<reqwest::Response> {
     if response.status().is_success() {
         return Ok(response);
     }
@@ -268,6 +272,8 @@ const PYTHON_EARLY_SOURCE: &str = "https://www.python.org/download/releases/";
 const PYTHON_FTP_SOURCE: &str = "https://www.python.org/ftp/python/";
 const PYTHON_TAGS_SOURCE: &str =
     "https://github.com/python/cpython.git/info/refs?service=git-upload-pack";
+const PYTHON_TAGS_UPLOAD: &str = "https://github.com/python/cpython.git/git-upload-pack";
+const PYTHON_TAGS_REQUEST: &[u8] = b"0014command=ls-refs\n0001001bref-prefix refs/tags/v\n0000";
 const PYTHON_TAGS_MAX_BYTES: usize = 32 * 1024 * 1024;
 const PYTHON_HISTORY_NAME: &str = "Python.org 发布与历史归档（含预览版）";
 
@@ -350,13 +356,61 @@ async fn fetch_python(client: &reqwest::Client, tool_id: &str) -> AppResult<Vers
 }
 
 async fn fetch_python_source_tags(client: &reqwest::Client) -> AppResult<Vec<(String, String)>> {
-    // Do not send Git-Protocol: version=2: v0 advertises all refs in one request.
-    let response = checked_response(
-        client,
-        PYTHON_TAGS_SOURCE,
-        "application/x-git-upload-pack-advertisement",
-    )
-    .await?;
+    fetch_python_source_tags_from(client, PYTHON_TAGS_SOURCE, PYTHON_TAGS_UPLOAD).await
+}
+
+async fn fetch_python_source_tags_from(
+    client: &reqwest::Client,
+    discovery_url: &str,
+    upload_url: &str,
+) -> AppResult<Vec<(String, String)>> {
+    // The two v2 requests avoid downloading tens of thousands of pull refs.
+    let response = client
+        .get(discovery_url)
+        .header("Git-Protocol", "version=2")
+        .header(
+            reqwest::header::ACCEPT,
+            "application/x-git-upload-pack-advertisement",
+        )
+        .send()
+        .await?;
+    let capabilities =
+        read_python_git_response(response, "application/x-git-upload-pack-advertisement").await?;
+    parse_python_git_capabilities(&capabilities)?;
+    let response = client
+        .post(upload_url)
+        .header("Git-Protocol", "version=2")
+        .header(
+            reqwest::header::CONTENT_TYPE,
+            "application/x-git-upload-pack-request",
+        )
+        .header(
+            reqwest::header::ACCEPT,
+            "application/x-git-upload-pack-result",
+        )
+        .body(PYTHON_TAGS_REQUEST)
+        .send()
+        .await?;
+    let tags = read_python_git_response(response, "application/x-git-upload-pack-result").await?;
+    parse_python_ls_refs(&tags)
+}
+
+async fn read_python_git_response(
+    response: reqwest::Response,
+    expected_type: &str,
+) -> AppResult<Vec<u8>> {
+    let response = checked_source_response(response)?;
+    if !response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split(';').next())
+        .is_some_and(|content_type| content_type.trim().eq_ignore_ascii_case(expected_type))
+    {
+        return Err(AppError::InvalidSource(
+            "CPython 官方源码标签服务返回了错误的 Content-Type".into(),
+        ));
+    }
     if response
         .content_length()
         .is_some_and(|length| length > PYTHON_TAGS_MAX_BYTES as u64)
@@ -376,7 +430,104 @@ async fn fetch_python_source_tags(client: &reqwest::Client) -> AppResult<Vec<(St
         }
         bytes.extend_from_slice(&chunk);
     }
-    parse_python_source_tags(&bytes)
+    Ok(bytes)
+}
+
+fn parse_python_git_capabilities(bytes: &[u8]) -> AppResult<()> {
+    let invalid = || {
+        AppError::InvalidSource("CPython 官方源码标签服务未提供完整的 Git v2 ls-refs 能力".into())
+    };
+    if bytes.len() > PYTHON_TAGS_MAX_BYTES {
+        return Err(invalid());
+    }
+    let mut offset = 0;
+    let mut first = python_git_packet(bytes, &mut offset)?;
+    // GitHub's smart HTTP advertisement includes the service announcement.
+    if first == Some(b"# service=git-upload-pack\n".as_slice()) {
+        if python_git_packet(bytes, &mut offset)?.is_some() {
+            return Err(invalid());
+        }
+        first = python_git_packet(bytes, &mut offset)?;
+    }
+    if first != Some(b"version 2\n".as_slice()) {
+        return Err(invalid());
+    }
+    let mut ls_refs = false;
+    let mut complete = false;
+    let mut seen = HashSet::new();
+    while offset < bytes.len() {
+        let Some(packet) = python_git_packet(bytes, &mut offset)? else {
+            complete = offset == bytes.len();
+            break;
+        };
+        let capability = std::str::from_utf8(packet)
+            .ok()
+            .and_then(|line| line.strip_suffix('\n'))
+            .ok_or_else(invalid)?;
+        let name = capability.split('=').next().ok_or_else(invalid)?;
+        if name.is_empty()
+            || !name
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+            || !capability
+                .bytes()
+                .all(|byte| byte == b' ' || byte.is_ascii_graphic())
+            || !seen.insert(name)
+        {
+            return Err(invalid());
+        }
+        ls_refs |= name == "ls-refs";
+    }
+    if complete && ls_refs {
+        Ok(())
+    } else {
+        Err(invalid())
+    }
+}
+
+fn parse_python_ls_refs(bytes: &[u8]) -> AppResult<Vec<(String, String)>> {
+    let invalid =
+        || AppError::InvalidSource("CPython 官方源码标签不是完整有效的 Git v2 ls-refs".into());
+    if bytes.len() > PYTHON_TAGS_MAX_BYTES {
+        return Err(invalid());
+    }
+    let mut offset = 0;
+    let mut complete = false;
+    let mut tags = HashMap::<String, (String, String)>::new();
+    while offset < bytes.len() {
+        let Some(packet) = python_git_packet(bytes, &mut offset)? else {
+            complete = offset == bytes.len();
+            break;
+        };
+        let record = std::str::from_utf8(packet)
+            .ok()
+            .and_then(|line| line.strip_suffix('\n'))
+            .ok_or_else(invalid)?;
+        let (object, reference) = record.split_once(' ').ok_or_else(invalid)?;
+        let raw = reference.strip_prefix("refs/tags/v").ok_or_else(invalid)?;
+        let version = normalize_python_history_version(raw).ok_or_else(invalid)?;
+        if !matches!(object.len(), 40 | 64)
+            || !object.bytes().all(|byte| byte.is_ascii_hexdigit())
+            || !valid_python_git_ref(reference)
+        {
+            return Err(invalid());
+        }
+        if let Some((_, previous)) = tags.get(raw)
+            && previous != object
+        {
+            return Err(invalid());
+        }
+        tags.insert(raw.into(), (version, object.into()));
+    }
+    if !complete || tags.is_empty() {
+        return Err(invalid());
+    }
+    let mut versions = tags
+        .into_iter()
+        .map(|(tag, (version, _))| (version, tag))
+        .collect::<Vec<_>>();
+    versions.sort_by(|left, right| left.1.cmp(&right.1));
+    Ok(versions)
 }
 
 fn python_git_packet<'a>(bytes: &'a [u8], offset: &mut usize) -> AppResult<Option<&'a [u8]>> {
@@ -391,7 +542,8 @@ fn python_git_packet<'a>(bytes: &'a [u8], offset: &mut usize) -> AppResult<Optio
     if length == 0 {
         return Ok(None);
     }
-    // Delimiter/response-end packets belong to protocol v2, not this v0 listing.
+    // These discovery and ls-refs responses contain data and flush packets,
+    // never command delimiters or response-end markers.
     if !(4..=65_520).contains(&length) {
         return Err(invalid());
     }
@@ -418,6 +570,7 @@ fn valid_python_git_ref(reference: &str) -> bool {
         })
 }
 
+#[cfg(test)]
 fn parse_python_source_tags(bytes: &[u8]) -> AppResult<Vec<(String, String)>> {
     let invalid =
         || AppError::InvalidSource("CPython 官方源码标签不是完整有效的 Git v0 refs".into());
@@ -797,11 +950,9 @@ fn python_supported_installer_format(version: &str, url: &str) -> bool {
         return true;
     }
     let parts = python_release_base(version).split('.').collect::<Vec<_>>();
-    parts.first() == Some(&"3")
-        && parts
-            .get(1)
-            .and_then(|minor| minor.parse::<u32>().ok())
-            .is_some_and(|minor| minor >= 5)
+    let minor = parts.get(1).and_then(|minor| minor.parse::<u32>().ok());
+    (parts.first() == Some(&"3") && minor.is_some_and(|minor| minor >= 5))
+        || (parts.first() == Some(&"2") && minor.is_some_and(|minor| minor <= 3))
 }
 
 fn python_file_checksum(file: &PythonReleaseFile) -> Option<(String, String)> {
@@ -2221,6 +2372,52 @@ mod tests {
                                         ));
                                     }
                                 }
+                                let header_end = request
+                                    .windows(4)
+                                    .position(|window| window == b"\r\n\r\n")
+                                    .unwrap()
+                                    + 4;
+                                let headers = std::str::from_utf8(&request[..header_end]).map_err(
+                                    |error| {
+                                        std::io::Error::new(std::io::ErrorKind::InvalidData, error)
+                                    },
+                                )?;
+                                let content_length = headers
+                                    .lines()
+                                    .find_map(|line| {
+                                        let (name, value) = line.split_once(':')?;
+                                        name.eq_ignore_ascii_case("content-length")
+                                            .then_some(value.trim())
+                                    })
+                                    .map(str::parse::<usize>)
+                                    .transpose()
+                                    .map_err(|error| {
+                                        std::io::Error::new(std::io::ErrorKind::InvalidData, error)
+                                    })?
+                                    .unwrap_or(0);
+                                if content_length > 64 * 1024 - header_end {
+                                    return Err(std::io::Error::new(
+                                        std::io::ErrorKind::InvalidData,
+                                        "mock request body exceeds the limit",
+                                    ));
+                                }
+                                while request.len() < header_end + content_length {
+                                    match stream.read(&mut buffer) {
+                                        Ok(0) => {
+                                            return Err(std::io::Error::new(
+                                                std::io::ErrorKind::UnexpectedEof,
+                                                "mock client closed before sending its request body",
+                                            ));
+                                        }
+                                        Ok(length) => request.extend_from_slice(&buffer[..length]),
+                                        Err(error)
+                                            if error.kind() == std::io::ErrorKind::Interrupted =>
+                                        {
+                                            continue;
+                                        }
+                                        Err(error) => return Err(error),
+                                    }
+                                }
                                 String::from_utf8(request).map_err(|error| {
                                     std::io::Error::new(std::io::ErrorKind::InvalidData, error)
                                 })
@@ -2813,6 +3010,12 @@ mod tests {
 
     fn python_git_fixture(records: &[&str]) -> Vec<u8> {
         let mut bytes = b"001e# service=git-upload-pack\n0000".to_vec();
+        bytes.extend_from_slice(&python_ls_refs_fixture(records));
+        bytes
+    }
+
+    fn python_ls_refs_fixture(records: &[&str]) -> Vec<u8> {
+        let mut bytes = Vec::new();
         for record in records {
             let packet = format!("{record}\n");
             bytes.extend_from_slice(format!("{:04x}", packet.len() + 4).as_bytes());
@@ -2820,6 +3023,305 @@ mod tests {
         }
         bytes.extend_from_slice(b"0000");
         bytes
+    }
+
+    const PYTHON_REAL_V2_CAPABILITIES: &str = concat!(
+        "001e# service=git-upload-pack\n0000000eversion 2\n",
+        "0028agent=git/github-41cc7379a75f-Linux\n",
+        "0013ls-refs=unborn\n0027fetch=shallow wait-for-done filter\n",
+        "0012server-option\n0017object-format=sha1\n0000",
+    );
+
+    #[test]
+    fn python_v2_queries_only_version_tags_with_a_checked_discovery_and_post() {
+        let tags = String::from_utf8(python_ls_refs_fixture(&[
+            "1f08c772f5a68bdf8309d6ad1cdddb838fc35feb refs/tags/v3.4.0a1",
+            "bd61c3ae1f45c402d8e09fdebeeabbe68132bb52 refs/tags/v3.4.0a4",
+            "7e611dab4a05a97e708541d98e2f6817cfbe7453 refs/tags/v3.4.0b1",
+            "e9f73ac1fd5184173179596d4fa5caa45682d301 refs/tags/v3.4.0rc1",
+            "7a325c385bb547b481abfee8301e9d9f2e58990a refs/tags/v1.0.2",
+            "c94d53db0e54d919ed3d37b85bd8d6e7f5a64a9e refs/tags/v1.1",
+            "c7afd2c7bbdbb0b9bb47f0eb088285aec8ec7414 refs/tags/v1.5.2c1",
+        ]))
+        .unwrap();
+        let source = MockSource::new(vec![
+            http_response(
+                "200 OK",
+                "Content-Type: application/x-git-upload-pack-advertisement\r\n",
+                PYTHON_REAL_V2_CAPABILITIES,
+            ),
+            http_response(
+                "200 OK",
+                "Content-Type: application/x-git-upload-pack-result\r\n",
+                &tags,
+            ),
+        ]);
+        let versions = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(fetch_python_source_tags_from(
+                &local_client(),
+                &format!(
+                    "{}/python/cpython.git/info/refs?service=git-upload-pack",
+                    source.url
+                ),
+                &format!("{}/python/cpython.git/git-upload-pack", source.url),
+            ))
+            .unwrap();
+        assert_eq!(versions.len(), 7);
+        assert!(versions.contains(&("3.4.0a1".into(), "3.4.0a1".into())));
+        assert!(versions.contains(&("3.4.0a4".into(), "3.4.0a4".into())));
+        assert!(versions.contains(&("3.4.0b1".into(), "3.4.0b1".into())));
+        assert!(versions.contains(&("3.4.0rc1".into(), "3.4.0rc1".into())));
+        assert!(versions.contains(&("1.1.0".into(), "1.1".into())));
+        assert!(versions.contains(&("1.5.2rc1".into(), "1.5.2c1".into())));
+        assert_eq!(source.request_count(), 2);
+        let requests = source.requests.lock().unwrap();
+        let has_header = |headers: &str, expected_name: &str, expected_value: &str| {
+            headers
+                .lines()
+                .filter_map(|line| line.split_once(':'))
+                .any(|(name, value)| {
+                    name.eq_ignore_ascii_case(expected_name)
+                        && value.trim().eq_ignore_ascii_case(expected_value)
+                })
+        };
+        let (get, get_body) = requests[0].split_once("\r\n\r\n").unwrap();
+        assert!(
+            get.starts_with(
+                "GET /python/cpython.git/info/refs?service=git-upload-pack HTTP/1.1\r\n"
+            )
+        );
+        assert!(has_header(get, "Git-Protocol", "version=2"));
+        assert!(has_header(
+            get,
+            "Accept",
+            "application/x-git-upload-pack-advertisement"
+        ));
+        assert!(get_body.is_empty());
+        let (post, body) = requests[1].split_once("\r\n\r\n").unwrap();
+        assert!(post.starts_with("POST /python/cpython.git/git-upload-pack HTTP/1.1\r\n"));
+        assert!(has_header(post, "Git-Protocol", "version=2"));
+        assert!(has_header(
+            post,
+            "Content-Type",
+            "application/x-git-upload-pack-request"
+        ));
+        assert!(has_header(
+            post,
+            "Accept",
+            "application/x-git-upload-pack-result"
+        ));
+        assert_eq!(
+            body,
+            "0014command=ls-refs\n0001001bref-prefix refs/tags/v\n0000"
+        );
+    }
+
+    #[test]
+    fn python_v2_discovery_and_post_keep_http_errors_and_reject_wrong_response_types() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        for (responses, status, expected_count) in [
+            (
+                vec![http_response(
+                    "429 Too Many Requests",
+                    "Retry-After: 120\r\n",
+                    "slow down",
+                )],
+                429,
+                1,
+            ),
+            (
+                vec![
+                    http_response(
+                        "200 OK",
+                        "Content-Type: application/x-git-upload-pack-advertisement\r\n",
+                        PYTHON_REAL_V2_CAPABILITIES,
+                    ),
+                    http_response(
+                        "403 Forbidden",
+                        "X-RateLimit-Remaining: 0\r\nX-RateLimit-Reset: 1792022400\r\n",
+                        "blocked",
+                    ),
+                ],
+                403,
+                2,
+            ),
+        ] {
+            let source = MockSource::new(responses);
+            let error = runtime
+                .block_on(fetch_python_source_tags_from(
+                    &local_client(),
+                    &source.url,
+                    &source.url,
+                ))
+                .unwrap_err();
+            assert!(
+                matches!(error, AppError::SourceHttp { status: actual, rate_limited: true, retry_at: Some(_), .. } if actual == status)
+            );
+            assert_eq!(source.request_count(), expected_count);
+        }
+        let valid_tags = String::from_utf8(python_ls_refs_fixture(&[
+            "1f08c772f5a68bdf8309d6ad1cdddb838fc35feb refs/tags/v3.4.0a1",
+        ]))
+        .unwrap();
+        for (responses, expected_count) in [
+            (
+                vec![http_response(
+                    "200 OK",
+                    "Content-Type: text/html\r\n",
+                    PYTHON_REAL_V2_CAPABILITIES,
+                )],
+                1,
+            ),
+            (
+                vec![http_response(
+                    "200 OK",
+                    "Content-Type: application/x-git-upload-pack-advertisement\r\n",
+                    "000eversion 2\n0000",
+                )],
+                1,
+            ),
+            (
+                vec![http_response(
+                    "200 OK",
+                    "Content-Type: application/x-git-upload-pack-advertisement\r\n",
+                    &String::from_utf8(python_git_fixture(&[
+                        "1f08c772f5a68bdf8309d6ad1cdddb838fc35feb refs/tags/v3.4.0a1",
+                    ]))
+                    .unwrap(),
+                )],
+                1,
+            ),
+            (
+                vec![
+                    http_response(
+                        "200 OK",
+                        "Content-Type: application/x-git-upload-pack-advertisement\r\n",
+                        PYTHON_REAL_V2_CAPABILITIES,
+                    ),
+                    http_response("200 OK", "Content-Type: text/html\r\n", &valid_tags),
+                ],
+                2,
+            ),
+            (
+                vec![
+                    http_response(
+                        "200 OK",
+                        "Content-Type: application/x-git-upload-pack-advertisement\r\n",
+                        PYTHON_REAL_V2_CAPABILITIES,
+                    ),
+                    http_response(
+                        "200 OK",
+                        "Content-Type: application/x-git-upload-pack-result\r\n",
+                        PYTHON_REAL_V2_CAPABILITIES,
+                    ),
+                ],
+                2,
+            ),
+        ] {
+            let source = MockSource::new(responses);
+            let error = runtime
+                .block_on(fetch_python_source_tags_from(
+                    &local_client(),
+                    &source.url,
+                    &source.url,
+                ))
+                .unwrap_err();
+            assert!(matches!(error, AppError::InvalidSource(_)));
+            assert_eq!(source.request_count(), expected_count);
+        }
+    }
+
+    #[test]
+    fn python_v2_limits_both_declared_and_chunked_response_bodies() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let declared = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/x-git-upload-pack-advertisement\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            PYTHON_TAGS_MAX_BYTES + 1,
+        );
+        // No Content-Length: enforce the same bound while accumulating chunks.
+        let chunk = "x".repeat(PYTHON_TAGS_MAX_BYTES + 1);
+        let chunked = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/x-git-upload-pack-advertisement\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n{:x}\r\n{chunk}\r\n0\r\n\r\n",
+            chunk.len(),
+        );
+        drop(chunk);
+        for response in [declared, chunked] {
+            let source = MockSource::new(vec![response]);
+            let error = runtime
+                .block_on(fetch_python_source_tags_from(
+                    &local_client(),
+                    &source.url,
+                    &source.url,
+                ))
+                .unwrap_err();
+            assert!(matches!(error, AppError::InvalidSource(_)));
+            assert!(error.to_string().contains("32 MiB"));
+            assert_eq!(source.request_count(), 1);
+        }
+    }
+
+    #[test]
+    fn python_v2_requires_complete_capabilities_and_version_tag_ref_records() {
+        assert!(parse_python_git_capabilities(PYTHON_REAL_V2_CAPABILITIES.as_bytes()).is_ok());
+        assert!(parse_python_git_capabilities(b"000eversion 2\n000cls-refs\n0000").is_ok());
+        let record = "1f08c772f5a68bdf8309d6ad1cdddb838fc35feb refs/tags/v3.4.0a1";
+        for capabilities in [
+            b"000eversion 2\n0000".to_vec(),
+            b"000eversion 1\n000cls-refs\n0000".to_vec(),
+            b"000eversion 2\n0010not-ls-refs\n0000".to_vec(),
+            PYTHON_REAL_V2_CAPABILITIES.as_bytes()[..PYTHON_REAL_V2_CAPABILITIES.len() - 4]
+                .to_vec(),
+            [PYTHON_REAL_V2_CAPABILITIES.as_bytes(), b"0000"].concat(),
+            python_git_fixture(&[record]),
+        ] {
+            assert!(parse_python_git_capabilities(&capabilities).is_err());
+        }
+        let valid = python_ls_refs_fixture(&[record]);
+        for invalid in [
+            b"0000".to_vec(),
+            b"0001".to_vec(),
+            PYTHON_REAL_V2_CAPABILITIES.as_bytes().to_vec(),
+            python_git_fixture(&[record]),
+            valid[..valid.len() - 1].to_vec(),
+            valid[..valid.len() - 4].to_vec(),
+            [valid.as_slice(), b"junk"].concat(),
+        ] {
+            assert!(parse_python_ls_refs(&invalid).is_err());
+        }
+        for reference in [
+            "HEAD",
+            "refs/heads/main",
+            "refs/pull/123/head",
+            "refs/tags/legacy",
+            "refs/tags/v3.4.0a1^{}",
+            "refs/tags/v3.4.0a1 peeled:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "refs/tags/v3.4.0a1/evil",
+            "refs/tags/v3.4.0a1\0capabilities",
+        ] {
+            let invalid = format!("{} {reference}", "a".repeat(40));
+            assert!(
+                parse_python_ls_refs(&python_ls_refs_fixture(&[record, &invalid])).is_err(),
+                "{reference}"
+            );
+        }
+        for object in [
+            "a".repeat(39),
+            "g".repeat(40),
+            "a".repeat(41),
+            "a".repeat(63),
+            "a".repeat(65),
+        ] {
+            let invalid = format!("{object} refs/tags/v3.4.0a1");
+            assert!(parse_python_ls_refs(&python_ls_refs_fixture(&[&invalid])).is_err());
+        }
+        let sha256 = format!("{} refs/tags/v3.4.0a1", "a".repeat(64));
+        assert_eq!(
+            parse_python_ls_refs(&python_ls_refs_fixture(&[&sha256]))
+                .unwrap()
+                .len(),
+            1
+        );
     }
 
     fn python_real_source_tags() -> Vec<(String, String)> {
@@ -3234,7 +3736,7 @@ mod tests {
     }
 
     #[test]
-    fn python_history_keeps_unverified_and_old_exe_rows_with_precise_reasons() {
+    fn python_history_keeps_unverified_rows_and_supports_verified_wise_installers() {
         let mut unsigned = python_installer_fixture("2.7.18", "x86_64");
         unsigned.md5_sum.clear();
         let mut old_exe = python_installer_fixture("2.3.5", "x86");
@@ -3251,7 +3753,6 @@ mod tests {
             PYTHON_FTP_FIXTURE,
         )
         .unwrap();
-        assert!(versions.iter().all(|remote| remote.download_url.is_none()));
         assert!(
             versions
                 .iter()
@@ -3262,15 +3763,17 @@ mod tests {
                 .unwrap()
                 .contains("校验值")
         );
+        let wise = versions
+            .iter()
+            .find(|remote| remote.version == "2.3.5")
+            .unwrap();
+        assert!(wise.install_unavailable_reason.is_none());
+        assert!(is_supported_python_runtime(wise));
         assert!(
-            versions
-                .iter()
-                .find(|remote| remote.version == "2.3.5")
+            wise.download_url
+                .as_deref()
                 .unwrap()
-                .install_unavailable_reason
-                .as_ref()
-                .unwrap()
-                .contains("旧式 EXE")
+                .ends_with("Python-2.3.5.exe")
         );
         let runtime = tokio::runtime::Runtime::new().unwrap();
         let mut blocked = versions

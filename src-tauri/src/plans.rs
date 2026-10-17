@@ -160,6 +160,7 @@ impl PlanService {
             return Err(AppError::UnsafePath(root));
         }
         let destination = installation_destination(descriptor.id, &remote.version, &root)?;
+        validate_python_install_path(descriptor.id, &remote.version, &destination)?;
         if destination.exists() {
             return Err(AppError::Message(format!(
                 "目标版本目录已存在，请改用修复或卸载：{}",
@@ -361,6 +362,7 @@ impl PlanService {
         }
         let root = crate::paths::canonicalize_simplified(&root)?;
         let destination = crate::paths::canonicalize_simplified(&destination)?;
+        validate_python_install_path(descriptor.id, &remote.version, &destination)?;
         if !destination.starts_with(&root)
             || destination == root
             || !destination.join(".envpilot-install.json").is_file()
@@ -886,6 +888,16 @@ impl PlanService {
         atomic_write(&path, &bytes)?;
         Ok(path)
     }
+}
+
+fn validate_python_install_path(tool_id: &str, version: &str, destination: &Path) -> AppResult<()> {
+    if tool_id == "python"
+        && crate::python_features::requires_ascii_path(version)
+        && !destination.as_os_str().to_string_lossy().is_ascii()
+    {
+        return Err(AppError::Message("此历史 Python 或随包 Tcl/Tk 不支持当前非 ASCII 安装路径；请使用仅含英文字母、数字等 ASCII 字符的目录，例如 E:\\Environment。".to_string()));
+    }
+    Ok(())
 }
 
 fn append_python_release_warnings(
@@ -1841,6 +1853,25 @@ mod tests {
         };
         plan.action = PlannedAction::Repair(request);
         assert_eq!(serde_json::to_value(&plan).unwrap()["actionKind"], "repair");
+    }
+
+    #[test]
+    fn historical_python_paths_fail_early_with_an_actionable_compatibility_reason() {
+        let unicode = Path::new("E:/开发/Python");
+        for version in ["2.0.1", "2.7.18", "3.4.4"] {
+            assert!(
+                validate_python_install_path("python", version, unicode)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("ASCII")
+            );
+            assert!(
+                validate_python_install_path("python", version, Path::new("E:/Environment/Python"))
+                    .is_ok()
+            );
+        }
+        assert!(validate_python_install_path("python", "3.10.11", unicode).is_ok());
+        assert!(validate_python_install_path("node", "24.0.0", unicode).is_ok());
     }
 
     #[test]

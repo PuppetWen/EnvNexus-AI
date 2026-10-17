@@ -23,6 +23,8 @@ use crate::error::{AppError, AppResult};
 
 #[path = "python_cab.rs"]
 mod python_cab;
+#[path = "python_wise.rs"]
+mod python_wise;
 
 const MAX_ARCHIVE: u64 = 512 * 1024 * 1024;
 const MAX_FILE: u64 = 512 * 1024 * 1024;
@@ -49,7 +51,11 @@ pub(super) fn extract(archive: &Path, destination: &Path) -> AppResult<()> {
     if bytes.starts_with(&[0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1]) {
         extract_msi(bytes, &mut output)?;
     } else if bytes.starts_with(b"MZ") {
-        extract_burn(&bytes, &mut output)?;
+        if python_wise::is_burn(&bytes)? {
+            extract_burn(&bytes, &mut output)?;
+        } else {
+            python_wise::extract(&bytes, &mut output)?;
+        }
     } else {
         return Err(invalid("仅支持官方 MSI 或 WiX Burn 完整安装包"));
     }

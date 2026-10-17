@@ -31,7 +31,7 @@ EnvNexus AI 是一款使用 Rust + Tauri 2 开发的 Windows 桌面 App。它把
 ### 主要功能
 
 - 管理 Python、Java/JDK、Go、Rust、Node.js、Git、Maven、.NET SDK、Ruby、PHP，以及 Android SDK、NDK、JDK、Gradle、CMake、ADB。
-- Python 查询合并官网发布数据库与历史归档，展示 0.9、1.x、Python 2、旧 Python 3 的稳定版和预览版；缺包、仅源码或不能自动安装的条目也会保留并说明原因。
+- Python 查询合并官网发布数据库、历史归档及官方 CPython 版本标签，展示 0.9、1.x、Python 2、旧 Python 3 的稳定版和预览版；缺包、仅源码或不能自动安装的条目也会保留并说明原因。
 - 官方版本支持关键词、发布类型和“仅可安装”筛选，可按版本或发布日期双向排序。
 - Python 优先采用官方完整 PythonCore ZIP；旧版受支持的 MSI / WiX Burn EXE 通过静态提取安装，保留完整标准库和原发行包的能力。
 - 每个工具都有独立页面和独立安装根目录；Android 组件集中使用同一个用户指定根目录。
@@ -50,9 +50,11 @@ EnvNexus AI 是一款使用 Rust + Tauri 2 开发的 Windows 桌面 App。它把
 
 ### Python 历史版本
 
-目录默认展示全部获取到的官方记录，可筛选稳定版、预览版、历史归档或仅可安装版本。安装优先选择有官方 SHA-256 的完整 ZIP；历史 Python 2.4 起的 MSI、Python 3.5 起的 WiX Burn EXE 在有效官方校验元数据齐全时可静态解包到自选目录，不运行厂商安装器。早期 Wise EXE、仅源码、缺少安装包或有效校验元数据的条目会显示不能自动安装的具体原因。
+目录默认展示全部获取到的官方记录，可筛选稳定版、预览版、历史归档或仅可安装版本。官方 CPython 标签通过 Git v2 `ls-refs` 批量查询，补齐发布数据库遗漏的历史标签；本轮网络样本返回 657 个版本标签，标签响应约 42 KB，数量和体积会随上游变化，不代表固定性能承诺。
 
-Python 2.7.9+、Python 3.4+ 使用发行包自带的 pip/ensurepip，Python 3.3+ 保留内置 venv；更早的版本不会被伪装为具备这些功能，也不会联网补装最新版 pip。官网仅提供 MD5 的历史包会在安装计划中明确标记为弱校验，不冒充 SHA-256 或发行签名验证。
+安装优先选择有官方 SHA-256 的完整 ZIP；历史 Python 2.4 起的 MSI、Python 3.5 起的 WiX Burn EXE 在有效官方校验元数据齐全时可静态解包到自选目录，不运行厂商安装器。Python 2.0–2.3 的 Wise EXE 静态提取正在补充，本轮十个历史版本的隔离安装 CI 验收尚待完成。仅源码、缺少 Windows 安装包或缺少可验证下载元数据的条目继续显示对应的不可自动安装原因；源码标签本身不作为存在或缺少 Windows 包的证明。
+
+正式发行包中，Python 2.7.9+、Python 3.4+ 使用随包 pip/ensurepip，Python 3.3+ 保留内置 venv；预览版按实际发行组件区分，例如部分早期 alpha 尚无 venv 或 ensurepip。原包没有的功能不会被伪造，也不会联网补装最新版 pip。官网仅提供 MD5 的历史包会在安装计划中明确标记为弱校验，不冒充 SHA-256 或发行签名验证。
 
 ### AI 在哪里起作用
 
@@ -125,7 +127,7 @@ EnvNexus AI is a Windows desktop application built with Rust and Tauri 2. It pro
 ### Highlights
 
 - Manages Python, Java/JDK, Go, Rust, Node.js, Git, Maven, .NET SDK, Ruby, PHP, and the Android SDK/NDK/JDK/Gradle/CMake/ADB toolchain.
-- Python catalogs combine official release records and historical archives, including 0.9, 1.x, Python 2, older Python 3, stable releases, and previews. Source-only and unavailable releases remain visible with an explanation.
+- Python catalogs combine official release records, historical archives, and official CPython version tags, including 0.9, 1.x, Python 2, older Python 3, stable releases, and previews. Source-only and unavailable releases remain visible with an explanation.
 - Filter official catalogs by keyword, release channel, and installability; sort versions or publication dates in either direction.
 - Python prefers official full PythonCore ZIPs. Supported historical MSI and WiX Burn EXE packages are extracted without running their installers, preserving the full standard library and the original distribution's features.
 - Gives every tool its own management page and selectable installation root. Android components share one user-selected root.
@@ -143,9 +145,11 @@ EnvNexus AI is a Windows desktop application built with Rust and Tauri 2. It pro
 
 ### Historical Python releases
 
-Catalogs initially show every retrieved official record, with filters for stable releases, previews, archives, and installable packages. Full ZIPs with official SHA-256 checksums take priority. Historical MSI packages from Python 2.4 onward and WiX Burn EXE packages from Python 3.5 onward can be extracted into a selected directory when supported metadata and official checksums are available. Early Wise EXEs, source-only releases, missing packages, and unverified metadata display a specific reason that automatic installation is unavailable.
+Catalogs initially show every retrieved official record, with filters for stable releases, previews, archives, and installable packages. Git v2 `ls-refs` retrieves official CPython version tags in a batch to fill gaps in the release database. One network sample returned 657 version tags in a roughly 42 KB tag response; these figures vary with the upstream repository and are not a fixed performance guarantee.
 
-Python 2.7.9+ and Python 3.4+ use their bundled pip/ensurepip; Python 3.3+ retains its built-in venv. Earlier distributions keep their original capabilities, without downloading a current pip to fill missing features. Historical packages published with only MD5 are explicitly identified as using a weak checksum, distinct from SHA-256 or release-signature verification.
+Full ZIPs with official SHA-256 checksums take priority. Historical MSI packages from Python 2.4 onward and WiX Burn EXE packages from Python 3.5 onward can be extracted into a selected directory when supported metadata and official checksums are available, without running vendor installers. Static extraction for Python 2.0–2.3 Wise EXEs is being added; CI acceptance for ten historical versions is still pending. Source-only releases, missing Windows packages, and unavailable verifiable download metadata retain their specific installation-blocking reasons. A source tag alone does not establish whether a Windows package exists.
+
+For final releases, Python 2.7.9+ and Python 3.4+ use bundled pip/ensurepip, and Python 3.3+ retains built-in venv. Preview releases are checked against their actual components; some early alphas predate venv or ensurepip. Missing features are not fabricated or filled by downloading a current pip. Historical packages published with only MD5 are explicitly identified as using a weak checksum, distinct from SHA-256 or release-signature verification.
 
 ### What AI does
 

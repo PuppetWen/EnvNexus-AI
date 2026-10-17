@@ -29,7 +29,7 @@ use crate::{
     error::{AppError, AppResult},
     model::{InstallRequest, PlannedAction},
     process::{output_text, run_capture, run_capture_sanitized, run_capture_with_env},
-    python_features::{has_builtin_venv, has_bundled_pip},
+    python_features::{has_builtin_venv, has_bundled_pip, requires_ascii_path},
 };
 
 const DOWNLOAD_MAX_ATTEMPTS: u32 = 8;
@@ -137,6 +137,9 @@ impl Installer {
         action: &PlannedAction,
         app: Option<&AppHandle>,
     ) -> AppResult<OperationResult> {
+        if let PlannedAction::Install(request) | PlannedAction::Repair(request) = action {
+            validate_python_installation_path(request)?;
+        }
         let result = match action {
             PlannedAction::Install(request) => self.install(operation_id, request, app).await,
             PlannedAction::Repair(request) => self.repair(operation_id, request, app).await,
@@ -1771,11 +1774,29 @@ fn verify_python_pip_launcher_args(
 fn legacy_python_flags(version: &str) -> Vec<&'static str> {
     // -s was introduced with the user site directory in Python 2.6. Python 2.4
     // and 2.5 have no user site to suppress and do not understand this switch.
-    if version.starts_with("2.4") || version.starts_with("2.5") {
+    if version.starts_with("2.0.") || version.starts_with("2.1.") {
+        vec!["-S"]
+    } else if version.starts_with("2.2.") || version.starts_with("2.3.") {
+        vec!["-E", "-S"]
+    } else if version.starts_with("2.4") || version.starts_with("2.5") {
         vec!["-E"]
     } else {
         vec!["-E", "-s"]
     }
+}
+
+fn validate_python_installation_path(request: &InstallRequest) -> AppResult<()> {
+    if request.tool_id == "python"
+        && requires_ascii_path(&request.version)
+        && (!request.root.as_os_str().to_string_lossy().is_ascii()
+            || !request.destination.as_os_str().to_string_lossy().is_ascii())
+    {
+        return Err(AppError::Message(format!(
+            "Python {} 的历史 Windows 运行时不能可靠处理中文等非 ASCII 路径；请选择仅含英文字母、数字和 ASCII 符号的目录，例如 E:\\Environment",
+            request.version
+        )));
+    }
+    Ok(())
 }
 
 fn legacy_python_runtime_files(root: &Path, version: &str) -> AppResult<Vec<PathBuf>> {
@@ -1796,7 +1817,14 @@ fn legacy_python_runtime_files(root: &Path, version: &str) -> AppResult<Vec<Path
         "python.exe",
         "Lib/os.py",
         "include/Python.h",
-        "Lib/idlelib/__init__.py",
+        if ["2.0.", "2.1.", "2.2."]
+            .iter()
+            .any(|prefix| version.starts_with(prefix))
+        {
+            "Tools/idle/idle.py"
+        } else {
+            "Lib/idlelib/__init__.py"
+        },
         tkinter,
     ];
     if has_builtin_venv(version) {
@@ -1872,11 +1900,19 @@ fn initialize_legacy_python_runtime(request: &InstallRequest) -> AppResult<()> {
     let wheels = legacy_python_runtime_files(&request.destination, &request.version)?;
     let workspace = PythonSetupWorkspace::create(request)?;
     let result = (|| {
-        let environment = python_setup_environment(
+        let early = ["2.0.", "2.1.", "2.2.", "2.3."]
+            .iter()
+            .any(|prefix| request.version.starts_with(prefix));
+        let mut environment = python_setup_environment(
             request,
             &workspace.directory,
             current_process_environment()?,
         );
+        if early {
+            // Python 2.0/2.1 have no -E. Remove registry overrides as well as
+            // inherited PYTHON* values before the interpreter starts.
+            environment.retain(|(name, _)| !name.to_ascii_uppercase().starts_with("PYTHON"));
+        }
         let environment = environment
             .iter()
             .map(|(key, value)| (key.as_str(), value.as_os_str()))
@@ -1890,12 +1926,32 @@ fn initialize_legacy_python_runtime(request: &InstallRequest) -> AppResult<()> {
         } else {
             "tkinter"
         };
+        // sys.version_info is available in Python 2.0; platform is not. Format
+        // the numeric tuple because historical finals often display "3.0"
+        // while our catalog correctly normalizes them to "3.0.0".
+        let version_probe = concat!(
+            "v=sys.version_info; suffix={'alpha':'a','beta':'b','candidate':'rc','final':''}[v[3]]; ",
+            "actual=('%d.%d.%d' % v[:3])+suffix+str(v[4])*(suffix!=''); assert actual==sys.argv[2]; ",
+            "root=os.path.normcase(os.path.abspath(sys.argv[1])); assert os.path.normcase(os.path.abspath(sys.prefix))==root; __import__(sys.argv[3])"
+        );
+        let probe_source = if early {
+            // -S avoids sitecustomize and the old registry-derived module
+            // search list is replaced before importing any pure Python module.
+            format!(
+                "import sys; sys.path[:]=[sys.prefix+'\\\\Lib',sys.prefix+'\\\\DLLs',sys.prefix+'\\\\Lib\\\\lib-tk']; import os; {version_probe}"
+            )
+        } else {
+            format!("import os,sys; {version_probe}; __import__('idlelib')")
+        };
         let mut probe = flags.clone();
-        probe.extend_from_slice(&[
-            "-c", "import os,sys,platform; root=os.path.normcase(os.path.realpath(sys.argv[1])); assert os.path.normcase(os.path.realpath(sys.prefix))==root; assert platform.python_version()==sys.argv[2]; __import__(sys.argv[3]); __import__('idlelib')",
-            &root, &request.version, tkinter,
-        ]);
-        run_python_setup_command(&python, &probe, &environment, timeout)?;
+        probe.extend_from_slice(&["-c", &probe_source, &root, &request.version, tkinter]);
+        if early {
+            let output =
+                run_capture_sanitized(&python, &probe, timeout, &environment, &["PIP_", "PYTHON"])?;
+            verify_probe_output(&python, &output)?;
+        } else {
+            run_python_setup_command(&python, &probe, &environment, timeout)?;
+        }
         if has_bundled_pip(&request.version) {
             run_legacy_python_module(
                 &python,
@@ -1987,6 +2043,7 @@ fn initialize_legacy_python_runtime(request: &InstallRequest) -> AppResult<()> {
 }
 
 fn initialize_python_runtime(request: &InstallRequest) -> AppResult<()> {
+    validate_python_installation_path(request)?;
     let filename = download_filename(&request.download_url)?.to_ascii_lowercase();
     if filename.ends_with(".exe") || filename.ends_with(".msi") {
         return initialize_legacy_python_runtime(request);
@@ -2123,7 +2180,7 @@ fn initialize_python_runtime(request: &InstallRequest) -> AppResult<()> {
 
 fn verify_installation(request: &InstallRequest) -> AppResult<()> {
     let candidates = match request.tool_id.as_str() {
-        "python" => vec![(request.destination.join("python.exe"), vec!["--version"])],
+        "python" => vec![(request.destination.join("python.exe"), vec!["-V"])],
         "java" => vec![(
             request.destination.join("bin").join("java.exe"),
             vec!["-version"],
@@ -2612,7 +2669,14 @@ mod tests {
             "python.exe",
             "Lib/os.py",
             "include/Python.h",
-            "Lib/idlelib/__init__.py",
+            if ["2.0.", "2.1.", "2.2."]
+                .iter()
+                .any(|prefix| version.starts_with(prefix))
+            {
+                "Tools/idle/idle.py"
+            } else {
+                "Lib/idlelib/__init__.py"
+            },
             "libs/python.lib",
             tkinter,
         ];
@@ -2636,7 +2700,8 @@ mod tests {
     #[test]
     fn legacy_python_preflight_follows_real_pip_venv_and_tkinter_capabilities() {
         for version in [
-            "2.4.4", "2.7.8", "2.7.18", "3.0.1", "3.3.5", "3.4.4", "3.10.11",
+            "2.0.1", "2.1.3", "2.2.3", "2.3.5", "2.4.4", "2.7.8", "2.7.18", "3.0.1", "3.3.5",
+            "3.4.4", "3.10.11",
         ] {
             let root = tempdir().unwrap();
             historical_python_fixture(root.path(), version);
@@ -2651,7 +2716,36 @@ mod tests {
             }
         }
         assert_eq!(legacy_python_flags("2.4.4"), ["-E"]);
+        assert_eq!(legacy_python_flags("2.0.1"), ["-S"]);
+        assert_eq!(legacy_python_flags("2.1.3"), ["-S"]);
+        assert_eq!(legacy_python_flags("2.2.3"), ["-E", "-S"]);
         assert_eq!(legacy_python_flags("2.7.18"), ["-E", "-s"]);
+    }
+
+    #[test]
+    fn historical_python_path_guard_applies_without_a_preview_plan() {
+        let mut request = InstallRequest {
+            tool_id: "python".into(),
+            version: "2.7.18".into(),
+            root: PathBuf::from("E:\\环境"),
+            destination: PathBuf::from("E:\\环境\\python\\2.7.18"),
+            download_url: "https://www.python.org/fixture.msi".into(),
+            checksum_algorithm: None,
+            checksum: None,
+        };
+        let error = validate_python_installation_path(&request)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("ASCII"));
+        assert!(error.contains("E:\\Environment"));
+        request.version = "3.4.4".into();
+        assert!(validate_python_installation_path(&request).is_err());
+        request.version = "3.10.11".into();
+        assert!(validate_python_installation_path(&request).is_ok());
+        request.version = "2.0.1".into();
+        request.root = PathBuf::from("E:\\Environment");
+        request.destination = request.root.join("python/2.0.1");
+        assert!(validate_python_installation_path(&request).is_ok());
     }
 
     #[test]

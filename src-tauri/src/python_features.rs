@@ -18,6 +18,10 @@ pub(crate) fn has_builtin_venv(version: &str) -> bool {
     })
 }
 
+pub(crate) fn requires_ascii_path(version: &str) -> bool {
+    release_numbers(version).is_some_and(|(major, minor, _)| major < 3 || (major == 3 && minor < 6))
+}
+
 fn release_numbers(version: &str) -> Option<(u32, u32, u32)> {
     let mut parts = version.split('.');
     let major = parts.next()?.parse().ok()?;
@@ -53,5 +57,8 @@ mod tests {
             assert_eq!(has_builtin_venv(version), venv, "{version}");
         }
         assert!(!has_bundled_pip("unknown"));
+        assert!(requires_ascii_path("2.7.18"));
+        assert!(requires_ascii_path("3.4.4"));
+        assert!(!requires_ascii_path("3.10.11"));
     }
 }

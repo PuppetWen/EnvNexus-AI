@@ -157,6 +157,8 @@ function Assert-NoSetupPollution([string]$Directory) {
 }
 
 function Invoke-CheckedCommand([string]$Program, [string[]]$CommandArguments, [string]$Label) {
+    # Python 3.0 does not normalize CRLF in a command-line -c source string.
+    $CommandArguments = @($CommandArguments | ForEach-Object { $_.Replace("`r`n","`n").Replace("`r","`n") })
     $taskProgram = Get-NormalizedAbsolutePath $Program
     $taskIsApp = $taskProgram -ieq (Get-NormalizedAbsolutePath $Executable)
     if (-not $taskIsApp) {
@@ -215,7 +217,7 @@ function Assert-DownloadMetadata([object]$Remote) {
     $taskUrl = [Uri]$Remote.downloadUrl
     if ($taskUrl.Scheme -cne 'https' -or $taskUrl.Host -cne 'www.python.org' -or $taskUrl.UserInfo -or
         -not $taskUrl.AbsolutePath.StartsWith('/ftp/python/') -or $taskUrl.Query -or $taskUrl.Fragment -or
-        $taskUrl.AbsolutePath -notmatch '(?i)\.(msi|exe)$') { throw 'Expected an original official Windows MSI or EXE package.' }
+        $taskUrl.AbsolutePath -notmatch '(?i)\.(msi|exe|zip)$') { throw 'Expected an official Windows MSI, EXE, or full ZIP package.' }
     $taskLength = switch ([string]$Remote.checksumAlgorithm) { 'md5' {32}; 'sha1' {40}; 'sha256' {64}; 'sha512' {128}; default {0} }
     if ($taskLength -eq 0 -or [string]$Remote.checksum -notmatch "^[a-fA-F0-9]{$taskLength}$") { throw 'The historical package has no valid official digest.' }
 }
@@ -317,26 +319,28 @@ function Read-ProbeFields([string]$Text) {
 $taskUtf8ProbeOutput = @'
 import sys
 def emit(name, value):
-    if not isinstance(value, type(u'')):
-        value = value.decode(sys.getfilesystemencoding() or 'mbcs')
-    stream = getattr(sys.stdout, 'buffer', sys.stdout)
-    stream.write((u'%s=%s\n' % (name, value)).encode('utf-8'))
+    if sys.version_info[0] >= 3:
+        stream = getattr(sys.stdout, 'buffer', sys.stdout)
+        stream.write(('%s=%s\n' % (name, value)).encode('utf-8'))
+    else:
+        if not isinstance(value, unicode):
+            value = value.decode(getattr(sys, 'getfilesystemencoding', lambda: 'mbcs')() or 'mbcs')
+        sys.stdout.write((unicode('%s=%s\n') % (name, value)).encode('utf-8'))
 '@
 
 function Test-HistoricalRuntime([string]$Installation, [string]$Scenario, [string]$Version, [bool]$HasPip, [bool]$HasVenv) {
     $taskPython = Assert-RunChildPath (Join-Path $Installation 'python.exe')
-    $taskFlags = if ($Version.StartsWith('2.4.')) { @('-E') } else { @('-E','-s') }
-    $taskStandardModule = if ($Version.StartsWith('2.4.')) { 'os' } else { 'json' }
+    [string[]]$taskFlags = if ($Version -match '^2\.[01]\.') { @('-S') } elseif ($Version -match '^2\.[23]\.') { @('-E','-S') } elseif ($Version.StartsWith('2.4.')) { @('-E') } else { @('-E','-s') }
+    $taskStandardModule = if ($Version -match '^2\.[0-4]\.') { 'os' } else { 'json' }
     # This source deliberately uses Python 2.4 syntax: no with, json, pathlib,
     # f-strings, print function dependency, or newer interpreter switches.
     $taskProbe = $taskUtf8ProbeOutput + "`n" + @'
-import os, sys, platform
+import os, sys
 root = os.path.normcase(os.path.realpath(sys.argv[1]))
 assert os.path.normcase(os.path.realpath(sys.prefix)) == root
 assert os.path.normcase(os.path.realpath(sys.executable)).startswith(root + os.sep)
 actual = '%d.%d.%d' % tuple(sys.version_info[:3])
 assert actual == sys.argv[2]
-assert platform.python_version() == sys.argv[2]
 __import__(sys.argv[3])
 emit('version', actual)
 emit('prefix', sys.prefix)
@@ -423,6 +427,8 @@ function Assert-InstalledManifest([object]$Remote, [string]$Installation, [strin
 }
 
 $taskResults = @(
+    [ordered]@{ version='2.0.1'; pip=$false; venv=$false }, [ordered]@{ version='2.1.3'; pip=$false; venv=$false },
+    [ordered]@{ version='2.2.3'; pip=$false; venv=$false }, [ordered]@{ version='2.3.5'; pip=$false; venv=$false },
     [ordered]@{ version='2.4.4'; pip=$false; venv=$false }, [ordered]@{ version='2.7.18'; pip=$true; venv=$false },
     [ordered]@{ version='3.0.1'; pip=$false; venv=$false }, [ordered]@{ version='3.3.5'; pip=$false; venv=$true },
     [ordered]@{ version='3.4.4'; pip=$true; venv=$true }, [ordered]@{ version='3.10.11'; pip=$true; venv=$true }
@@ -461,7 +467,7 @@ try {
         $taskVersion = [string]$taskResult.version
         $taskScenario = Join-Path $taskRun "versions/$taskVersion"
         # Exercise old pip launchers in both non-ASCII scripts and Unicode paths.
-        $taskRootName = if ($taskVersion -in @('2.7.18','3.4.4')) { 'tools-开发-é' } else { 'tools' }
+        $taskRootName = if ($taskVersion -eq '3.10.11') { 'tools-开发-é' } else { 'tools' }
         $taskRoot = Join-Path $taskScenario $taskRootName
         $taskIsolationReady = $false
         $taskCommandReport = Join-Path $taskReports $taskVersion
@@ -478,6 +484,19 @@ try {
             Assert-DownloadMetadata $taskRemote
             $taskResult.sourceUrl = $taskRemote.downloadUrl
             Save-JsonReport $taskRemote (Join-Path $taskCommandReport 'selected-version.json')
+            if ($taskVersion -match '^2\.' -or $taskVersion -match '^3\.[0-5]\.') {
+                $taskUnsupportedRoot = Join-Path $taskScenario 'unsupported-开发-é'
+                New-RunDirectory $taskUnsupportedRoot
+                $null = Invoke-AppJson -CommandArguments @('root','set','python',$taskUnsupportedRoot,'--json') -Label 'select-incompatible-root'
+                $taskBlocked = $false
+                try { $null = Invoke-AppJson -CommandArguments @('install','python',$taskVersion,'--json') -Label 'incompatible-path-preview' }
+                catch {
+                    if ($_.Exception.Message -notmatch '非 ASCII') { throw }
+                    $taskBlocked = $true
+                    Save-JsonReport ([ordered]@{ status='passed'; reason=$_.Exception.Message; installationStarted=$false }) (Join-Path $taskCommandReport 'incompatible-path.json')
+                }
+                if (-not $taskBlocked -or (Test-Path -LiteralPath (Join-Path $taskUnsupportedRoot "python/$taskVersion"))) { throw 'An incompatible historical runtime path was not rejected before installation.' }
+            }
             $taskResult.stage = 'install'
             $null = Invoke-AppJson -CommandArguments @('root','set','python',$taskRoot,'--json') -Label 'select-root'
             $taskInstalled = Invoke-AppJson -CommandArguments @('install','python',$taskVersion,'--yes','--json') -Label 'install'

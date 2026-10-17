@@ -81,11 +81,13 @@ pnpm icons:generate
 
 `live-added-sources` 单独验证 Maven、.NET SDK、Ruby、PHP，便于区分新增解析器与其他上游网络波动。`live-install` 会在仓库的 `artifacts/integration` 下创建临时目录，真实下载并校验 Python 官方完整 PythonCore ZIP，验证安装事务与完整开发运行时；结束后删除临时目录，不修改 PATH。
 
-0.1.7 的 Python 查询并发合并官网发布 API、Windows 文件 API、完整 PythonCore 索引链及少量历史归档总表，保留 0.9、1.x、Python 2、旧 Python 3 和预览版；不逐版本请求下载元数据。完整 ZIP 与官方 SHA-256 优先，同版本缺少该 ZIP 时可选择有有效官方 SHA-256 或 MD5 的完整 x64 / x86 MSI、WiX Burn EXE。Python 2.4 起的 MSI、Python 3.5 起的 Burn EXE 仅静态提取，不调用厂商安装器、MSI 自定义动作或全局运行库安装程序；随包能力按版本验收。仅源码、早期 Wise EXE、缺包或缺少有效校验元数据的版本保留具体不可自动安装原因。旧 NuGet 包和嵌入式包不冒充完整发行包，MD5 在安装计划中明确标注为弱校验。
+0.1.7 的 Python 查询并发合并官网发布 API、Windows 文件 API、完整 PythonCore 索引链、少量历史归档总表和官方 CPython 版本标签，保留 0.9、1.x、Python 2、旧 Python 3 和预览版；不逐版本请求下载元数据。CPython 官方仓库使用 Git v2：先验证 `version 2` / `ls-refs` 能力，再以 `ref-prefix refs/tags/v` 批量获取版本标签，不使用 GitHub API 分页或下载全部 pull refs。两个响应均验证状态、Content-Type、pkt-line 完整性及 32 MiB 读取上限。本轮网络样本中，标签响应为 41,706 字节（约 42 KB），包含 657 个版本标签；能力响应另为 191 字节。这是网络样本，不保证固定标签数量、响应大小或查询耗时。
+
+完整 ZIP 与官方 SHA-256 优先，同版本缺少该 ZIP 时可选择有有效官方 SHA-256 或 MD5 的完整 x64 / x86 MSI、WiX Burn EXE。Python 2.4 起的 MSI、Python 3.5 起的 Burn EXE 仅静态提取，不调用厂商安装器、MSI 自定义动作或全局运行库安装程序；Python 2.0–2.3 的 Wise EXE 静态提取正在补充，尚待本轮 CI 验收。仅源码、缺少 Windows 包或缺少可验证下载元数据的版本保留对应的不可自动安装原因；源码标签本身不证明该版有或没有 Windows 包。旧 NuGet 包和嵌入式包不冒充完整发行包，MD5 在安装计划中明确标注为弱校验，不等同于 SHA-256 或发行签名验证。
 
 `Smoke-Python.ps1` 用于在 CI 中检查完整 Python 的 pip 命令入口、venv 和旧嵌入式安装的原路径修复；测试、缓存和临时目录限制在仓库下。具体通过结果以当次工作流和 `TEST_REPORT.md` 为准。
 
-新增 `Smoke-Python-History.ps1` 仅允许在 Windows GitHub CI runner 的隔离工作区执行。脚本当前选择 `2.4.4`、`2.7.18`、`3.0.1`、`3.3.5`、`3.4.4`、`3.10.11`，检查官方目录、筛选排序、MSI / EXE 安装、随包 pip、适用版本的 venv、用户环境指纹和清理。Python 2.7.9+ / 3.4+ 使用原包自带 pip，Python 3.3+ 检查内置 venv；更早版本不联网补装最新版 pip。本轮 0.1.7 CI 尚待完成，不能沿用 0.1.6 的通过结果。测试包、缓存和临时文件均留在项目所在磁盘（本机为 E 盘），不写全局用户缓存。
+新增 `Smoke-Python-History.ps1` 仅允许在 Windows GitHub CI runner 的隔离工作区执行。脚本当前覆盖十个版本：`2.0.1`、`2.1.3`、`2.2.3`、`2.3.5`、`2.4.4`、`2.7.18`、`3.0.1`、`3.3.5`、`3.4.4`、`3.10.11`，检查官方目录、筛选排序、Wise EXE / MSI / Burn EXE 静态提取、随包能力、用户环境指纹、配置污染隔离和有界清理。正式发行包中的 Python 2.7.9+ / 3.4+ 使用原包自带 pip，Python 3.3+ 检查内置 venv；更早版本不联网补装最新版 pip。预览版按实际组件区分，例如 3.3 早期 alpha 不要求 venv，3.4 alpha 不要求 ensurepip；这十个稳定版本的验收不能代替全部预览版验收。本轮 0.1.7 CI 尚待完成，不能沿用 0.1.6 的通过结果。测试包、缓存和临时文件均留在隔离工作区所在的 D / E 盘，不写全局用户缓存，也不修改 HKCU。
 
 ## 开发运行
 
