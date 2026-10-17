@@ -2994,7 +2994,8 @@ mod tests {
         .unwrap();
         let workspace = root.path().join("workspace");
         fs::create_dir(&workspace).unwrap();
-        let bootstrap = prepare_legacy_pip_bootstrap(&[wheel.clone()], &workspace).unwrap();
+        let bootstrap =
+            prepare_legacy_pip_bootstrap(std::slice::from_ref(&wheel), &workspace).unwrap();
         assert_eq!(bootstrap, workspace.join("b"));
         assert_eq!(
             fs::read(bootstrap.join("pip/_vendor/urllib3/connectionpool.py")).unwrap(),
@@ -3012,7 +3013,9 @@ mod tests {
             let workspace = root.path().join(format!("unsafe-{index}"));
             fs::create_dir(&workspace).unwrap();
             fs::write(&wheel, bootstrap_wheel_fixture(&[(name, b"unsafe")])).unwrap();
-            assert!(prepare_legacy_pip_bootstrap(&[wheel.clone()], &workspace).is_err());
+            assert!(
+                prepare_legacy_pip_bootstrap(std::slice::from_ref(&wheel), &workspace).is_err()
+            );
         }
         let workspace = root.path().join("duplicate");
         fs::create_dir(&workspace).unwrap();
@@ -3052,7 +3055,9 @@ mod tests {
             fs::write(&wheel, broken).unwrap();
             let workspace = root.path().join(format!("broken-{index}"));
             fs::create_dir(&workspace).unwrap();
-            assert!(prepare_legacy_pip_bootstrap(&[wheel.clone()], &workspace).is_err());
+            assert!(
+                prepare_legacy_pip_bootstrap(std::slice::from_ref(&wheel), &workspace).is_err()
+            );
             let output = workspace.join("b/pip/__main__.py");
             if index == 1 && output.exists() {
                 assert!(fs::metadata(output).unwrap().len() <= 3);
