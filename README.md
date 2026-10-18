@@ -28,7 +28,7 @@
 
 EnvNexus AI 是一款使用 Rust + Tauri 2 开发的 Windows 桌面 App。它把常见开发工具的检测、官方版本查询、下载校验、自选目录安装、多版本切换、修复和卸载放到统一、安全且可回滚的工作流中。
 
-当前开发版本为 **0.1.8**：修复版本列表重叠、窄列按钮布局及通知中的路径字形，并增加 Maven 的完整 JDK 依赖检查。本地前端与浏览器检查已通过；0.1.8 完整 CI 和发布验证待完成，下文 0.1.7 的验证结果仅为历史记录。
+当前待发布版本为 **0.1.8**：修复版本列表重叠、窄列按钮布局及通知中的路径字形，并增加 Maven 的完整 JDK 依赖检查。本地前端与浏览器检查、[Windows CI2](https://github.com/PuppetWen/EnvNexus-AI/actions/runs/39095241423) 和[独立签名验证](https://github.com/PuppetWen/EnvNexus-AI/actions/runs/39095973235)均通过，包含 Maven 实际安装回归；正式公开发布与公开资产回读待完成。下文 0.1.7 的验证结果仅为历史记录。
 
 ### 主要功能
 
@@ -54,15 +54,15 @@ Maven 需要满足该版本要求的完整 JDK，只有 JRE 或失效的 `JAVA_H
 
 ### Python 历史版本
 
-目录默认展示全部获取到的官方记录，可筛选稳定版、预览版、历史归档或仅可安装版本。官方 CPython 标签通过 Git v2 `ls-refs` 批量查询，补齐发布数据库遗漏的历史标签；本轮网络样本返回 657 个版本标签，标签响应约 42 KB，数量和体积会随上游变化，不代表固定性能承诺。
+目录默认展示全部获取到的官方记录，可筛选稳定版、预览版、历史归档或仅可安装版本。官方 CPython 标签通过 Git v2 `ls-refs` 批量查询，补齐发布数据库遗漏的历史标签；0.1.7 的历史网络样本返回 657 个版本标签，标签响应约 42 KB，数量和体积会随上游变化，不代表固定性能承诺。
 
-安装优先选择有官方 SHA-256 的完整 ZIP；历史 Python 2.0–2.3 的 Wise EXE、Python 2.4 起的 MSI、Python 3.5 起的 WiX Burn EXE 在有效官方校验元数据齐全时可静态解包到自选目录，不运行厂商安装器。CI7 已通过十个历史版本的隔离安装验收。仅源码、缺少 Windows 安装包或缺少可验证下载元数据的条目继续显示对应的不可自动安装原因；源码标签本身不作为存在或缺少 Windows 包的证明。
+安装优先选择有官方 SHA-256 的完整 ZIP；历史 Python 2.0–2.3 的 Wise EXE、Python 2.4 起的 MSI、Python 3.5 起的 WiX Burn EXE 在有效官方校验元数据齐全时可静态解包到自选目录，不运行厂商安装器。0.1.7 CI7 已通过十个历史版本的隔离安装验收。仅源码、缺少 Windows 安装包或缺少可验证下载元数据的条目继续显示对应的不可自动安装原因；源码标签本身不作为存在或缺少 Windows 包的证明。
 
-Python 3.6 之前的 Windows 运行时及随包 Tcl/Tk 需要仅含 ASCII 字符的安装目录，例如 `E:\Environment`。安装或修复计划会提前拒绝不兼容的路径，执行阶段也会在启动旧解释器前复核。CI7 已通过这些路径拒绝检查，并以 Python `3.10.11` 通过包含中文和重音字符目录的安装与 pip/venv 验收。
+Python 3.6 之前的 Windows 运行时及随包 Tcl/Tk 需要仅含 ASCII 字符的安装目录，例如 `E:\Environment`。安装或修复计划会提前拒绝不兼容的路径，执行阶段也会在启动旧解释器前复核。0.1.7 CI7 已通过这些路径拒绝检查，并以 Python `3.10.11` 通过包含中文和重音字符目录的安装与 pip/venv 验收。
 
 正式发行包中，Python 2.7.9+、Python 3.4+ 使用随包 pip/ensurepip，Python 3.3+ 保留内置 venv；预览版按实际发行组件区分，例如部分早期 alpha 尚无 venv 或 ensurepip。原包没有的功能不会被伪造，也不会联网补装最新版 pip。官网仅提供 MD5 的历史包会在安装计划中明确标记为弱校验，不冒充 SHA-256 或发行签名验证。
 
-历史 pip 从原包随带的 wheel 离线初始化，使用受管根目录内的短私有临时目录并隔离外部配置；安装后验证最终路径的 pip 命令和该版本具备的 venv 能力。[CI7 功能验证](https://github.com/PuppetWen/EnvNexus-AI/actions/runs/39025514788)已通过 184 项 Rust、62 项前端、4 项 Node 测试、十个历史 Python 安装、现代 Python 新装与旧嵌入式安装原路径修复，以及 15/15 类工具真实安装；[独立草稿签名验证](https://github.com/PuppetWen/EnvNexus-AI/actions/runs/39027005455)也已通过。[v0.1.7](https://github.com/PuppetWen/EnvNexus-AI/releases/tag/v0.1.7) 已公开发布，六项公开资产及自动更新入口回读均通过，范围和未验证边界见[测试报告](docs/TEST_REPORT.md)。
+历史 pip 从原包随带的 wheel 离线初始化，使用受管根目录内的短私有临时目录并隔离外部配置；安装后验证最终路径的 pip 命令和该版本具备的 venv 能力。[0.1.7 CI7 功能验证](https://github.com/PuppetWen/EnvNexus-AI/actions/runs/39025514788)已通过 184 项 Rust、62 项前端、4 项 Node 测试、十个历史 Python 安装、现代 Python 新装与旧嵌入式安装原路径修复，以及 15/15 类工具真实安装；[独立草稿签名验证](https://github.com/PuppetWen/EnvNexus-AI/actions/runs/39027005455)也已通过。[v0.1.7](https://github.com/PuppetWen/EnvNexus-AI/releases/tag/v0.1.7) 已公开发布，六项公开资产及自动更新入口回读均通过，范围和未验证边界见[测试报告](docs/TEST_REPORT.md)。
 
 ### AI 在哪里起作用
 
@@ -74,7 +74,7 @@ AI 不会绕过本地安全边界：它不能直接修改环境。任何一键�
 
 ### 下载与启动
 
-0.1.8 的目标发行文件如下；本轮 CI 和发布尚待完成，已发布的可用资产以 [GitHub Releases](https://github.com/PuppetWen/EnvNexus-AI/releases/latest) 为准：
+0.1.8 的发行文件已通过 CI 和签名验证，正式公开发布与公开资产回读待完成；已发布的可用资产以 [GitHub Releases](https://github.com/PuppetWen/EnvNexus-AI/releases/latest) 为准：
 
 - `EnvNexus-AI_0.1.8_x64-setup.exe`：当前用户安装版，可选择安装目录；检测到已有安装时会复用原路径并原地升级。
 - `EnvNexus-AI_0.1.8_x64-portable.exe`：便携主程序；App 内更新会在原路径安全自替换。
@@ -132,7 +132,7 @@ EnvNexus AI 不会自动整理用户的现有开发目录，也不会静默写�
 
 EnvNexus AI is a Windows desktop application built with Rust and Tauri 2. It provides one safe, reversible workflow for detecting, installing, switching, repairing, and uninstalling development toolchains.
 
-The current development version is **0.1.8**. It fixes overlapping catalog rows, narrow-column actions and Windows path glyphs, and adds complete-JDK checks for Maven. Local frontend and browser checks passed; full 0.1.8 CI and release verification are pending. Results cited for 0.1.7 below are historical evidence.
+The pending release is **0.1.8**. It fixes overlapping catalog rows, narrow-column actions and Windows path glyphs, and adds complete-JDK checks for Maven. Local frontend/browser checks, [Windows CI2](https://github.com/PuppetWen/EnvNexus-AI/actions/runs/39095241423), and [independent signature verification](https://github.com/PuppetWen/EnvNexus-AI/actions/runs/39095973235) passed, including a real Maven installation regression check. Public release and anonymous public-asset checks are pending. Results cited for 0.1.7 below are historical evidence.
 
 ### Highlights
 
@@ -157,15 +157,15 @@ Maven requires a complete JDK suitable for its version; a JRE or stale `JAVA_HOM
 
 ### Historical Python releases
 
-Catalogs initially show every retrieved official record, with filters for stable releases, previews, archives, and installable packages. Git v2 `ls-refs` retrieves official CPython version tags in a batch to fill gaps in the release database. One network sample returned 657 version tags in a roughly 42 KB tag response; these figures vary with the upstream repository and are not a fixed performance guarantee.
+Catalogs initially show every retrieved official record, with filters for stable releases, previews, archives, and installable packages. Git v2 `ls-refs` retrieves official CPython version tags in a batch to fill gaps in the release database. An archived 0.1.7 network sample returned 657 version tags in a roughly 42 KB tag response; these figures vary with the upstream repository and are not a fixed performance guarantee.
 
-Full ZIPs with official SHA-256 checksums take priority. Supported Python 2.0–2.3 Wise EXEs, MSI packages from Python 2.4 onward, and WiX Burn EXEs from Python 3.5 onward are extracted into a selected directory when official checksums are available, without running vendor installers. CI7 passed isolated installation checks for ten historical versions. Source-only releases, missing Windows packages, and unavailable verifiable download metadata retain their specific installation-blocking reasons. A source tag alone does not establish whether a Windows package exists.
+Full ZIPs with official SHA-256 checksums take priority. Supported Python 2.0–2.3 Wise EXEs, MSI packages from Python 2.4 onward, and WiX Burn EXEs from Python 3.5 onward are extracted into a selected directory when official checksums are available, without running vendor installers. The 0.1.7 CI7 run passed isolated installation checks for ten historical versions. Source-only releases, missing Windows packages, and unavailable verifiable download metadata retain their specific installation-blocking reasons. A source tag alone does not establish whether a Windows package exists.
 
-Windows runtimes before Python 3.6 and their bundled Tcl/Tk require an ASCII-only installation path, such as `E:\Environment`. Install and repair plans reject incompatible paths, and execution checks again before starting an old interpreter. CI7 passed those rejection checks and installed Python `3.10.11`, including pip and venv checks, in a path containing Chinese and accented characters.
+Windows runtimes before Python 3.6 and their bundled Tcl/Tk require an ASCII-only installation path, such as `E:\Environment`. Install and repair plans reject incompatible paths, and execution checks again before starting an old interpreter. The 0.1.7 CI7 run passed those rejection checks and installed Python `3.10.11`, including pip and venv checks, in a path containing Chinese and accented characters.
 
 For final releases, Python 2.7.9+ and Python 3.4+ use bundled pip/ensurepip, and Python 3.3+ retains built-in venv. Preview releases are checked against their actual components; some early alphas predate venv or ensurepip. Missing features are not fabricated or filled by downloading a current pip. Historical packages published with only MD5 are explicitly identified as using a weak checksum, distinct from SHA-256 or release-signature verification.
 
-Historical pip is initialized offline from bundled wheels, using a short private workspace inside the managed root and isolated external configuration. Final-path pip launchers and the release's available venv features are checked. [CI7 functional checks](https://github.com/PuppetWen/EnvNexus-AI/actions/runs/39025514788) passed 184 Rust, 62 frontend, and 4 Node tests, ten historical Python installations, modern Python installation and in-place embedded-package repair, and 15/15 tool installations. [Independent draft-asset signature verification](https://github.com/PuppetWen/EnvNexus-AI/actions/runs/39027005455) also passed. [Version 0.1.7](https://github.com/PuppetWen/EnvNexus-AI/releases/tag/v0.1.7) is public; all six public assets and the latest-update endpoint passed anonymous download, exact-hash, and signature checks; see the [test report](docs/TEST_REPORT.md) for coverage and remaining limits.
+Historical pip is initialized offline from bundled wheels, using a short private workspace inside the managed root and isolated external configuration. Final-path pip launchers and the release's available venv features are checked. [0.1.7 CI7 functional checks](https://github.com/PuppetWen/EnvNexus-AI/actions/runs/39025514788) passed 184 Rust, 62 frontend, and 4 Node tests, ten historical Python installations, modern Python installation and in-place embedded-package repair, and 15/15 tool installations. [Independent draft-asset signature verification](https://github.com/PuppetWen/EnvNexus-AI/actions/runs/39027005455) also passed. [Version 0.1.7](https://github.com/PuppetWen/EnvNexus-AI/releases/tag/v0.1.7) is public; all six public assets and the latest-update endpoint passed anonymous download, exact-hash, and signature checks; see the [test report](docs/TEST_REPORT.md) for coverage and remaining limits.
 
 ### What AI does
 
@@ -177,7 +177,7 @@ AI cannot bypass local safety controls or directly change the environment. One-c
 
 ### Download and use
 
-The intended 0.1.8 files are listed below. CI and publication are pending; see [GitHub Releases](https://github.com/PuppetWen/EnvNexus-AI/releases/latest) for currently published assets:
+The 0.1.8 files passed CI and signature verification. Public release and anonymous public-asset checks are pending; see [GitHub Releases](https://github.com/PuppetWen/EnvNexus-AI/releases/latest) for currently published assets:
 
 - `EnvNexus-AI_0.1.8_x64-setup.exe`: per-user installer with a selectable install directory. Existing installations are upgraded in their previous location.
 - `EnvNexus-AI_0.1.8_x64-portable.exe`: portable executable. In-app updates safely replace it in its original location.

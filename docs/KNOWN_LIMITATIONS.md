@@ -1,6 +1,6 @@
 # 已知限制
 
-以下是 EnvNexus AI 0.1.8 的能力边界。本地 62 项前端测试、Vite 构建和浏览器布局检查已通过；本轮后端、完整 CI、签名和公开发布验证待完成。下文 0.1.7 CI7、签名及公开资产结果仅为历史证据，实际范围见[测试报告](TEST_REPORT.md)：
+以下是 EnvNexus AI 0.1.8 的能力边界。本地浏览器检查、Windows CI2（192 项 Rust、62 项前端、4 项 Node 测试、Maven 独立回归、Python 与 15 类工具安装）及独立签名验证均通过；正式公开发布与公开资产回读待完成。下文 0.1.7 CI7、签名及公开资产结果仅为历史证据，实际范围见[测试报告](TEST_REPORT.md)：
 
 1. 仅构建和验证 Windows x64 MSVC 版本；没有 ARM64 包。
 2. 不执行系统级环境变量、HKLM 或系统 PATH 修改。系统 PATH 遮蔽时切换计划会阻止执行。
@@ -19,7 +19,7 @@
 15. AI 增强分析只生成文本建议，不会自动执行模型建议，也不会把模型输出转换成环境修改计划。确定性的一键修复来自本地规则，只覆盖用户级、结果唯一且可备份回滚的问题；自定义别名、多版本管理器取舍和系统级问题仍需用户判断。
 16. 工具命令脚本记录当前 `EnvNexus-AI.exe` 的绝对路径。移动便携版后必须在“命令说明”页重新生成脚本。命令目录可由用户选择，但不会自动加入 PATH；用户需先核对 HKCU PATH 差异并确认。
 17. EnvNexus AI 当前把每个 .NET SDK ZIP 解压到独立版本目录，以便原子回滚、切换和卸载。多个版本可以共存，但选中的 `dotnet.exe --list-sdks` 只看到该隔离目录中的 SDK；它不是微软“多个 SDK 合并到同一 DOTNET_ROOT”布局，项目通过 `global.json` 自动选择另一个 EnvNexus AI 隔离版本前仍需先切换默认目录。
-18. Python 历史目录使用两份批量发布/Windows 文件 API、完整运行时索引链、少量官方归档总表及 CPython 官方仓库的 Git v2 `ls-refs` 版本标签查询，避免逐版本额外请求或下载全部 pull refs；任一必需目录获取失败时不会将残缺结果冒充完整历史。Git v2 本轮网络样本的标签响应约 42 KB、包含 657 个版本标签；这些数值不代表固定目录规模、响应大小或性能承诺。网络、代理和上游限流仍影响冷查询与下载，尚未使用 HTTP 条件请求。本机 4 MiB 代理样本未证明并发下载提速，不能保证固定带宽或“4 倍速度”。[0.1.7 CI7](https://github.com/PuppetWen/EnvNexus-AI/actions/runs/39025514788) 的实时官方源、历史目录与安装、现代 Python 修复、15/15 类工具安装和 184 项 Rust / 62 项前端 / 4 项 Node 测试已通过；[独立草稿资产下载与签名验证](https://github.com/PuppetWen/EnvNexus-AI/actions/runs/39027005455)也已通过。[v0.1.7](https://github.com/PuppetWen/EnvNexus-AI/releases/tag/v0.1.7) 已公开发布，六项公开资产及自动更新入口回读均通过。0.1.6 的 15 官方源、47 个完整 Python 运行时、CI5 整轮及六项公开资产回读通过记录保留在[测试报告](TEST_REPORT.md)，不作为本轮结果。
+18. Python 历史目录使用两份批量发布/Windows 文件 API、完整运行时索引链、少量官方归档总表及 CPython 官方仓库的 Git v2 `ls-refs` 版本标签查询，避免逐版本额外请求或下载全部 pull refs；任一必需目录获取失败时不会将残缺结果冒充完整历史。Git v2 在 0.1.7 中记录的网络样本的标签响应约 42 KB、包含 657 个版本标签；这些数值不代表固定目录规模、响应大小或性能承诺。网络、代理和上游限流仍影响冷查询与下载，尚未使用 HTTP 条件请求。本机 4 MiB 代理样本未证明并发下载提速，不能保证固定带宽或“4 倍速度”。[0.1.7 CI7](https://github.com/PuppetWen/EnvNexus-AI/actions/runs/39025514788) 的实时官方源、历史目录与安装、现代 Python 修复、15/15 类工具安装和 184 项 Rust / 62 项前端 / 4 项 Node 测试已通过；[独立草稿资产下载与签名验证](https://github.com/PuppetWen/EnvNexus-AI/actions/runs/39027005455)也已通过。[v0.1.7](https://github.com/PuppetWen/EnvNexus-AI/releases/tag/v0.1.7) 已公开发布，六项公开资产及自动更新入口回读均通过。0.1.6 的 15 官方源、47 个完整 Python 运行时、CI5 整轮及六项公开资产回读通过记录保留在[测试报告](TEST_REPORT.md)，不作为本轮结果。
 19. 五种语言目前覆盖导航、设置、常用操作与托盘菜单；工具名、官方版本信息、路径、诊断证据和可复制命令保留原文，以避免机器翻译改变技术含义或命令内容。
 20. 工具图形用于产品识别，不表示 Python、Eclipse Adoptium、Google、Microsoft 或其他商标所有者对 EnvNexus AI 的认可。Android SDK、NDK 和 ADB 在 16–32 像素菜单尺寸下复用 Android 图形，App 内使用用途角标区分。
-21. Maven 始终需要满足对应版本要求的完整 JDK，`java.exe` 和 `javac.exe` 必须均可运行且主版本一致；只有 JRE 不够。0.1.8 的安装/修复预检与扫描会检查最新环境、受检进程环境及已配置或受管 JDK，临时覆盖只作用于验证子进程，不会自动修改全局 `JAVA_HOME`/PATH。缺少 JDK 时需先在 Java 页面安装或配置，终端默认 Java 仍需单独确认；本轮实际安装与隔离冒烟结果待 CI 确认。
+21. Maven 始终需要满足对应版本要求的完整 JDK，`java.exe` 和 `javac.exe` 必须均可运行且主版本一致；只有 JRE 不够。0.1.8 的安装/修复预检与扫描会检查最新环境、受检进程环境及已配置或受管 JDK，临时覆盖只作用于验证子进程，不会自动修改全局 `JAVA_HOME`/PATH。缺少 JDK 时需先在 Java 页面安装或配置，终端默认 Java 仍需单独确认；本轮 Maven `3.9.16` 实际安装与隔离冒烟已通过 CI2，但未验证所有第三方 Maven 项目构建。

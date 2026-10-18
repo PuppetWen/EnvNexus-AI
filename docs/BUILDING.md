@@ -1,6 +1,6 @@
 # 构建说明
 
-当前源码版本为 **0.1.8**，本轮完整 CI、Maven 实际安装与签名发布验证待完成；下述 0.1.7 CI7 和公开资产结果作为历史证据保留。
+当前源码版本为 **0.1.8**，[Windows CI2](https://github.com/PuppetWen/EnvNexus-AI/actions/runs/39095241423) 与[独立签名验证](https://github.com/PuppetWen/EnvNexus-AI/actions/runs/39095973235)均通过，包含 Maven 实际安装与隔离检查；正式公开发布与公开资产回读待完成。下述 0.1.7 CI7 和公开资产结果作为历史证据保留。
 
 ## 支持平台
 
@@ -83,21 +83,21 @@ pnpm icons:generate
 
 `live-added-sources` 单独验证 Maven、.NET SDK、Ruby、PHP，便于区分新增解析器与其他上游网络波动。`live-install` 会在仓库的 `artifacts/integration` 下创建临时目录，真实下载并校验 Python 官方完整 PythonCore ZIP，验证安装事务与完整开发运行时；结束后删除临时目录，不修改 PATH。
 
-0.1.7 的 Python 查询并发合并官网发布 API、Windows 文件 API、完整 PythonCore 索引链、少量历史归档总表和官方 CPython 版本标签，保留 0.9、1.x、Python 2、旧 Python 3 和预览版；不逐版本请求下载元数据。CPython 官方仓库使用 Git v2：先验证 `version 2` / `ls-refs` 能力，再以 `ref-prefix refs/tags/v` 批量获取版本标签，不使用 GitHub API 分页或下载全部 pull refs。两个响应均验证状态、Content-Type、pkt-line 完整性及 32 MiB 读取上限。本轮网络样本中，标签响应为 41,706 字节（约 42 KB），包含 657 个版本标签；能力响应另为 191 字节。这是网络样本，不保证固定标签数量、响应大小或查询耗时。
+0.1.7 的 Python 查询并发合并官网发布 API、Windows 文件 API、完整 PythonCore 索引链、少量历史归档总表和官方 CPython 版本标签，保留 0.9、1.x、Python 2、旧 Python 3 和预览版；不逐版本请求下载元数据。CPython 官方仓库使用 Git v2：先验证 `version 2` / `ls-refs` 能力，再以 `ref-prefix refs/tags/v` 批量获取版本标签，不使用 GitHub API 分页或下载全部 pull refs。两个响应均验证状态、Content-Type、pkt-line 完整性及 32 MiB 读取上限。0.1.7 的历史网络样本中，标签响应为 41,706 字节（约 42 KB），包含 657 个版本标签；能力响应另为 191 字节。这是网络样本，不保证固定标签数量、响应大小或查询耗时。
 
-完整 ZIP 与官方 SHA-256 优先，同版本缺少该 ZIP 时可选择有有效官方 SHA-256 或 MD5 的完整 x64 / x86 Wise EXE、MSI、WiX Burn EXE。Python 2.0–2.3 的 Wise EXE、Python 2.4 起的 MSI、Python 3.5 起的 Burn EXE 均通过静态提取安装，不调用厂商安装器、MSI 自定义动作或全局运行库安装程序；CI7 已通过下述十版本验收。仅源码、缺少 Windows 包或缺少可验证下载元数据的版本保留对应的不可自动安装原因；源码标签本身不证明该版有或没有 Windows 包。旧 NuGet 包和嵌入式包不冒充完整发行包，MD5 在安装计划中明确标注为弱校验，不等同于 SHA-256 或发行签名验证。
+完整 ZIP 与官方 SHA-256 优先，同版本缺少该 ZIP 时可选择有有效官方 SHA-256 或 MD5 的完整 x64 / x86 Wise EXE、MSI、WiX Burn EXE。Python 2.0–2.3 的 Wise EXE、Python 2.4 起的 MSI、Python 3.5 起的 Burn EXE 均通过静态提取安装，不调用厂商安装器、MSI 自定义动作或全局运行库安装程序；0.1.7 CI7 已通过下述十版本验收。仅源码、缺少 Windows 包或缺少可验证下载元数据的版本保留对应的不可自动安装原因；源码标签本身不证明该版有或没有 Windows 包。旧 NuGet 包和嵌入式包不冒充完整发行包，MD5 在安装计划中明确标注为弱校验，不等同于 SHA-256 或发行签名验证。
 
-Python 3.6 之前的 Windows 运行时及随包 Tcl/Tk 需要 ASCII 安装路径，例如 `E:\Environment`。安装和修复计划在预览阶段检查路径，安装器执行入口及启动解释器前再次复核，避免在中文或重音字符路径中启动不兼容的旧运行时。CI7 已验证这些版本在非 ASCII 路径中被拒绝且未生成安装，再在 ASCII 路径中安装；Python `3.10.11` 已通过包含中文和重音字符的 `tools-开发-é` 目录安装与 pip/venv 验收。
+Python 3.6 之前的 Windows 运行时及随包 Tcl/Tk 需要 ASCII 安装路径，例如 `E:\Environment`。安装和修复计划在预览阶段检查路径，安装器执行入口及启动解释器前再次复核，避免在中文或重音字符路径中启动不兼容的旧运行时。0.1.7 CI7 已验证这些版本在非 ASCII 路径中被拒绝且未生成安装，再在 ASCII 路径中安装；Python `3.10.11` 已通过包含中文和重音字符的 `tools-开发-é` 目录安装与 pip/venv 验收。
 
 历史 pip 使用原包随带的 wheel：先在受管根目录内的短私有工作目录中有界解包并验证 ZIP CRC、路径和大小，再通过隔离 wrapper 直接运行 `pip.__main__`，在最终 prefix 离线生成命令入口并传播真实退出码。它不依赖预先安装的 pip，不联网升级旧 pip，且清除外部 pip 选项、禁用 pip/distutils 配置；venv 使用同一组随包 wheel。随后验证最终路径的 pip 命令、模块、列表及对应 venv 能力。现代完整 ZIP 的初始化流程保持独立。
 
 `Smoke-Python.ps1` 用于在 CI 中检查完整 Python 的 pip 命令入口、venv 和旧嵌入式安装的原路径修复；测试、缓存和临时目录限制在仓库下。具体通过结果以当次工作流和 `TEST_REPORT.md` 为准。
 
-新增 `Smoke-Python-History.ps1` 仅允许在 Windows GitHub CI runner 的隔离工作区执行。CI7 已通过十个版本：`2.0.1`、`2.1.3`、`2.2.3`、`2.3.5`、`2.4.4`、`2.7.18`、`3.0.1`、`3.3.5`、`3.4.4`、`3.10.11`，检查官方目录、筛选排序、Wise EXE / MSI / Burn EXE 静态提取、随包能力、用户环境指纹、配置污染隔离和有界清理。正式发行包中的 Python 2.7.9+ / 3.4+ 使用原包自带 pip，Python 3.3+ 检查内置 venv；更早版本不联网补装最新版 pip。预览版按实际组件区分，例如 3.3 早期 alpha 不要求 venv，3.4 alpha 不要求 ensurepip；这十个稳定版本的验收不能代替全部历史或预览版验收。测试包、缓存和临时文件均留在隔离工作区所在的 D / E 盘，不写全局用户缓存，也不修改 HKCU。
+新增 `Smoke-Python-History.ps1` 仅允许在 Windows GitHub CI runner 的隔离工作区执行。0.1.7 CI7 已通过十个版本：`2.0.1`、`2.1.3`、`2.2.3`、`2.3.5`、`2.4.4`、`2.7.18`、`3.0.1`、`3.3.5`、`3.4.4`、`3.10.11`，检查官方目录、筛选排序、Wise EXE / MSI / Burn EXE 静态提取、随包能力、用户环境指纹、配置污染隔离和有界清理。正式发行包中的 Python 2.7.9+ / 3.4+ 使用原包自带 pip，Python 3.3+ 检查内置 venv；更早版本不联网补装最新版 pip。预览版按实际组件区分，例如 3.3 早期 alpha 不要求 venv，3.4 alpha 不要求 ensurepip；这十个稳定版本的验收不能代替全部历史或预览版验收。测试包、缓存和临时文件均留在隔离工作区所在的 D / E 盘，不写全局用户缓存，也不修改 HKCU。
 
 0.1.7 的历史证据来自提交 `ba2c54e` 的 [CI7](https://github.com/PuppetWen/EnvNexus-AI/actions/runs/39025514788)：184 项 Rust、62 项前端、4 项 Node 测试，以及实时官方源、十个历史 Python、现代 Python 新装与旧嵌入式包原路径修复、15/15 类工具真实安装均已通过。[独立草稿资产验证](https://github.com/PuppetWen/EnvNexus-AI/actions/runs/39027005455)的下载、清单及 Rust 签名验证也已通过；[v0.1.7](https://github.com/PuppetWen/EnvNexus-AI/releases/tag/v0.1.7) 已公开发布，六项公开资产及自动更新入口回读均通过。完整范围及未验证边界见[测试报告](TEST_REPORT.md)，不代表 0.1.8 已通过复测。
 
-`Smoke-Maven.ps1` 仅用于 Windows GitHub CI runner 的 D/E 盘隔离工作区：故意注入失效的进程 `JAVA_HOME` 和外部 Maven/Java 选项，使用 runner 已有的完整 JDK，验证正式 CLI 的依赖预检、官方 Maven 包校验、实际安装和 `mvn -v`，检查启动钩子未执行、用户/系统环境指纹未变及有界清理。脚本不安装 Java，也不应用全局 Java 或 Maven 默认切换；无可用 JDK 的拒绝路径另由后端单元测试覆盖。本轮结果待 CI 原始 `maven-<GUID>/summary.json` 确认。
+`Smoke-Maven.ps1` 仅用于 Windows GitHub CI runner 的 D/E 盘隔离工作区：故意注入失效的进程 `JAVA_HOME` 和外部 Maven/Java 选项，使用 runner 已有的完整 JDK，验证正式 CLI 的依赖预检、官方 Maven 包校验、实际安装和 `mvn -v`，检查启动钩子未执行、用户/系统环境指纹未变及有界清理。脚本不安装 Java，也不应用全局 Java 或 Maven 默认切换；无可用 JDK 的拒绝路径另由后端单元测试覆盖。本轮 CI2 的 `maven-9a52b20cd10f48e3b1d48902d0ea27b4/summary.json` 已确认 `passed`；实际选择的 JDK、环境保持及未覆盖路径见[测试报告](TEST_REPORT.md)。
 
 ## 开发运行
 
