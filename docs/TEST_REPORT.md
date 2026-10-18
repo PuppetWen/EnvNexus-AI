@@ -1,6 +1,6 @@
 # EnvNexus AI 测试报告
 
-## 0.1.9 验证记录（2026-10-18 UTC，公开发布待完成）
+## 0.1.9 验证记录（2026-10-18 UTC）
 
 提交 `f602379cfe70adf19fcdde09c097dc27d7755bda` 的 [CI3 / 39118676951](https://github.com/PuppetWen/EnvNexus-AI/actions/runs/39118676951) 已确认 `COMPLETED / SUCCESS`，包含构建、功能验证、报告上传及收尾。原始报告位于 `artifacts/text-ci-third-reports/`，以下路径均相对此目录。CI1 因 lint 失败、CI2 已取消，均不作为最终通过证据；下文 0.1.8 及更早记录原样保留。
 
@@ -38,7 +38,9 @@ Maven 独立回归故意注入失效的进程 `JAVA_HOME` / `JAVACMD`、Maven/Ja
 | `EnvNexus-AI_0.1.9_x64-portable.exe` / NSIS 安装后主程序 | `2f3f2ea26dc618d7a49ee7a4db39be23d0447d9f46033d0a0525bc2e70fed7d6` |
 | `latest.json` | `8cc11c1b12999f20ffd11141388b3da3d7424686bfadbce91533825ae3c0fd4f` |
 
-0.1.9 发行仍为草稿。公开发布、合并提交与标签一致性、六项无凭据公开资产下载及 `releases/latest/download/latest.json` 更新入口回读尚待完成；草稿验证不能作为公开入口已可用的证据。这里的更新签名不等同于 Windows Authenticode 代码签名。
+[PR #8](https://github.com/PuppetWen/EnvNexus-AI/pull/8) 合并提交与 `v0.1.9` 标签均为 `c8a563260677b7720ddf5e2b293326e5fcaa94c7`，已核对一致；相对 CI3 验证的 `f602379` 仅六份文档不同。[v0.1.9](https://github.com/PuppetWen/EnvNexus-AI/releases/tag/v0.1.9) 于 `2026-10-18T10:52:06Z` 公开发布，`isDraft: false`。不携带 GitHub 凭据下载六项版本直接资产，精确哈希均与本轮发行文件一致，安装包与便携包再次通过 Node 签名验证；日志为 `artifacts/public-text-release-verification.log`，文件位于 `artifacts/published-installation-text-release-check/`。
+
+自动更新 `releases/latest/download/latest.json` 入口于 `2026-10-18T10:54:12.6861048Z` 完成无凭据公开回读，返回 `0.1.9`，SHA-256 为 `8cc11c1b12999f20ffd11141388b3da3d7424686bfadbce91533825ae3c0fd4f`，与本轮发布清单一致；原始结果为 `artifacts/public-text-latest-result.json`。六项公开资产和 latest 重定向更新入口均已验收通过。更新签名不等同于 Windows Authenticode 代码签名，前述浏览器、编码和开发场景验证边界保持不变。
 
 ## 0.1.8 验证记录（2026-10-18 UTC）
 

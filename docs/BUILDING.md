@@ -1,6 +1,6 @@
 # 构建说明
 
-当前源码版本为 **0.1.9**。[CI3 / 39118676951](https://github.com/PuppetWen/EnvNexus-AI/actions/runs/39118676951) 已完整通过 205 项 Rust、77 项前端、4 项 Node 测试、原生命令字符/路径回归、15 类工具安装及 NSIS 验收；[独立草稿资产签名验证](https://github.com/PuppetWen/EnvNexus-AI/actions/runs/39119429026)也已通过。320 个真实浏览器 mock 场景通过，但浏览器未运行真实安装。公开发布、合并/标签一致性及公开更新入口验收待完成；本轮原始证据与历史记录分列于[测试报告](TEST_REPORT.md)。
+当前源码版本为 **0.1.9**。[CI3 / 39118676951](https://github.com/PuppetWen/EnvNexus-AI/actions/runs/39118676951) 已完整通过 205 项 Rust、77 项前端、4 项 Node 测试、原生命令字符/路径回归、15 类工具安装及 NSIS 验收；[独立草稿资产签名验证](https://github.com/PuppetWen/EnvNexus-AI/actions/runs/39119429026)也已通过。320 个真实浏览器 mock 场景通过，但浏览器未运行真实安装。[v0.1.9](https://github.com/PuppetWen/EnvNexus-AI/releases/tag/v0.1.9) 已公开发布，PR #8 合并提交与标签一致，六项公开资产及 latest 更新入口验收通过；本轮原始证据与历史记录分列于[测试报告](TEST_REPORT.md)。
 
 ## 支持平台
 
