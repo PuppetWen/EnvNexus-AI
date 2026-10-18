@@ -144,7 +144,20 @@ fn root_command_invocation(executable: &str, tool_id: &str) -> String {
             "@\"{executable}\" root \"%_envnexus_root_action%\" \"{tool_id}\" %_envnexus_root_json%\r\n",
             "@goto _envnexus_root_done\r\n",
             ":_envnexus_root_with_path\r\n",
-            "@\"{executable}\" root \"%_envnexus_root_action%\" \"{tool_id}\" \"%_envnexus_root_path%\" %_envnexus_root_json%\r\n",
+            // CMD preserves the operand's backslashes, but the native argv
+            // parser treats a backslash before the closing quote specially.
+            // Double every trailing backslash only in the quoted command line;
+            // the actual path, including drive roots and UNC prefixes, is kept.
+            "@set \"_envnexus_root_prefix=%_envnexus_root_path%\"\r\n",
+            "@set \"_envnexus_root_suffix=\"\r\n",
+            ":_envnexus_root_quote_tail\r\n",
+            "@if not defined _envnexus_root_prefix goto _envnexus_root_quoted\r\n",
+            "@if not \"%_envnexus_root_prefix:~-1%\"==\"\\\" goto _envnexus_root_quoted\r\n",
+            "@set \"_envnexus_root_prefix=%_envnexus_root_prefix:~0,-1%\"\r\n",
+            "@set \"_envnexus_root_suffix=%_envnexus_root_suffix%\\\\\"\r\n",
+            "@goto _envnexus_root_quote_tail\r\n",
+            ":_envnexus_root_quoted\r\n",
+            "@\"{executable}\" root \"%_envnexus_root_action%\" \"{tool_id}\" \"%_envnexus_root_prefix%%_envnexus_root_suffix%\" %_envnexus_root_json%\r\n",
             ":_envnexus_root_done\r\n"
         ),
         executable = executable,
@@ -326,7 +339,7 @@ mod tests {
         assert!(!python_root.contains("%*"));
         assert!(
             python_root
-                .contains("root \"%_envnexus_root_action%\" \"python\" \"%_envnexus_root_path%\"")
+                .contains("root \"%_envnexus_root_action%\" \"python\" \"%_envnexus_root_prefix%%_envnexus_root_suffix%\"")
         );
     }
 
@@ -416,6 +429,90 @@ mod tests {
         println!("UNICODE_TERMINAL_FIXTURE_OK");
         if std::env::var("ENVNEXUS_TERMINAL_FIXTURE_FAIL").as_deref() == Ok("1") {
             std::process::exit(23);
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn root_terminal_argv_fixture() {
+        let Ok(expected) = std::env::var("ENVNEXUS_ROOT_ARGV_PATH") else {
+            return;
+        };
+        let args = std::env::args().collect::<Vec<_>>();
+        let path_index = args.iter().position(|arg| arg == "--skip").unwrap() + 1;
+        assert_eq!(args[path_index], expected);
+        assert_eq!(
+            args.get(path_index + 1).map(String::as_str),
+            Some("--color")
+        );
+        assert_eq!(args.get(path_index + 2).map(String::as_str), Some("never"));
+        assert_eq!(args.len(), path_index + 3);
+        println!("ROOT_ARGV_QUOTING_OK");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn root_script_quotes_every_trailing_backslash_without_changing_the_path() {
+        use std::{ffi::OsStr, time::Duration};
+
+        let data = tempfile::tempdir().unwrap();
+        let executable = escape_batch_path(&std::env::current_exe().unwrap()).unwrap();
+        // Use the real root parser and path-quoting code. Adapt only its fixed
+        // target operands to stable libtest flags so the trusted native fixture
+        // can assert its argv without accessing these drive/UNC destinations.
+        let invocation = root_command_invocation(&executable, "python")
+            .replace(
+                "root \"%_envnexus_root_action%\" \"python\"",
+                "--exact terminal::tests::root_terminal_argv_fixture --nocapture --skip",
+            )
+            .replace("%_envnexus_root_json%", "--color never");
+        fs::write(
+            data.path().join("root-argv-fixture.cmd"),
+            utf8_command_script(&invocation),
+        )
+        .unwrap();
+        let harness = data.path().join("root-caller.cmd");
+        fs::write(
+            &harness,
+            concat!(
+                "@echo off\r\n@setlocal DisableDelayedExpansion\r\n",
+                "@call root-argv-fixture.cmd set \"%ENVNEXUS_ROOT_ARGV_PATH%\" --json\r\n",
+                "@exit /b %errorlevel%\r\n"
+            ),
+        )
+        .unwrap();
+        let cmd = std::env::var_os("ComSpec").unwrap_or_else(|| "cmd.exe".into());
+        let search_path = format!(
+            "{};{}",
+            data.path().display(),
+            std::env::var("PATH").unwrap_or_default()
+        );
+        for path in [
+            r"E:\Environment\",
+            r"E:\中文-日本語-é space & !bang!\",
+            r"E:\",
+            r"E:\Environment\\\",
+            r"\\server\share\",
+            r"\\server\share\\\",
+            r"\\?\E:\Environment\",
+            r"\\?\UNC\server\share\\",
+        ] {
+            let output = crate::process::run_capture_with_env(
+                Path::new(&cmd),
+                &["/D", "/C", harness.to_str().unwrap()],
+                Duration::from_secs(20),
+                &[
+                    ("PATH", OsStr::new(&search_path)),
+                    ("ENVNEXUS_ROOT_ARGV_PATH", OsStr::new(path)),
+                ],
+            )
+            .unwrap();
+            let text = crate::process::output_text(&output);
+            assert!(output.status.success(), "path={path:?}: {text}");
+            assert!(
+                text.contains("ROOT_ARGV_QUOTING_OK"),
+                "path={path:?}: {text}"
+            );
         }
     }
 

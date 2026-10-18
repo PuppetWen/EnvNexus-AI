@@ -105,7 +105,8 @@ try {
     # Exercise the generated root setter, including Unicode, quoted shell
     # metacharacters, and the CLI's global --json flag on either side.
     $UnicodePythonRoot = Join-Path $ArtifactRoot 'managed-tools\开发-日本語-é Python & !bang!'
-    $SetFromGeneratedScript = & $PythonRootScript '--json' 'set' $UnicodePythonRoot 2>&1
+    $UnicodePythonRootArgument = $UnicodePythonRoot + '\'
+    $SetFromGeneratedScript = & $PythonRootScript 'set' $UnicodePythonRootArgument '--json' 2>&1
     if ($LASTEXITCODE -ne 0) {
         throw "python-root.cmd set failed: $($SetFromGeneratedScript -join [Environment]::NewLine)"
     }
@@ -113,7 +114,7 @@ try {
     if ($SetRoot -ne [System.IO.Path]::GetFullPath($UnicodePythonRoot)) {
         throw 'Generated python-root.cmd set did not preserve the Unicode path.'
     }
-    $GetFromGeneratedScript = & $PythonRootScript 'get' '--json' 2>&1
+    $GetFromGeneratedScript = & $PythonRootScript '--json' 'get' 2>&1
     if ($LASTEXITCODE -ne 0) {
         throw "python-root.cmd get failed: $($GetFromGeneratedScript -join [Environment]::NewLine)"
     }
@@ -184,6 +185,7 @@ try {
         rootPersistenceVerified = $true
         generatedBeforeRootChangeReadsLatestRoot = $true
         generatedUnicodeRootSetGetVerified = $true
+        generatedTrailingSeparatorRootSetVerified = $true
         readOnlyCommandsDidNotScan = $true
         previewGuardVerified = $PreviewChecked
         generatedCommandCount = $CommandStatus.scriptCount
