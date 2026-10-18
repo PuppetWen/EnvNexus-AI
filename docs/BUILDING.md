@@ -1,6 +1,6 @@
 # 构建说明
 
-当前源码版本为 **0.1.9**。本地 77 项前端测试和 320 个真实浏览器 mock 场景通过，浏览器未运行真实安装；Windows 后端编码/命令脚本回归、完整 CI、签名及发布验证待完成。0.1.8 的 CI2、签名与公开资产结果保留在[测试报告](TEST_REPORT.md)，不能作为本轮结果。
+当前源码版本为 **0.1.9**。[CI3 / 39118676951](https://github.com/PuppetWen/EnvNexus-AI/actions/runs/39118676951) 已完整通过 205 项 Rust、77 项前端、4 项 Node 测试、原生命令字符/路径回归、15 类工具安装及 NSIS 验收；[独立草稿资产签名验证](https://github.com/PuppetWen/EnvNexus-AI/actions/runs/39119429026)也已通过。320 个真实浏览器 mock 场景通过，但浏览器未运行真实安装。公开发布、合并/标签一致性及公开更新入口验收待完成；本轮原始证据与历史记录分列于[测试报告](TEST_REPORT.md)。
 
 ## 支持平台
 
@@ -73,7 +73,7 @@ pnpm icons:generate
 5. `cargo test`
 6. `cargo clippy --all-targets -- -D warnings`
 
-0.1.9 新增的 Windows 子进程编码与真实 CMD wrapper 回归由上述 Rust 测试执行，需在允许运行原生测试的 Windows 环境验证；77 项本地前端测试不替代这些结果。升级后应在“命令说明”重新生成脚本，已有旧脚本不会因主程序升级自动获得 UTF-8 调用包装。
+0.1.9 的 Windows 子进程编码与真实 CMD / Windows PowerShell wrapper 回归已在 CI3 通过，覆盖中文、日文、重音字符和元字符路径、退出码、CMD 代码页 437/65001 的普通返回恢复，以及根目录参数的尾反斜杠；UNC/扩展路径样本验证参数传递，不访问对应网络位置。`Smoke-Cli.ps1` 另已验证生成命令的 Unicode 根目录设置/读取和尾分隔符设置。升级后应在“命令说明”重新生成脚本，已有旧脚本不会因主程序升级自动获得 UTF-8 调用包装。Ctrl+C 和任意外部编码的边界见[已知限制](KNOWN_LIMITATIONS.md)。
 
 需要显式联网的测试默认忽略，单独执行：
 
@@ -97,9 +97,9 @@ Python 3.6 之前的 Windows 运行时及随包 Tcl/Tk 需要 ASCII 安装路径
 
 新增 `Smoke-Python-History.ps1` 仅允许在 Windows GitHub CI runner 的隔离工作区执行。0.1.7 CI7 已通过十个版本：`2.0.1`、`2.1.3`、`2.2.3`、`2.3.5`、`2.4.4`、`2.7.18`、`3.0.1`、`3.3.5`、`3.4.4`、`3.10.11`，检查官方目录、筛选排序、Wise EXE / MSI / Burn EXE 静态提取、随包能力、用户环境指纹、配置污染隔离和有界清理。正式发行包中的 Python 2.7.9+ / 3.4+ 使用原包自带 pip，Python 3.3+ 检查内置 venv；更早版本不联网补装最新版 pip。预览版按实际组件区分，例如 3.3 早期 alpha 不要求 venv，3.4 alpha 不要求 ensurepip；这十个稳定版本的验收不能代替全部历史或预览版验收。测试包、缓存和临时文件均留在隔离工作区所在的 D / E 盘，不写全局用户缓存，也不修改 HKCU。
 
-0.1.7 的历史证据来自提交 `ba2c54e` 的 [CI7](https://github.com/PuppetWen/EnvNexus-AI/actions/runs/39025514788)：184 项 Rust、62 项前端、4 项 Node 测试，以及实时官方源、十个历史 Python、现代 Python 新装与旧嵌入式包原路径修复、15/15 类工具真实安装均已通过。[独立草稿资产验证](https://github.com/PuppetWen/EnvNexus-AI/actions/runs/39027005455)的下载、清单及 Rust 签名验证也已通过；[v0.1.7](https://github.com/PuppetWen/EnvNexus-AI/releases/tag/v0.1.7) 已公开发布，六项公开资产及自动更新入口回读均通过。完整范围及未验证边界见[测试报告](TEST_REPORT.md)，不代表 0.1.9 已通过复测。
+0.1.7 的历史证据来自提交 `ba2c54e` 的 [CI7](https://github.com/PuppetWen/EnvNexus-AI/actions/runs/39025514788)：184 项 Rust、62 项前端、4 项 Node 测试，以及实时官方源、十个历史 Python、现代 Python 新装与旧嵌入式包原路径修复、15/15 类工具真实安装均已通过。[独立草稿资产验证](https://github.com/PuppetWen/EnvNexus-AI/actions/runs/39027005455)的下载、清单及 Rust 签名验证也已通过；[v0.1.7](https://github.com/PuppetWen/EnvNexus-AI/releases/tag/v0.1.7) 已公开发布，六项公开资产及自动更新入口回读均通过。这些均为历史记录；0.1.9 的独立复测及未验证边界见[测试报告](TEST_REPORT.md)。
 
-`Smoke-Maven.ps1` 仅用于 Windows GitHub CI runner 的 D/E 盘隔离工作区：故意注入失效的进程 `JAVA_HOME` 和外部 Maven/Java 选项，使用 runner 已有的完整 JDK，验证正式 CLI 的依赖预检、官方 Maven 包校验、实际安装和 `mvn -v`，检查启动钩子未执行、用户/系统环境指纹未变及有界清理。脚本不安装 Java，也不应用全局 Java 或 Maven 默认切换；无可用 JDK 的拒绝路径另由后端单元测试覆盖。0.1.8 CI2 的 `maven-9a52b20cd10f48e3b1d48902d0ea27b4/summary.json` 已确认 `passed`；实际选择的 JDK、环境保持及未覆盖路径见[测试报告](TEST_REPORT.md)。
+`Smoke-Maven.ps1` 仅用于 Windows GitHub CI runner 的 D/E 盘隔离工作区：故意注入失效的进程 `JAVA_HOME` 和外部 Maven/Java 选项，使用 runner 已有的完整 JDK，验证正式 CLI 的依赖预检、官方 Maven 包校验、实际安装和 `mvn -v`，检查启动钩子未执行、用户/系统环境指纹未变及有界清理。脚本不安装 Java，也不应用全局 Java 或 Maven 默认切换；无可用 JDK 的拒绝路径另由后端单元测试覆盖。0.1.9 CI3 的 `maven-7206bf38d1da4bd8a8e9e14856933fac/summary.json` 已确认 `passed`；实际选择的 JDK、环境保持及未覆盖路径见[测试报告](TEST_REPORT.md)。
 
 ## 开发运行
 

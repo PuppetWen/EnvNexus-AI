@@ -1,12 +1,44 @@
 # EnvNexus AI 测试报告
 
-## 0.1.9 验证记录（2026-10-18 UTC，后端与交付待完成）
+## 0.1.9 验证记录（2026-10-18 UTC，公开发布待完成）
+
+提交 `f602379cfe70adf19fcdde09c097dc27d7755bda` 的 [CI3 / 39118676951](https://github.com/PuppetWen/EnvNexus-AI/actions/runs/39118676951) 已确认 `COMPLETED / SUCCESS`，包含构建、功能验证、报告上传及收尾。原始报告位于 `artifacts/text-ci-third-reports/`，以下路径均相对此目录。CI1 因 lint 失败、CI2 已取消，均不作为最终通过证据；下文 0.1.8 及更早记录原样保留。
+
+| 项目 | 本轮原始证据与结果 |
+| --- | --- |
+| 自动检查 | `ci-logs/verification.log`：205 项 Rust、77 项前端（19 文件）、4 项 Node 测试通过，6 项联网/官方包/发布产物测试在默认单元测试中显式忽略；TypeScript、Vite 生产构建、Rust 格式及严格 clippy 通过 |
+| 原生字符与脚本 | 同一日志中的 `process::output_tests`、`process::tests::unicode_cmd_output_is_decoded_without_a_bom` 及 `terminal::tests` 通过；具体范围见下文 |
+| 官方源 | `ci-logs/live-sources.log`：15 类实时官方源通过，Node.js 591 条、Python 662 条（367 条 Windows 下载）、Maven 2 条；`live-install.log` 中 Python `3.15.0` 官方完整包安装事务通过 |
+| Maven | `maven-7206bf38d1da4bd8a8e9e14856933fac/summary.json`：`3.9.16` 依赖预检、官方包 SHA-512、安装与 `mvn -v`、配置污染隔离、用户/系统环境保持及清理通过 |
+| 现代 Python | `python-9b573a701a0148eca18cd80a8f572450/summary.json`：`3.15.0` 完整包新装和真实旧嵌入式包的同版本原路径修复通过；pip `26.2.1`、Tk `9.0`、IDLE、头文件、3 个导入库及含 pip 的 venv 通过，旧缓存被拒绝，用户环境不变 |
+| 历史 Python | `python-history-dfdc4ef9a5054d42963cb05032103e8c/summary.json`：10/10、目录/筛选排序、版本/prefix/清单、污染隔离及清理通过，`errors: []` |
+| 命令模式 | `smoke/cli-44bbcb3dec554c409fcbc642f5b1d0e7/summary.json`：15 类定义、110 个命令、全盘扫描、目录持久化、旧脚本读取最新根、只读不扫描、JDK 别名、预览保护及环境修复/刷新通过；`generatedUnicodeRootSetGetVerified`、`generatedTrailingSeparatorRootSetVerified` 均为 `true` |
+| 全工具安装 | `installability-095a7ef2378747059026a35005202fc3/summary.json`：15/15、0 失败，安装提交/清单/切换预览/缓存/清理通过；ADB 实际激活、默认命令回读和用户环境恢复通过，其余 14 类只验证切换计划 |
+| 构建与 NSIS | `ci-logs/bundle.log`、`installer-payload.json`：0.1.9 构建与 NSIS 隔离安装通过，安装后主程序与便携包 SHA-256 相同，见下表 |
+
+Windows 解码回归覆盖 UTF-8、带 BOM 和可识别无 BOM 的 UTF-16、独立 stdout/stderr，以及原生 Windows 936/932/1252 代码页转换；实际终端格式序列移除后保留可见路径、UNC 前缀和字面转义。真实 CMD wrapper 在中文、日文、重音字符、空格及 `&`/`!` 路径下运行，主程序路径另含字面 `%`，代码页 437/65001 的成功 `0` 与失败 `23` 返回均恢复原代码页。Windows PowerShell 调用同一 Unicode 命令并保留退出码 `23`；根目录脚本的驱动器根、多个尾反斜杠、UNC 和扩展路径参数逐字传递通过，后两类仅验证参数，不访问网络目标。ACP 回退不代表任意编码自动识别，Ctrl+C/强制终止恢复及 `%` 脚本目录限制仍见[已知限制](KNOWN_LIMITATIONS.md)。
+
+历史 Python 逐项通过 `2.0.1`、`2.1.3`、`2.2.3`、`2.3.5`、`2.4.4`、`2.7.18`、`3.0.1`、`3.3.5`、`3.4.4`、`3.10.11`。pip 模块、列表和入口分别验证 `2.7.18` / `19.2.3`、`3.4.4` / `7.1.2`、`3.10.11` / `23.0.1`；后两者 venv 含 pip，`3.3.5` venv 按原版能力不含 pip，更早版本不要求原包未提供的功能。前九版均在非 ASCII 路径启动安装前拒绝，`3.10.11` 在 `tools-开发-é` 安装通过。十项 `setup-isolation.json` 的 `sentinelCount` 均为 0，外部 pip/distutils 配置及不可信工作目录未产生哨兵，用户环境不变、清理通过。目录共 662 条、预览 376 条、归档频道 7 条、无下载 295 条；筛选排序使用同一缓存，SHA-256 为 `5ec87c8f9b459d222feed191d395ad73772b78e6f06439b6ec1ea4f53ebf51df`。这不等同于全部历史/预览版本、第三方包或原生扩展验证；历史包 MD5 仍仅为明确提示的弱校验。
+
+Maven 独立回归故意注入失效的进程 `JAVA_HOME` / `JAVACMD`、Maven/Java 选项及启动钩子，实际选择最新注册表 JDK `17.0.20.1`，`mvn -v` 确认同一 runtime。`invalidJavaHomeRejected`、`startupHooksSkipped`、`processEnvironmentUnchanged`、`activationPreviewOnly` 均为 `true`，用户/系统环境指纹前后一致。无 JDK、JRE、版本不匹配和后备选择由本轮单元测试覆盖；未为集成测试改写注册表，也未验证所有 Maven 项目构建。
+
+15 类工具实测版本为：Python `3.15.0`、Java `27+35`、Go `1.27.2`、Rust `1.99.1`、Node.js `26.12.0`、Git `2.56.0.windows.2`、Android Command-line Tools `23.0`、NDK `30.0.16248370`、Gradle `9.8.1`、CMake `4.4.4`、ADB `37.0.1`、Maven `3.10.0`、.NET SDK `10.0.402`、Ruby `4.0.7-1`、PHP `8.5.11`。除 ADB 已实际应用并恢复用户环境外，其余工具与 Maven 独立回归仅预览激活；不表示已验证用户开发机的全部默认切换和卸载恢复。
 
 本地 77 项前端测试通过，包含本轮新增的 15 类工具安装文字集成测试。只读浏览器 fixture 使用真实应用和本地 mock，提供确认/差异、进度、后台任务、错误、通知及安装后确认场景，路径样本包含中文、日文、空格、重音字符、元字符、UNC 和扩展前缀；元字符非法磁盘目标明确仅用于显示测试。
 
 真实 IAB 浏览器矩阵已完成 320 个场景：15 工具 × 五主题 × 确认计划/进度/后台任务/错误共 300 项，另以 Maven 的五种额外路径 × 四场景补充 20 项。原始记录为 `artifacts/ui-0.1.9-text-checks.json`，检查时间 `2026-10-18T09:49:12.269Z`，320 项均为 `issues: []`、`horizontalOverflow: false`；逐页检查关键文字的 `Cascadia Mono` 字体、`text-transform: none`、无 U+FFFD/日元替代字符、后台 title 同步和水平溢出。前端集成测试另逐字核对原始路径字符。截图为 `artifacts/ui-0.1.9-installation-text.png`。
 
-浏览器结果来自真实应用渲染器与 CSS，但 IPC 和安装操作使用本地 mock，没有运行真实安装；它不能替代真实工具输出、命令脚本或后端证据。Windows 子进程解码与真实 CMD 代码页恢复回归、后端检查及完整 CI、签名与公开发布验证仍待完成。下文 0.1.8 及更早记录原样保留，不作为本轮通过结论。
+浏览器结果来自真实应用渲染器与 CSS，但 IPC 和安装操作使用本地 mock，没有运行真实安装；它不能替代上文独立记录的真实工具输出、命令脚本和后端证据。
+
+[独立签名验证 / 39119429026](https://github.com/PuppetWen/EnvNexus-AI/actions/runs/39119429026) 已确认 `SUCCESS`。`artifacts/text-signed-reports/asset-integrity.log` 确认六项 0.1.9 草稿资产下载及完整性检查通过，`signature-verification.log` 确认应用 Rust updater 以内置公钥验证实际安装包、便携包和元数据通过。本轮 `release/SHA256SUMS.txt` 摘要如下：
+
+| 资产 | SHA-256 |
+| --- | --- |
+| `EnvNexus-AI_0.1.9_x64-setup.exe` | `93b549653fb8de74b70888e5eba28ab46f734ff15bc8eb72029213222a70380c` |
+| `EnvNexus-AI_0.1.9_x64-portable.exe` / NSIS 安装后主程序 | `2f3f2ea26dc618d7a49ee7a4db39be23d0447d9f46033d0a0525bc2e70fed7d6` |
+| `latest.json` | `8cc11c1b12999f20ffd11141388b3da3d7424686bfadbce91533825ae3c0fd4f` |
+
+0.1.9 发行仍为草稿。公开发布、合并提交与标签一致性、六项无凭据公开资产下载及 `releases/latest/download/latest.json` 更新入口回读尚待完成；草稿验证不能作为公开入口已可用的证据。这里的更新签名不等同于 Windows Authenticode 代码签名。
 
 ## 0.1.8 验证记录（2026-10-18 UTC）
 

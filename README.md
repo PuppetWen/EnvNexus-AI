@@ -28,7 +28,7 @@
 
 EnvNexus AI 是一款使用 Rust + Tauri 2 开发的 Windows 桌面 App。它把常见开发工具的检测、官方版本查询、下载校验、自选目录安装、多版本切换、修复和卸载放到统一、安全且可回滚的工作流中。
 
-当前开发版本为 **0.1.9**：统一修复 15 类工具安装确认、进度、后台任务、通知和错误中的路径/多行文字显示，并改进工具输出解码与 CMD 脚本编码处理。本地 77 项前端测试及 320 个真实浏览器 mock 场景通过；后端、Windows CI、签名和发布验证待完成。0.1.8 及以前的通过记录仅为历史证据，见[测试报告](docs/TEST_REPORT.md)。
+当前待发布版本为 **0.1.9**：统一修复 15 类工具安装确认、进度、后台任务、通知和错误中的路径/多行文字显示，并改进工具输出解码与 CMD 脚本编码处理。Windows CI3 的 205 项 Rust、77 项前端、4 项 Node 测试和真实安装回归已通过，独立草稿资产签名验证也已通过；320 个浏览器 mock 场景通过，未运行真实安装。公开发布、合并/标签一致性及公开更新入口验收待完成，完整证据和边界见[测试报告](docs/TEST_REPORT.md)。
 
 ### 主要功能
 
@@ -74,7 +74,7 @@ AI 不会绕过本地安全边界：它不能直接修改环境。任何一键�
 
 ### 下载与启动
 
-0.1.9 的目标发行文件如下；本轮 CI、签名和发布尚待完成，已发布的可用资产以 [GitHub Releases](https://github.com/PuppetWen/EnvNexus-AI/releases/latest) 为准：
+0.1.9 的目标发行文件如下；本轮 CI 与独立草稿资产签名验证已通过，公开发布仍待完成。已发布的可用资产以 [GitHub Releases](https://github.com/PuppetWen/EnvNexus-AI/releases/latest) 为准：
 
 - `EnvNexus-AI_0.1.9_x64-setup.exe`：当前用户安装版，可选择安装目录；检测到已有安装时会复用原路径并原地升级。
 - `EnvNexus-AI_0.1.9_x64-portable.exe`：便携主程序；App 内更新会在原路径安全自替换。
@@ -132,7 +132,7 @@ EnvNexus AI 不会自动整理用户的现有开发目录，也不会静默写�
 
 EnvNexus AI is a Windows desktop application built with Rust and Tauri 2. It provides one safe, reversible workflow for detecting, installing, switching, repairing, and uninstalling development toolchains.
 
-The current development version is **0.1.9**. It improves path and multiline text display across installation plans, progress, background tasks, notices and errors for all 15 tools, plus process-output decoding and generated CMD encoding. All 77 local frontend tests and 320 real-browser mock scenarios passed; these did not run real installations. Backend checks, Windows CI, signatures and publication are pending. Results for 0.1.8 and earlier are historical evidence; see the [test report](docs/TEST_REPORT.md).
+The current release candidate is **0.1.9**. It improves path and multiline text display across installation plans, progress, background tasks, notices and errors for all 15 tools, plus process-output decoding and generated CMD encoding. Windows CI3 passed 205 Rust, 77 frontend and 4 Node tests and real installation regressions; independent draft-asset signature verification also passed. The 320 browser mock scenarios passed without running real installations. Public release, merge/tag consistency and public update-endpoint checks remain pending; see the [test report](docs/TEST_REPORT.md) for evidence and limits.
 
 ### Highlights
 
@@ -177,7 +177,7 @@ AI cannot bypass local safety controls or directly change the environment. One-c
 
 ### Download and use
 
-The intended 0.1.9 files are listed below. CI, signature and publication checks are pending; see [GitHub Releases](https://github.com/PuppetWen/EnvNexus-AI/releases/latest) for currently published assets:
+The intended 0.1.9 files are listed below. CI and independent draft-asset signature checks passed; public release is pending. See [GitHub Releases](https://github.com/PuppetWen/EnvNexus-AI/releases/latest) for currently published assets:
 
 - `EnvNexus-AI_0.1.9_x64-setup.exe`: per-user installer with a selectable install directory. Existing installations are upgraded in their previous location.
 - `EnvNexus-AI_0.1.9_x64-portable.exe`: portable executable. In-app updates safely replace it in its original location.
