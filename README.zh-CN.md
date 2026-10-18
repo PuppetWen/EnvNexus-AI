@@ -4,6 +4,8 @@ EnvNexus AI 是面向 Windows 10/11 的开发环境与多版本工具链管理�
 
 [下载最新版](https://github.com/PuppetWen/EnvNexus-AI/releases/latest) · [更新日志](CHANGELOG.md) · [使用说明](docs/USER_GUIDE.md) · [构建说明](docs/BUILDING.md)
 
+当前待发布版本为 **0.1.8**：修复版本列表重叠、窄列按钮布局及通知中的路径字形，并增加 Maven 的完整 JDK 依赖检查。本地前端与浏览器检查、[Windows CI2](https://github.com/PuppetWen/EnvNexus-AI/actions/runs/39095241423) 和[独立签名验证](https://github.com/PuppetWen/EnvNexus-AI/actions/runs/39095973235)均通过，包含 Maven 实际安装回归；正式公开发布与公开资产回读待完成。下文 0.1.7 的验证结果仅为历史记录。
+
 ## 主要能力
 
 - 管理 Python、Java/JDK、Go、Rust、Node.js、Git、Maven、.NET SDK、Ruby、PHP、Android SDK/NDK、Gradle、CMake 和 ADB。
@@ -20,17 +22,19 @@ EnvNexus AI 是面向 Windows 10/11 的开发环境与多版本工具链管理�
 - 安装版可以选择目录并原地升级；便携版在原路径安全自替换。
 - 支持托盘驻留、开机启动、多语言、五套主题及可选 AI 诊断增强。
 
+Maven 需要满足该版本要求的完整 JDK，只有 JRE 或失效的 `JAVA_HOME` 不够。安装和修复会先运行 `java.exe` 与 `javac.exe` 检查依赖，说明临时使用的 JDK；缺少可用 JDK 时请先在 Java 页面安装或配置。临时验证不会自动修改全局 Java，终端默认版本仍需单独确认配置。
+
 ## Python 历史版本
 
-官方目录默认保留全部获取到的记录，稳定版、预览版、历史归档和是否可安装分别筛选。没有发布日期的归档仍可查询，按日期排序时排在已知日期之后。版本目录来自官网批量 API、归档总表和官方 CPython 版本标签，不会逐个版本发送数百次请求，也不会因某个版本不能安装而将其隐藏。CPython 标签通过 Git v2 `ls-refs` 批量查询；本轮网络样本返回 657 个版本标签，标签响应约 42 KB，数量和体积会随上游变化，不代表固定性能承诺。
+官方目录默认保留全部获取到的记录，稳定版、预览版、历史归档和是否可安装分别筛选。没有发布日期的归档仍可查询，按日期排序时排在已知日期之后。版本目录来自官网批量 API、归档总表和官方 CPython 版本标签，不会逐个版本发送数百次请求，也不会因某个版本不能安装而将其隐藏。CPython 标签通过 Git v2 `ls-refs` 批量查询；0.1.7 的历史网络样本返回 657 个版本标签，标签响应约 42 KB，数量和体积会随上游变化，不代表固定性能承诺。
 
-完整 PythonCore ZIP 及其官方 SHA-256 优先；历史 Python 2.0–2.3 的 Wise EXE、Python 2.4 起的 MSI、Python 3.5 起的 WiX Burn EXE 在有效官方校验元数据齐全时可静态解包，不启动厂商安装器、MSI 自定义动作或全局安装流程。CI7 已通过十个历史版本的隔离安装验收。仅源码、缺少 Windows 包或缺少可验证下载元数据的版本显示对应的不可自动安装原因；源码标签本身不能证明该版没有 Windows 包。官网只提供 MD5 的历史包会在安装计划中明确说明弱校验的边界，不冒充 SHA-256 或发行签名验证。
+完整 PythonCore ZIP 及其官方 SHA-256 优先；历史 Python 2.0–2.3 的 Wise EXE、Python 2.4 起的 MSI、Python 3.5 起的 WiX Burn EXE 在有效官方校验元数据齐全时可静态解包，不启动厂商安装器、MSI 自定义动作或全局安装流程。0.1.7 CI7 已通过十个历史版本的隔离安装验收。仅源码、缺少 Windows 包或缺少可验证下载元数据的版本显示对应的不可自动安装原因；源码标签本身不能证明该版没有 Windows 包。官网只提供 MD5 的历史包会在安装计划中明确说明弱校验的边界，不冒充 SHA-256 或发行签名验证。
 
-Python 3.6 之前的 Windows 运行时及随包 Tcl/Tk 需要仅含 ASCII 字符的安装目录，例如 `E:\Environment`。安装或修复计划会提前拒绝含中文、重音字符等不兼容路径，执行阶段在启动旧解释器前再次复核。CI7 已通过这些路径拒绝检查，并以 Python `3.10.11` 通过含中文和重音字符目录的安装与 pip/venv 验收。
+Python 3.6 之前的 Windows 运行时及随包 Tcl/Tk 需要仅含 ASCII 字符的安装目录，例如 `E:\Environment`。安装或修复计划会提前拒绝含中文、重音字符等不兼容路径，执行阶段在启动旧解释器前再次复核。0.1.7 CI7 已通过这些路径拒绝检查，并以 Python `3.10.11` 通过含中文和重音字符目录的安装与 pip/venv 验收。
 
 安装保留对应发行包的完整标准库和随包能力：正式发行包中的 Python 2.7.9+、Python 3.4+ 使用随包 pip/ensurepip，Python 3.3+ 保留内置 venv；预览版按实际组件验收，部分早期 alpha 尚无 venv 或 ensurepip。原包没有的功能不会被伪造，不会联网补装最新版 pip；诊断也会区分原本不具备的功能和真正损坏的安装。旧版解释器及第三方包能否运行仍取决于当前 Windows 与其兼容性。
 
-历史 pip 从原包随带的 wheel 离线初始化，使用受管根目录内的短私有临时目录并隔离外部配置；安装后验证最终路径的 pip 命令和该版本具备的 venv 能力。[CI7 功能验证](https://github.com/PuppetWen/EnvNexus-AI/actions/runs/39025514788)已通过 184 项 Rust、62 项前端、4 项 Node 测试、十个历史 Python 安装、现代 Python 新装与旧嵌入式安装原路径修复，以及 15/15 类工具真实安装；[独立草稿签名验证](https://github.com/PuppetWen/EnvNexus-AI/actions/runs/39027005455)也已通过。[v0.1.7](https://github.com/PuppetWen/EnvNexus-AI/releases/tag/v0.1.7) 已公开发布，六项公开资产及自动更新入口回读均通过，范围和未验证边界见[测试报告](docs/TEST_REPORT.md)。
+历史 pip 从原包随带的 wheel 离线初始化，使用受管根目录内的短私有临时目录并隔离外部配置；安装后验证最终路径的 pip 命令和该版本具备的 venv 能力。[0.1.7 CI7 功能验证](https://github.com/PuppetWen/EnvNexus-AI/actions/runs/39025514788)已通过 184 项 Rust、62 项前端、4 项 Node 测试、十个历史 Python 安装、现代 Python 新装与旧嵌入式安装原路径修复，以及 15/15 类工具真实安装；[独立草稿签名验证](https://github.com/PuppetWen/EnvNexus-AI/actions/runs/39027005455)也已通过。[v0.1.7](https://github.com/PuppetWen/EnvNexus-AI/releases/tag/v0.1.7) 已公开发布，六项公开资产及自动更新入口回读均通过，范围和未验证边界见[测试报告](docs/TEST_REPORT.md)。
 
 ## 全机扫描与增量刷新
 
@@ -64,10 +68,10 @@ App 启动不遍历全盘。首次保存安装目录时，即使没有全机索�
 
 ## 下载
 
-从 [GitHub Releases](https://github.com/PuppetWen/EnvNexus-AI/releases/latest) 获取：
+0.1.8 的发行文件已通过 CI 和签名验证，正式公开发布与公开资产回读待完成；已发布的可用资产以 [GitHub Releases](https://github.com/PuppetWen/EnvNexus-AI/releases/latest) 为准：
 
-- `EnvNexus-AI_0.1.7_x64-setup.exe`：安装版，可选择安装目录；已有安装会复用原目录覆盖升级。
-- `EnvNexus-AI_0.1.7_x64-portable.exe`：便携版，可放在任意可写目录运行。
+- `EnvNexus-AI_0.1.8_x64-setup.exe`：安装版，可选择安装目录；已有安装会复用原目录覆盖升级。
+- `EnvNexus-AI_0.1.8_x64-portable.exe`：便携版，可放在任意可写目录运行。
 - `SHA256SUMS.txt`：发布文件 SHA-256 校验值。
 - `latest.json` 与 `.sig`：应用内自动更新使用的签名元数据。
 

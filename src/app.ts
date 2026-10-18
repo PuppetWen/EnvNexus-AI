@@ -674,6 +674,7 @@ function renderToolDetail(): string {
           <button class="secondary-button" data-select-tool-root="${escapeHtml(tool.id)}">${icon("FolderOpen", 16)} 浏览</button>
         </div>
       </section>
+      ${tool.id === "maven" ? `<aside class="tool-dependency-note"><div>${icon("Coffee", 17)}<span>Maven 运行需要 JDK。安装前会检查可用的 Java 环境。</span></div><button class="text-button" data-open-tool="java">管理 Java / JDK ${icon("ArrowUpRight", 14)}</button></aside>` : ""}
       <div class="tool-detail-columns">
         <section class="tool-detail-section panel">
           <div class="drawer-section-title"><div><p class="eyebrow">INSTALLED VERSIONS</p><h3>本机已安装版本</h3></div><span>${tool.installedVersions.length}</span></div>
@@ -758,14 +759,20 @@ function renderCatalogVersions(toolId: string, catalog: VersionCatalog, preferen
       ? new Date(publishedAt).toLocaleDateString(state.appPreferences?.language ?? "zh-CN", { timeZone: "UTC" })
       : "发布日期未知";
     const title = reason ?? (installRoot ? "生成安装计划" : "请先在页面上方设置安装目录");
+    const channel = ({ stable: "稳定版", preview: "预览版", archive: "历史归档", current: "Current", lts: "LTS" } as Record<string, string>)[version.channel.toLowerCase()] ?? version.channel;
+    const checksum = version.checksum
+      ? `<span class="catalog-checksum" title="${escapeHtml(`${version.checksumAlgorithm ?? "校验值"}: ${version.checksum}`)}">${icon("ShieldCheck", 12)}<code>${escapeHtml(version.checksumAlgorithm?.toUpperCase() ?? "校验值")} ${escapeHtml(version.checksum.slice(0, 12))}…</code></span>`
+      : `<span class="catalog-checksum pending">${icon("Shield", 12)}<span>${toolId === "node" ? "安装前获取校验值" : "官方未提供校验值"}</span></span>`;
     return `<article class="version-item catalog-version-item ${reason ? "unavailable" : ""}" data-catalog-version="${escapeHtml(version.version)}">
-      <div><strong>${escapeHtml(version.version)}</strong><span>${escapeHtml(version.channel)} · ${escapeHtml(version.architecture)}</span><span class="catalog-publication">${escapeHtml(published)}</span>
-        ${version.downloadUrl ? `<code>${version.checksum ? `${escapeHtml(version.checksumAlgorithm ?? "")}: ${escapeHtml(version.checksum.slice(0, 16))}…` : "官方源未提供校验值"}</code>` : ""}
-        <span class="catalog-support ${reason ? "unavailable" : "available"}">${escapeHtml(reason ?? "可安装")}</span>
+      <div class="catalog-version-info">
+        <div class="catalog-version-heading"><strong>${escapeHtml(version.version)}</strong><span class="catalog-channel">${escapeHtml(channel)}</span></div>
+        <div class="catalog-version-meta"><span class="catalog-architecture">${escapeHtml(version.architecture)}</span><time class="catalog-publication"${Number.isFinite(publishedAt) ? ` datetime="${new Date(publishedAt).toISOString()}"` : ""}>${escapeHtml(published)}</time></div>
+        ${version.downloadUrl ? checksum : ""}
+        ${reason ? `<p class="catalog-support unavailable">${icon("Info", 13)}<span>${escapeHtml(reason)}</span></p>` : ""}
       </div>
       <div class="version-actions catalog-version-actions">
         <button class="primary-button" data-install-tool="${escapeHtml(toolId)}" data-install-version="${encodeURIComponent(version.version)}" ${!reason && installRoot ? "" : "disabled"} title="${escapeHtml(title)}">${icon("Download", 15)} ${reason ? "暂不可安装" : installRoot ? "安装" : "先设置目录"}</button>
-        ${notes ? `<a class="secondary-button catalog-release-link" href="${escapeHtml(notes)}" target="_blank" rel="noopener noreferrer">${icon("ExternalLink", 13)} 官方发布页</a>` : ""}
+        ${notes ? `<a class="catalog-release-link" href="${escapeHtml(notes)}" target="_blank" rel="noopener noreferrer">官方发布页 ${icon("ExternalLink", 12)}</a>` : ""}
       </div>
     </article>`;
   }).join("")}</div>`;

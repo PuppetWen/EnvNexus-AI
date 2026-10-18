@@ -17,7 +17,8 @@
    * document language or UI font changes to Japanese.
    */
   --font-path:
-    "Cascadia Mono", "Cascadia Code", Consolas, "Courier New", monospace;
+    "Cascadia Mono", "Cascadia Code", Consolas, "Courier New",
+    "Microsoft YaHei UI", "Microsoft YaHei", "Segoe UI", monospace;
 }
 
 :root,

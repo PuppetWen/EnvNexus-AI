@@ -1,5 +1,42 @@
 # EnvNexus AI 测试报告
 
+## 0.1.8 验证记录（2026-10-18 UTC）
+
+提交 `fac61ee43c9d4ab12bcfa8e3f5b1f92828e4a07e` 的 [CI2 / 39095241423](https://github.com/PuppetWen/EnvNexus-AI/actions/runs/39095241423) 已确认 `COMPLETED / SUCCESS`，包含构建、功能验证、报告上传和工作流收尾。原始报告位于 `artifacts/layout-ci-second-reports/`；以下均为本轮结果，0.1.7 及更早记录原样保留在后文。
+
+### 自动检查与真实安装
+
+| 项目 | 本轮原始证据与结果 |
+| --- | --- |
+| 自动检查 | `ci-logs/verification.log`：192 项 Rust 测试、62 项前端测试（18 个文件）、4 项 Node 测试通过；6 项联网/官方包/发布产物测试在默认单元测试中显式忽略。TypeScript、Vite 生产构建、Rust 格式与严格 clippy 均通过 |
+| 官方源 | `ci-logs/live-sources.log`：15 类实时官方源通过，Node.js 591 条、Python 662 条（367 条 Windows 下载）、Maven 2 条；完整 Python 实际安装事务另见 `live-install.log` |
+| Maven 独立回归 | `maven-9a52b20cd10f48e3b1d48902d0ea27b4/summary.json`：`3.9.16` 依赖预检、官方包校验、安装和 `mvn -v` 通过；配置污染隔离、环境保持及清理通过 |
+| 现代 Python | `python-d2b705a2314a4726bb4c3868ab46b472/summary.json`：`3.15.0` 完整包新装及真实旧嵌入式包的同版本原路径修复通过，pip `26.2.1`、Tk `9.0`、IDLE、头文件/3 个导入库和含 pip 的 venv 均通过；旧缓存被拒绝，用户环境不变 |
+| 历史 Python | `python-history-0367fe049e0b43e5b4d1b52b66c72534/summary.json`：10/10 通过，目录/筛选排序、版本/prefix/清单、污染隔离和清理通过，`errors: []` |
+| 命令模式 | `smoke/cli-d90bb113cd81431da693c809993206cb/summary.json`：15 类定义、110 个命令、完成全盘扫描、目录持久化、旧脚本读取最新根、只读不扫描、JDK 别名和预览保护均通过 |
+| 全工具安装 | `installability-dd7986e903344c378738cff9162be6b3/summary.json`：15/15、0 失败，全部安装提交/清单/切换预览/缓存/清理通过；ADB 实际激活、默认命令回读和用户环境恢复通过 |
+| 构建与 NSIS | `ci-logs/installer-payload.json`：0.1.8 隔离安装后的主程序与便携包 SHA-256 相同，见下表 |
+
+Maven 回归故意给应用进程注入失效的 `JAVA_HOME` / `JAVACMD`、Maven/Java 选项和启动钩子。预检选择最新注册表中的完整 JDK `17.0.20.1`，路径为 `C:\hostedtoolcache\windows\Java_Temurin-Hotspot_jdk\17.0.20-101\x64`，实际 `mvn -v` 确认使用同一 Java runtime。原包为官方 `apache-maven-3.9.16-bin.zip`，SHA-512 为 `ed41650d42485cfc243fad22158caf9cbb5dc408ce7a09ddb94dd42a019de929ca43065bfa450612cf12bf78b5cafa3884b96c090de326ff590448c933454af3`，安装于本轮 GUID 下的 `tools/maven/3.9.16`。`invalidJavaHomeRejected`、`startupHooksSkipped`、`processEnvironmentUnchanged`、`activationPreviewOnly` 均为 `true`，用户和系统环境指纹前后一致，`cleanup: passed`。此 runner 有有效注册表 JDK；无 JDK、JRE/失效目录、主版本不匹配、进程后备和受管 JDK 的选择与诊断另由本轮后端单元测试覆盖，没有为测试改写注册表 Java 配置。
+
+历史 Python 本轮逐项通过 `2.0.1`、`2.1.3`、`2.2.3`、`2.3.5`、`2.4.4`、`2.7.18`、`3.0.1`、`3.3.5`、`3.4.4`、`3.10.11`。`2.7.18` 的 pip 为 `19.2.3`，`3.4.4` 为 `7.1.2`，`3.10.11` 为 `23.0.1`，模块、列表和入口均通过；后两者的 venv 含对应 pip，`3.3.5` 的 venv 按原版能力不含 pip，其余早期版本不要求未随附的功能。前九版非 ASCII 路径均在安装前拒绝，`3.10.11` 在 `tools-开发-é` 路径通过。十项隔离报告的 `sentinelCount` 均为 0，用户环境不变、清理通过。目录缓存为 662 条、预览 376 条、归档频道 7 条、无下载 295 条；后续筛选未重新刷新，缓存 SHA-256 为 `c2d481d2a7cfbadecf8149f67c351b35dd2c7be53fcdf3e613608f8bed3eed76`。
+
+15 类工具实测版本为：Python `3.15.0`、Java `27+35`、Go `1.27.2`、Rust `1.99.1`、Node.js `26.12.0`、Git `2.56.0.windows.2`、Android Command-line Tools `23.0`、NDK `30.0.16248370`、Gradle `9.8.1`、CMake `4.4.4`、ADB `37.0.1`、Maven `3.10.0`、.NET SDK `10.0.402`、Ruby `4.0.7-1`、PHP `8.5.11`。仅 ADB 实际应用并恢复用户环境，其余 14 类只验证切换计划；Maven 独立回归也仅预览激活，没有自动配置全局 Java。
+
+### 界面、签名与交付边界
+
+本地 62 项前端测试及 Vite 生产构建通过。真实浏览器使用本地 mock 和真实应用界面检查五主题的 591 条 Node.js 版本列表、662 条 Python 列表，以及 980/1180 像素 iframe 视口，未发现条目或按钮越界；通知路径分隔符为 U+005C，使用明确的路径字体，反斜杠显示正常。此项验证布局和字符呈现，没有运行本机受阻的原生应用，也不把 mock 中的 Maven 错误当作后端证据。
+
+独立签名验证 [39095973235](https://github.com/PuppetWen/EnvNexus-AI/actions/runs/39095973235) 已确认 `SUCCESS`。`artifacts/layout-signed-reports/asset-integrity.log` 确认安装包、便携包、两个 `.sig`、`latest.json`、`SHA256SUMS.txt` 六项 0.1.8 资产下载及完整性检查通过；`signature-verification.log` 确认应用自身 Rust updater 测试以内置公钥验证实际发行资产通过。当前 `release/SHA256SUMS.txt` 中的摘要如下：
+
+| 资产 | SHA-256 |
+| --- | --- |
+| `EnvNexus-AI_0.1.8_x64-setup.exe` | `a358709940828eeef6e4723d4f22e35ae3c67a9aa0c67822e7a777acff97917f` |
+| `EnvNexus-AI_0.1.8_x64-portable.exe` / NSIS 安装后主程序 | `f22eaa0e22533babe534fb29b445ec80bcf64e38879bc3bfa250242e6328ec4c` |
+| `latest.json` | `4017c504a9ec1135630b926ab532d84d54331aa71aacdf1769c38955cd03bc35` |
+
+**正式公开发布、最终合并提交/标签对应关系及无凭据公开资产回读仍待完成。** CI 与草稿签名通过不等同于已公开发布。未逐一验证全部历史/预览 Python、第三方包、原生扩展、真实 Maven 项目构建、用户开发机默认版本切换或所有卸载恢复；历史包的 MD5 仍只作为明确标注的弱校验。
+
 ## 0.1.7 验证记录（2026-10-17 UTC）
 
 本节以提交 `ba2c54e48bdb9a5606e8ccb8f6a29273c06795fa` 的 [CI7 / 39025514788](https://github.com/PuppetWen/EnvNexus-AI/actions/runs/39025514788) 原始报告为依据。整轮工作流已确认 `COMPLETED / SUCCESS`，完成时间为 `2026-10-17T11:03:39Z`，包含功能、构建、报告上传和缓存收尾。原始报告下载目录为 `artifacts/history-ci-seventh-reports-r1/`；下文保留全部旧版记录，不将旧结果作为本版复测。

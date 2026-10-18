@@ -142,6 +142,24 @@ impl Installer {
     ) -> AppResult<OperationResult> {
         if let PlannedAction::Install(request) | PlannedAction::Repair(request) = action {
             validate_python_installation_path(request)?;
+            if request.tool_id == "maven" {
+                let data_root = self.data_root.clone();
+                let root = request.root.clone();
+                let version = request.version.clone();
+                tokio::task::spawn_blocking(move || {
+                    crate::tool_runtime::resolve_maven_java(
+                        &data_root,
+                        Some(&root),
+                        &version,
+                        &current_process_environment()?,
+                    )
+                    .map(|_| ())
+                })
+                .await
+                .map_err(|error| {
+                    AppError::Message(format!("Maven JDK 依赖检查任务失败：{error}"))
+                })??;
+            }
         }
         let result = match action {
             PlannedAction::Install(request) => self.install(operation_id, request, app).await,
@@ -271,7 +289,9 @@ impl Installer {
             safe_remove_directory(&staging, &request.root);
             return Err(error);
         }
-        if let Err(error) = initialize_and_verify_installation(operation_id, request, app).await {
+        if let Err(error) =
+            initialize_and_verify_installation(operation_id, request, app, &self.data_root).await
+        {
             safe_remove_directory(&request.destination, &request.root);
             return Err(error);
         }
@@ -761,7 +781,9 @@ impl Installer {
             safe_remove_directory(&staging, &request.root);
             return Err(error);
         }
-        if let Err(error) = initialize_and_verify_installation(operation_id, request, app).await {
+        if let Err(error) =
+            initialize_and_verify_installation(operation_id, request, app, &self.data_root).await
+        {
             safe_remove_directory(&request.destination, &request.root);
             return match fs::rename(&backup, &request.destination) {
                 Ok(()) => Err(AppError::Message(format!(
@@ -1519,6 +1541,7 @@ async fn initialize_and_verify_installation(
     operation_id: &str,
     request: &InstallRequest,
     app: Option<&AppHandle>,
+    data_root: &Path,
 ) -> AppResult<()> {
     emit_progress(
         app,
@@ -1533,11 +1556,12 @@ async fn initialize_and_verify_installation(
         None,
     );
     let request = request.clone();
+    let data_root = data_root.to_path_buf();
     tokio::task::spawn_blocking(move || {
         if request.tool_id == "python" {
             initialize_python_runtime(&request)
         } else {
-            verify_installation(&request)
+            verify_installation(&request, &data_root)
         }
     })
     .await
@@ -2380,7 +2404,7 @@ fn initialize_python_runtime(request: &InstallRequest) -> AppResult<()> {
     }
 }
 
-fn verify_installation(request: &InstallRequest) -> AppResult<()> {
+fn verify_installation(request: &InstallRequest, data_root: &Path) -> AppResult<()> {
     let candidates = match request.tool_id.as_str() {
         "python" => vec![(request.destination.join("python.exe"), vec!["-V"])],
         "java" => vec![(
@@ -2435,12 +2459,40 @@ fn verify_installation(request: &InstallRequest) -> AppResult<()> {
             continue;
         }
         crate::tool_runtime::validate_runtime_dependencies(&request.tool_id, &program)?;
-        let environment = installation_process_environment(request, current_process_environment()?);
+        let current = current_process_environment()?;
+        let current = if request.tool_id == "maven" {
+            let runtime = crate::tool_runtime::resolve_maven_java(
+                data_root,
+                Some(&request.root),
+                &request.version,
+                &current,
+            )?;
+            crate::tool_runtime::maven_verification_environment(&current, &runtime, data_root)?
+        } else {
+            current
+        };
+        let environment = installation_process_environment(request, current);
         let environment = environment
             .iter()
             .map(|(key, value)| (key.as_str(), value.as_os_str()))
             .collect::<Vec<_>>();
-        let output = run_capture_with_env(&program, &args, Duration::from_secs(20), &environment)?;
+        let output = if request.tool_id == "maven" {
+            run_capture_sanitized(
+                &program,
+                &args,
+                Duration::from_secs(20),
+                &environment,
+                &[
+                    "MAVEN_",
+                    "JVM_CONFIG_MAVEN_PROPS",
+                    "JAVA_TOOL_OPTIONS",
+                    "_JAVA_OPTIONS",
+                    "JDK_JAVA_OPTIONS",
+                ],
+            )?
+        } else {
+            run_capture_with_env(&program, &args, Duration::from_secs(20), &environment)?
+        };
         return verify_probe_output(&program, &output);
     }
     Err(AppError::Message(format!(

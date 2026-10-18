@@ -31,7 +31,7 @@ use crate::{
         IssueLevel, ToolCapabilities, ToolInventory, VersionManagerInventory,
     },
     plugins::{PluginRegistry, ToolDescriptor, ToolPlugin},
-    process::{output_text, run_capture, run_capture_with_env},
+    process::{output_text, run_capture, run_capture_sanitized, run_capture_with_env},
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -75,6 +75,8 @@ struct ToolProbeContext {
     touched_keys: HashSet<String>,
     reuse_cached: bool,
     child_environment: EnvironmentMap,
+    data_root: PathBuf,
+    maven_java: HashMap<u32, Result<crate::tool_runtime::MavenJavaRuntime, String>>,
 }
 
 struct ToolScanSources<'a> {
@@ -120,6 +122,8 @@ fn scan_internal(
         touched_keys: HashSet::new(),
         reuse_cached: !force_disk_discovery,
         child_environment,
+        data_root: data_root.to_path_buf(),
+        maven_java: HashMap::new(),
     };
     let mut manifests = managed_manifests(data_root);
     merge_discovered_manifests(&mut manifests, discovery.manifests);
@@ -1071,9 +1075,84 @@ fn inspect_candidate(
     }
     let root = crate::paths::simplify(installation_root_for(descriptor, &executable));
     let fingerprint = tool_probe_fingerprint(descriptor, &executable, &root)?;
+    let maven_environment = if descriptor.id == "maven" {
+        let hint = crate::tool_runtime::maven_version_hint(&root).unwrap_or_else(|| "3.9".into());
+        let minimum = crate::tool_runtime::maven_minimum_java(&hint);
+        probes.maven_java.entry(minimum).or_insert_with(|| {
+            crate::tool_runtime::resolve_maven_java(
+                &probes.data_root,
+                None,
+                &hint,
+                &probes.child_environment,
+            )
+            .map_err(|error| error.to_string())
+        });
+        match &probes.maven_java[&minimum] {
+            Ok(runtime) => {
+                if !runtime.notes.is_empty()
+                    || runtime.source == "已配置或受管 JDK"
+                    || runtime.source.starts_with("当前进程")
+                {
+                    let code = "MAVEN_JAVA_NOT_CONFIGURED".to_string();
+                    if !issues.iter().any(|issue| issue.code == code) {
+                        issues.push(DiagnosticIssue {
+                            code,
+                            level: IssueLevel::Warning,
+                            title: "Maven 检测临时使用可用 JDK，默认 Java 仍需配置".into(),
+                            detail: runtime.plan_warning(),
+                            evidence: Some(runtime.home.to_string_lossy().into_owned()),
+                            repairable: false,
+                        });
+                    }
+                }
+                Some(
+                    crate::tool_runtime::maven_verification_environment(
+                        &probes.child_environment,
+                        runtime,
+                        &probes.data_root,
+                    )
+                    .ok()?,
+                )
+            }
+            Err(error) => {
+                let code = "MAVEN_MISSING_USABLE_JDK".to_string();
+                if !issues.iter().any(|issue| issue.code == code) {
+                    issues.push(DiagnosticIssue {
+                        code,
+                        level: IssueLevel::Warning,
+                        title: "Maven 已发现，但没有可用的完整 JDK".into(),
+                        detail: error.clone(),
+                        evidence: Some(executable.to_string_lossy().into_owned()),
+                        repairable: false,
+                    });
+                }
+                let version = crate::tool_runtime::maven_version_hint(&root).or_else(|| {
+                    probes
+                        .cache
+                        .entries
+                        .get(&cache_key)
+                        .filter(|cached| cached.fingerprint == fingerprint)
+                        .map(|cached| cached.version.clone())
+                });
+                probes.cache.entries.remove(&cache_key);
+                return version.map(|version| InstalledVersion {
+                    version,
+                    path: root,
+                    source: source.to_string(),
+                    is_default: Some(&executable) == default_executable.as_ref(),
+                    managed: false,
+                    health: HealthLevel::Warning,
+                    executable: Some(executable),
+                });
+            }
+        }
+    } else {
+        None
+    };
     probes.touched_keys.insert(cache_key.clone());
     let is_default = Some(&executable) == default_executable.as_ref();
     if probes.reuse_cached
+        && descriptor.id != "maven"
         && cacheable_probe_candidate(source, &executable)
         && let Some(cached) = probes.cache.entries.get(&cache_key)
         && cached.tool_id == descriptor.id
@@ -1090,18 +1169,35 @@ fn inspect_candidate(
         });
     }
 
-    let environment =
-        candidate_process_environment(descriptor.id, &root, &probes.child_environment);
+    let environment = maven_environment.unwrap_or_else(|| {
+        candidate_process_environment(descriptor.id, &root, &probes.child_environment)
+    });
     let overrides = environment
         .iter()
         .map(|(name, value)| (name.as_str(), OsStr::new(value)))
         .collect::<Vec<_>>();
-    let output = run_capture_with_env(
-        &executable,
-        descriptor.version_args,
-        Duration::from_secs(4),
-        &overrides,
-    )
+    let output = if descriptor.id == "maven" {
+        run_capture_sanitized(
+            &executable,
+            descriptor.version_args,
+            Duration::from_secs(4),
+            &overrides,
+            &[
+                "MAVEN_",
+                "JVM_CONFIG_MAVEN_PROPS",
+                "JAVA_TOOL_OPTIONS",
+                "_JAVA_OPTIONS",
+                "JDK_JAVA_OPTIONS",
+            ],
+        )
+    } else {
+        run_capture_with_env(
+            &executable,
+            descriptor.version_args,
+            Duration::from_secs(4),
+            &overrides,
+        )
+    }
     .ok()?;
     let text = output_text(&output);
     let version = if descriptor.id == "android-ndk" {
@@ -1794,6 +1890,8 @@ mod tests {
             touched_keys: HashSet::new(),
             reuse_cached: true,
             child_environment: EnvironmentMap::new(),
+            data_root: PathBuf::new(),
+            maven_java: HashMap::new(),
         };
         let manifests = [InstallManifest {
             schema_version: 1,
@@ -1992,6 +2090,16 @@ mod tests {
                 "JAVA_HOME".to_string(),
                 "envnexus-scanner-fresh-java".to_string(),
             )]),
+            data_root: directory.path().join("data"),
+            maven_java: HashMap::from([(
+                8,
+                Ok(crate::tool_runtime::MavenJavaRuntime {
+                    home: PathBuf::from("envnexus-scanner-fresh-java"),
+                    version: "21.0.1".into(),
+                    source: "最新 JAVA_HOME".into(),
+                    notes: Vec::new(),
+                }),
+            )]),
         };
 
         let version = inspect_candidate(
@@ -2008,6 +2116,46 @@ mod tests {
         assert_eq!(version.version, "3.9.9");
         assert_eq!(version.health, HealthLevel::Healthy);
         assert_eq!(std::env::var_os("JAVA_HOME"), original_java);
+    }
+
+    #[test]
+    fn maven_inventory_retains_version_from_package_when_jdk_is_unavailable() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("maven");
+        let executable = root.join("bin/mvn.cmd");
+        fs::create_dir_all(executable.parent().unwrap()).unwrap();
+        fs::create_dir_all(root.join("lib")).unwrap();
+        fs::write(&executable, b"not executed").unwrap();
+        fs::write(root.join("lib/maven-core-3.9.16.jar"), b"package metadata").unwrap();
+        let registry = PluginRegistry::builtin();
+        let plugin = registry.get("maven").unwrap();
+        let pattern = Regex::new(plugin.descriptor().version_pattern).unwrap();
+        let mut probes = ToolProbeContext {
+            cache: ToolProbeCache::default(),
+            touched_keys: HashSet::new(),
+            reuse_cached: true,
+            child_environment: EnvironmentMap::new(),
+            data_root: directory.path().join("data"),
+            maven_java: HashMap::from([(8, Err("没有可用完整 JDK".into()))]),
+        };
+        let mut issues = Vec::new();
+        let version = inspect_candidate(
+            plugin.descriptor(),
+            Some(&pattern),
+            &executable,
+            "已配置安装目录",
+            &None,
+            &mut probes,
+            &mut issues,
+        )
+        .unwrap();
+        assert_eq!(version.version, "3.9.16");
+        assert_eq!(version.health, HealthLevel::Warning);
+        assert!(
+            issues
+                .iter()
+                .any(|issue| issue.code == "MAVEN_MISSING_USABLE_JDK")
+        );
     }
 
     #[test]
@@ -2289,6 +2437,8 @@ mod tests {
             touched_keys: HashSet::new(),
             reuse_cached: true,
             child_environment: EnvironmentMap::new(),
+            data_root: PathBuf::new(),
+            maven_java: HashMap::new(),
         };
         let pattern = Regex::new(descriptor.version_pattern).unwrap();
 
@@ -2345,6 +2495,8 @@ mod tests {
             touched_keys: HashSet::new(),
             reuse_cached: true,
             child_environment: EnvironmentMap::new(),
+            data_root: PathBuf::new(),
+            maven_java: HashMap::new(),
         }
     }
 

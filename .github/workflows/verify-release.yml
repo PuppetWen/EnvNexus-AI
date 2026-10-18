@@ -149,6 +149,13 @@ jobs:
           $tools = & $installed tools --json | ConvertFrom-Json
           if ($LASTEXITCODE -ne 0 -or @($tools).Count -ne 15) { throw 'Installed application command mode failed' }
 
+      - name: Verify Maven JDK fallback and isolated installation
+        if: github.event_name != 'pull_request'
+        shell: pwsh
+        run: |
+          & ./scripts/Smoke-Maven.ps1 *>&1 | Tee-Object -FilePath artifacts/ci-logs/maven-smoke.log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
       - name: Verify full Python development features and repair old embedded installs
         if: github.event_name != 'pull_request'
         shell: pwsh
@@ -186,6 +193,8 @@ jobs:
             artifacts/smoke/**/summary.json
             artifacts/installability-*/summary.json
             artifacts/installability-*/reports/
+            artifacts/maven-*/summary.json
+            artifacts/maven-*/reports/
             artifacts/python-*/summary.json
             artifacts/python-*/reports/
           if-no-files-found: warn
