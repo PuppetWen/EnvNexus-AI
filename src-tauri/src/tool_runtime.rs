@@ -493,7 +493,7 @@ mod tests {
         })
         .unwrap();
         assert_eq!(runtime.home, old);
-        assert_eq!(visited, [old.clone()]);
+        assert_eq!(visited.as_slice(), std::slice::from_ref(&old));
         let runtime = resolve_maven_java_candidates("4.0.0-rc-5", &current, &[], |home| {
             if home == old {
                 Ok(("1.8.0_442".into(), 8, 8))
