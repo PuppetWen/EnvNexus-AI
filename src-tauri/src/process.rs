@@ -304,9 +304,265 @@ fn native_startup_failure(output: &Output) -> Option<&'static str> {
 }
 
 pub fn output_text(output: &Output) -> String {
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    format!("{stdout}\n{stderr}").trim().to_string()
+    // A tool can use different encodings for its two streams (for example,
+    // UTF-8 progress and Windows-localized diagnostics). Decode them separately.
+    let stdout = decode_output_bytes(&output.stdout);
+    let stderr = decode_output_bytes(&output.stderr);
+    strip_terminal_formatting(format!("{stdout}\n{stderr}").trim())
+}
+
+fn decode_output_bytes(bytes: &[u8]) -> String {
+    decode_output_using(bytes, |line| {
+        #[cfg(windows)]
+        {
+            // Captured children have CREATE_NO_WINDOW, so the parent's console
+            // code page need not describe their redirected output. Preserve
+            // Unicode first; otherwise use this machine's Windows ANSI page.
+            // A tool explicitly emitting a different OEM page needs an explicit
+            // encoding contract; guessing arbitrary pages would corrupt text.
+            let code_page = unsafe { windows_sys::Win32::Globalization::GetACP() };
+            decode_windows_code_page(line, code_page)
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = line;
+            None
+        }
+    })
+}
+
+fn decode_output_using(
+    bytes: &[u8],
+    mut decode_legacy: impl FnMut(&[u8]) -> Option<String>,
+) -> String {
+    if let Some(bytes) = bytes.strip_prefix(b"\xef\xbb\xbf") {
+        return String::from_utf8_lossy(bytes).into_owned();
+    }
+    if let Some(bytes) = bytes.strip_prefix(b"\xff\xfe") {
+        return decode_utf16(bytes, false);
+    }
+    if let Some(bytes) = bytes.strip_prefix(b"\xfe\xff") {
+        return decode_utf16(bytes, true);
+    }
+    // cmd /U can emit UTF-16 without a BOM. Only recognize an even-length
+    // stream with a strong alternating-NUL pattern; ordinary byte output must
+    // not be reinterpreted as UTF-16 just because its UTF-8 is invalid.
+    if bytes.len() >= 4 && bytes.len().is_multiple_of(2) {
+        let pairs = bytes.len() / 2;
+        let low_zero = bytes.iter().step_by(2).filter(|byte| **byte == 0).count();
+        let high_zero = bytes
+            .iter()
+            .skip(1)
+            .step_by(2)
+            .filter(|byte| **byte == 0)
+            .count();
+        let strong_pattern = |zeros: usize, opposite: usize| {
+            zeros >= 2 && zeros * 2 >= pairs && zeros >= opposite.saturating_mul(4)
+        };
+        if strong_pattern(high_zero, low_zero) {
+            return decode_utf16(bytes, false);
+        }
+        if strong_pattern(low_zero, high_zero) {
+            return decode_utf16(bytes, true);
+        }
+    }
+    let mut decoded = String::with_capacity(bytes.len());
+    for line in bytes.split_inclusive(|byte| *byte == b'\n') {
+        match std::str::from_utf8(line) {
+            Ok(text) => decoded.push_str(text),
+            Err(_) => decoded.push_str(
+                &decode_legacy(line).unwrap_or_else(|| String::from_utf8_lossy(line).into_owned()),
+            ),
+        }
+    }
+    decoded
+}
+
+fn decode_utf16(bytes: &[u8], big_endian: bool) -> String {
+    let mut units = bytes
+        .chunks_exact(2)
+        .map(|pair| {
+            if big_endian {
+                u16::from_be_bytes([pair[0], pair[1]])
+            } else {
+                u16::from_le_bytes([pair[0], pair[1]])
+            }
+        })
+        .collect::<Vec<_>>();
+    if !bytes.len().is_multiple_of(2) {
+        units.push(0xfffd);
+    }
+    String::from_utf16_lossy(&units)
+}
+
+#[cfg(windows)]
+fn decode_windows_code_page(bytes: &[u8], code_page: u32) -> Option<String> {
+    use windows_sys::Win32::Globalization::{MB_ERR_INVALID_CHARS, MultiByteToWideChar};
+
+    let byte_count = i32::try_from(bytes.len()).ok()?;
+    if byte_count == 0 {
+        return Some(String::new());
+    }
+    // Try strict conversion first. The second pass also handles an incomplete
+    // final multibyte character at the bounded capture limit, replacing only
+    // that invalid sequence instead of damaging every localized character.
+    for flags in [MB_ERR_INVALID_CHARS, 0] {
+        let required = unsafe {
+            MultiByteToWideChar(
+                code_page,
+                flags,
+                bytes.as_ptr(),
+                byte_count,
+                std::ptr::null_mut(),
+                0,
+            )
+        };
+        if required == 0 {
+            continue;
+        }
+        let mut units = vec![0_u16; usize::try_from(required).ok()?];
+        let written = unsafe {
+            MultiByteToWideChar(
+                code_page,
+                flags,
+                bytes.as_ptr(),
+                byte_count,
+                units.as_mut_ptr(),
+                required,
+            )
+        };
+        if written == required {
+            return String::from_utf16(&units).ok();
+        }
+    }
+    None
+}
+
+fn strip_terminal_formatting(text: &str) -> String {
+    use std::sync::OnceLock;
+
+    if !text.contains('\x1b') {
+        return text.to_string();
+    }
+    // CSI formatting/cursor commands and terminated OSC titles/hyperlinks have
+    // no visible text in the GUI. Keep their surrounding text and real paths;
+    // literal backslash escapes and incomplete escape sequences stay intact.
+    static FORMATTING: OnceLock<regex::Regex> = OnceLock::new();
+    let pattern = FORMATTING.get_or_init(|| {
+        regex::Regex::new(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\))")
+            .expect("terminal formatting pattern is valid")
+    });
+    pattern.replace_all(text, "").into_owned()
+}
+
+#[cfg(test)]
+mod output_tests {
+    use super::*;
+
+    #[test]
+    fn unicode_output_preserves_paths_and_literal_escapes() {
+        let text = "E:\\环境工具\\Java-é\\文件.txt\t中文 🦀 \\u001b[31m\r\n";
+        let reject_legacy = |_: &[u8]| panic!("valid UTF-8 must not use the native code page");
+        assert_eq!(decode_output_using(text.as_bytes(), reject_legacy), text);
+        let with_bom = [b"\xef\xbb\xbf".as_slice(), text.as_bytes()].concat();
+        assert_eq!(decode_output_using(&with_bom, |_| None), text);
+    }
+
+    #[test]
+    fn utf16_boms_and_strong_nul_patterns_are_decoded() {
+        let text = "JDK E:\\开发\\Java-é\r\n";
+        for big_endian in [false, true] {
+            let bytes = text
+                .encode_utf16()
+                .flat_map(|unit| {
+                    if big_endian {
+                        unit.to_be_bytes()
+                    } else {
+                        unit.to_le_bytes()
+                    }
+                })
+                .collect::<Vec<_>>();
+            let bom = if big_endian { b"\xfe\xff" } else { b"\xff\xfe" };
+            let with_bom = [bom.as_slice(), &bytes].concat();
+            assert_eq!(decode_output_using(&with_bom, |_| None), text);
+            assert_eq!(decode_output_using(&bytes, |_| None), text);
+        }
+        assert_eq!(decode_output_using(b"abc\0def", |_| None), "abc\0def");
+        assert_eq!(decode_output_using(b"\xff\xfeA\0\xff", |_| None), "A�");
+    }
+
+    #[test]
+    fn terminal_formatting_is_removed_without_changing_visible_paths() {
+        let path = "E:\\环境工具\\Java-é\\bin";
+        assert_eq!(
+            strip_terminal_formatting(&format!("\x1b[31m错误\x1b[0m\t{path}\n\x1b[2K完成")),
+            format!("错误\t{path}\n完成")
+        );
+        assert_eq!(
+            strip_terminal_formatting("\x1b]8;;https://example.test\x1b\\文档\x1b]8;;\x1b\\"),
+            "文档"
+        );
+        assert_eq!(
+            strip_terminal_formatting("\x1b]0;title\x07version 1.0"),
+            "version 1.0"
+        );
+        assert_eq!(
+            strip_terminal_formatting(r"E:\tools\u001b[31m\Java"),
+            r"E:\tools\u001b[31m\Java"
+        );
+        assert_eq!(
+            strip_terminal_formatting("partial \x1b[31"),
+            "partial \x1b[31"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn native_code_pages_decode_chinese_japanese_and_western_output() {
+        for (bytes, code_page, expected) in [
+            (b"\xd6\xd0\xce\xc4".as_slice(), 936, "中文"),
+            (b"\x93\xfa\x96\x7b\x8c\xea".as_slice(), 932, "日本語"),
+            (b"caf\xe9".as_slice(), 1252, "café"),
+        ] {
+            assert_eq!(
+                decode_windows_code_page(bytes, code_page).as_deref(),
+                Some(expected)
+            );
+            assert_eq!(
+                decode_output_using(bytes, |line| decode_windows_code_page(line, code_page)),
+                expected
+            );
+        }
+        assert!(decode_windows_code_page(b"text", u32::MAX).is_none());
+        let mixed = ["UTF-8 路径\n".as_bytes(), b"\xd6\xd0\xce\xc4\r\n"].concat();
+        assert_eq!(
+            decode_output_using(&mixed, |line| decode_windows_code_page(line, 936)),
+            "UTF-8 路径\n中文\r\n"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn stdout_and_stderr_are_decoded_independently_without_mutating_capture() {
+        use std::os::windows::process::ExitStatusExt;
+
+        let stdout = "\x1b[32mUTF-8 中文 🦀\x1b[0m".as_bytes().to_vec();
+        let stderr = "Windows E:\\工具\\Java-é"
+            .encode_utf16()
+            .flat_map(u16::to_le_bytes)
+            .collect::<Vec<_>>();
+        let output = Output {
+            status: std::process::ExitStatus::from_raw(0),
+            stdout: stdout.clone(),
+            stderr: stderr.clone(),
+        };
+        assert_eq!(
+            output_text(&output),
+            "UTF-8 中文 🦀\nWindows E:\\工具\\Java-é"
+        );
+        assert_eq!(output.stdout, stdout);
+        assert_eq!(output.stderr, stderr);
+    }
 }
 
 #[cfg(all(test, windows))]
@@ -675,5 +931,18 @@ mod tests {
         assert!(output.status.success());
         assert_eq!(output_text(&output), "isolated-probe");
         assert_eq!(std::env::var_os(key), original);
+    }
+
+    #[test]
+    fn unicode_cmd_output_is_decoded_without_a_bom() {
+        let program = std::env::var_os("ComSpec").unwrap_or_else(|| "cmd.exe".into());
+        let output = run_capture(
+            Path::new(&program),
+            &["/D", "/U", "/C", "echo E:\\工具\\JDK-é"],
+            Duration::from_secs(5),
+        )
+        .unwrap();
+        assert!(output.status.success());
+        assert_eq!(output_text(&output), "E:\\工具\\JDK-é");
     }
 }

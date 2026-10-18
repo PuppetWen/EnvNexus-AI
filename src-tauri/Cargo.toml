@@ -1,6 +1,6 @@
 [package]
 name = "envnexus-ai"
-version = "0.1.8"
+version = "0.1.9"
 description = "An AI-assisted, safe and reversible Windows development environment manager"
 authors = ["EnvNexus AI Contributors"]
 edition = "2024"
@@ -55,6 +55,7 @@ webview2-com = "0.38"
 windows-core = "0.61"
 windows-sys = { version = "0.61", features = [
   "Win32_Foundation",
+  "Win32_Globalization",
   "Win32_Security_Cryptography",
   "Win32_Storage_FileSystem",
   "Win32_System_Console",

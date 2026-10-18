@@ -190,6 +190,8 @@ function icon(name: keyof typeof icons, size = 18): string {
     width: size,
     height: size,
     "stroke-width": 1.8,
+    "aria-hidden": "true",
+    focusable: "false",
   });
   return node.outerHTML;
 }
@@ -301,8 +303,8 @@ function renderShell(): string {
           <button class="brand-update-indicator ${updateAvailable ? "available" : updateBusy ? "busy" : "current"}" type="button" data-nav="settings" role="status" aria-label="${escapeHtml(updateIndicatorLabel)}">
             <i class="brand-update-dot" aria-hidden="true"></i>
             <span class="brand-update-tooltip" role="tooltip">
-              <strong>${escapeHtml(updateIndicatorTitle)}</strong>
-              <span>${escapeHtml(updateIndicatorDetail)}</span>
+              <strong class="path-context">${escapeHtml(updateIndicatorTitle)}</strong>
+              <span class="path-context">${escapeHtml(updateIndicatorDetail)}</span>
             </span>
           </button>
         </div>
@@ -516,7 +518,7 @@ function renderIssueStrip(issues: DiagnosticIssue[]): string {
           (issue) => `
             <article class="issue ${issue.level}">
               <span>${icon(issue.level === "error" ? "OctagonAlert" : "TriangleAlert", 18)}</span>
-              <div><strong>${escapeHtml(issue.title)}</strong><p>${escapeHtml(issue.detail)}</p></div>
+              <div><strong>${escapeHtml(issue.title)}</strong><p class="path-context">${escapeHtml(issue.detail)}</p></div>
               <button data-nav="diagnostics">查看</button>
             </article>
           `,
@@ -833,7 +835,7 @@ function renderDiagnostics(): string {
                 (manager) => `
                   <article>
                     <span>${icon("Waypoints", 18)}</span>
-                    <div><strong>${escapeHtml(manager.displayName)}</strong><p>管理 ${manager.toolIds.map(escapeHtml).join(" / ")}${manager.currentVersion ? ` · 当前 ${escapeHtml(manager.currentVersion)}` : ""}</p><code class="path-context">${escapeHtml(manager.evidence)}</code></div>
+                    <div><strong>${escapeHtml(manager.displayName)}</strong><p>管理 ${manager.toolIds.map(escapeHtml).join(" / ")}${manager.currentVersion ? ` · 当前 ${escapeHtml(manager.currentVersion)}` : ""}</p><code class="path-context" title="${escapeHtml(manager.evidence)}">${escapeHtml(manager.evidence)}</code></div>
                   </article>`,
               )
               .join("")}</div>`
@@ -875,7 +877,7 @@ function renderDiagnostic(issue: DiagnosticIssue): string {
   return `
     <article class="diagnostic-item ${issue.level}">
       <span>${icon(issue.level === "error" ? "CircleX" : issue.level === "warning" ? "TriangleAlert" : "Info", 19)}</span>
-      <div><strong>${escapeHtml(issue.title)}</strong><p class="path-context">${escapeHtml(issue.detail)}</p>${issue.evidence ? `<code class="path-context">${escapeHtml(issue.evidence)}</code>` : ""}</div>
+      <div><strong>${escapeHtml(issue.title)}</strong><p class="path-context">${escapeHtml(issue.detail)}</p>${issue.evidence ? `<code class="path-context" title="${escapeHtml(issue.evidence)}">${escapeHtml(issue.evidence)}</code>` : ""}</div>
       <div class="diagnostic-actions">
         <button class="analysis-action" data-local-guidance="${encodeURIComponent(issue.code)}">${icon("ClipboardCheck", 14)} 本地分析与建议</button>
         ${
@@ -1122,7 +1124,7 @@ function renderApplicationUpdate(): string {
                 ? "RefreshCw"
             : "RefreshCw";
   const notes = status?.notes
-    ? `<div class="update-notes"><strong>发布说明</strong><p>${escapeHtml(status.notes).replaceAll("\n", "<br>")}</p></div>`
+    ? `<div class="update-notes"><strong>发布说明</strong><p class="path-context">${escapeHtml(status.notes).replaceAll("\n", "<br>")}</p></div>`
     : "";
   const progress =
     inProgress
@@ -1155,8 +1157,8 @@ function renderApplicationUpdate(): string {
           status
             ? `<div class="update-status update-status-${status.phase}">
                 ${icon(statusIcon as keyof typeof icons, 18)}
-                <div><strong ${inProgress ? "data-app-update-message" : ""}>${status.phase === "available" ? `发现 EnvNexus AI ${escapeHtml(status.availableVersion ?? "")}` : escapeHtml(status.message)}</strong>
-                ${status.phase === "available" ? `<span>${escapeHtml(status.message)}</span>` : ""}</div>
+                <div><strong class="path-context" ${inProgress ? "data-app-update-message" : ""}>${status.phase === "available" ? `发现 EnvNexus AI ${escapeHtml(status.availableVersion ?? "")}` : escapeHtml(status.message)}</strong>
+                ${status.phase === "available" ? `<span class="path-context">${escapeHtml(status.message)}</span>` : ""}</div>
                 ${status.phase === "available" ? `<button class="primary-button" id="install-app-update">${icon("Download", 16)} 自动更新</button>` : ""}
               </div>${notes}${progress}`
             : `<div class="update-idle-note">${icon("ShieldCheck", 16)} 正在等待启动检查；更新元数据来自 GitHub Releases，安装前由内置公钥验证签名。</div>`
@@ -1348,7 +1350,7 @@ function renderBackgroundOperation(): string {
       <span class="background-operation-icon">${icon("LoaderCircle", 19)}</span>
       <div class="background-operation-copy">
         <small>BACKGROUND TASK</small>
-        <strong data-operation-message>${escapeHtml(state.progress?.message ?? "正在后台启动任务…")}</strong>
+        <strong class="path-context" dir="ltr" data-operation-message title="${escapeHtml(state.progress?.message ?? "正在后台启动任务…")}">${escapeHtml(state.progress?.message ?? "正在后台启动任务…")}</strong>
         <div class="background-operation-progress">
           <span><i data-operation-progress-bar style="width:${operationPercent()}%"></i></span>
           <span data-operation-percent>${operationPercentLabel()}</span>
@@ -1389,7 +1391,7 @@ function renderDiagnosticGuidanceModal(guidance: DiagnosticGuidance): string {
                   (command, index) => `
                     <article class="${command.changesEnvironment ? "changes-environment" : ""}">
                       <span><strong>${escapeHtml(command.label)}</strong><small>${escapeHtml(command.shell)}${command.requiresElevation ? " · 需要管理员权限" : command.changesEnvironment ? " · 会修改用户环境" : " · 只读"}</small></span>
-                      <code class="path-context">${escapeHtml(command.command)}</code>
+                      <code class="path-context" title="${escapeHtml(command.command)}">${escapeHtml(command.command)}</code>
                       <button class="secondary-button" data-copy-guidance-command="${index}">${icon("Copy", 14)} 复制</button>
                     </article>`,
                 )
@@ -1448,7 +1450,7 @@ function renderPlanModal(plan: OperationPlan): string {
           state.applying
             ? `<div class="operation-progress" data-operation-progress>
                  <span class="progress-icon">${icon(state.progress?.phase === "complete" ? "CircleCheck" : "LoaderCircle", 28)}</span>
-                 <strong data-operation-message>${escapeHtml(state.progress?.message ?? "正在后台启动任务…")}</strong>
+                 <strong class="path-context" dir="ltr" data-operation-message>${escapeHtml(state.progress?.message ?? "正在后台启动任务…")}</strong>
                  <div class="progress-track"><i data-operation-progress-bar style="width:${operationPercent()}%"></i></div>
                  <small data-operation-percent>${operationPercentLabel()}</small>
                </div>`
@@ -2522,6 +2524,7 @@ function updateOperationProgressUi(): void {
   if (!progress) return;
   document.querySelectorAll<HTMLElement>("[data-operation-message]").forEach((element) => {
     element.textContent = progress.message;
+    element.title = progress.message;
   });
   document
     .querySelectorAll<HTMLElement>("[data-operation-progress-bar]")

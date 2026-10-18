@@ -1,5 +1,13 @@
 # EnvNexus AI 测试报告
 
+## 0.1.9 验证记录（2026-10-18 UTC，后端与交付待完成）
+
+本地 77 项前端测试通过，包含本轮新增的 15 类工具安装文字集成测试。只读浏览器 fixture 使用真实应用和本地 mock，提供确认/差异、进度、后台任务、错误、通知及安装后确认场景，路径样本包含中文、日文、空格、重音字符、元字符、UNC 和扩展前缀；元字符非法磁盘目标明确仅用于显示测试。
+
+真实 IAB 浏览器矩阵已完成 320 个场景：15 工具 × 五主题 × 确认计划/进度/后台任务/错误共 300 项，另以 Maven 的五种额外路径 × 四场景补充 20 项。原始记录为 `artifacts/ui-0.1.9-text-checks.json`，检查时间 `2026-10-18T09:49:12.269Z`，320 项均为 `issues: []`、`horizontalOverflow: false`；逐页检查关键文字的 `Cascadia Mono` 字体、`text-transform: none`、无 U+FFFD/日元替代字符、后台 title 同步和水平溢出。前端集成测试另逐字核对原始路径字符。截图为 `artifacts/ui-0.1.9-installation-text.png`。
+
+浏览器结果来自真实应用渲染器与 CSS，但 IPC 和安装操作使用本地 mock，没有运行真实安装；它不能替代真实工具输出、命令脚本或后端证据。Windows 子进程解码与真实 CMD 代码页恢复回归、后端检查及完整 CI、签名与公开发布验证仍待完成。下文 0.1.8 及更早记录原样保留，不作为本轮通过结论。
+
 ## 0.1.8 验证记录（2026-10-18 UTC）
 
 提交 `fac61ee43c9d4ab12bcfa8e3f5b1f92828e4a07e` 的 [CI2 / 39095241423](https://github.com/PuppetWen/EnvNexus-AI/actions/runs/39095241423) 已确认 `COMPLETED / SUCCESS`，包含构建、功能验证、报告上传和工作流收尾。原始报告位于 `artifacts/layout-ci-second-reports/`；以下均为本轮结果，0.1.7 及更早记录原样保留在后文。
