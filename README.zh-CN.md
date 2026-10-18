@@ -4,7 +4,7 @@ EnvNexus AI 是面向 Windows 10/11 的开发环境与多版本工具链管理�
 
 [下载最新版](https://github.com/PuppetWen/EnvNexus-AI/releases/latest) · [更新日志](CHANGELOG.md) · [使用说明](docs/USER_GUIDE.md) · [构建说明](docs/BUILDING.md)
 
-当前发布版本为 **[0.1.8](https://github.com/PuppetWen/EnvNexus-AI/releases/tag/v0.1.8)**：修复版本列表重叠、窄列按钮布局及通知中的路径字形，并增加 Maven 的完整 JDK 依赖检查。本地前端与浏览器检查、[Windows CI2](https://github.com/PuppetWen/EnvNexus-AI/actions/runs/39095241423) 和[独立签名验证](https://github.com/PuppetWen/EnvNexus-AI/actions/runs/39095973235)均通过，包含 Maven 实际安装回归；六项公开资产的直接下载、逐项哈希比对与两包签名复验已通过；自动更新 latest 入口已无凭据回读确认为 0.1.8，哈希与发布清单一致。下文 0.1.7 的验证结果仅为历史记录。
+当前待发布版本为 **0.1.9**：统一修复 15 类工具安装确认、进度、后台任务、通知和错误中的路径/多行文字显示，并改进工具输出解码与 CMD 脚本编码处理。Windows CI3 的 205 项 Rust、77 项前端、4 项 Node 测试和真实安装回归已通过，独立草稿资产签名验证也已通过；320 个浏览器 mock 场景通过，未运行真实安装。公开发布、合并/标签一致性及公开更新入口验收待完成，完整证据和边界见[测试报告](docs/TEST_REPORT.md)。
 
 ## 主要能力
 
@@ -68,10 +68,10 @@ App 启动不遍历全盘。首次保存安装目录时，即使没有全机索�
 
 ## 下载
 
-从 [v0.1.8](https://github.com/PuppetWen/EnvNexus-AI/releases/tag/v0.1.8) 下载以下文件；六项公开资产回读及两包签名复验已通过：
+0.1.9 的目标发行文件如下；本轮 CI 与独立草稿资产签名验证已通过，公开发布仍待完成。已发布的可用资产以 [GitHub Releases](https://github.com/PuppetWen/EnvNexus-AI/releases/latest) 为准：
 
-- `EnvNexus-AI_0.1.8_x64-setup.exe`：安装版，可选择安装目录；已有安装会复用原目录覆盖升级。
-- `EnvNexus-AI_0.1.8_x64-portable.exe`：便携版，可放在任意可写目录运行。
+- `EnvNexus-AI_0.1.9_x64-setup.exe`：安装版，可选择安装目录；已有安装会复用原目录覆盖升级。
+- `EnvNexus-AI_0.1.9_x64-portable.exe`：便携版，可放在任意可写目录运行。
 - `SHA256SUMS.txt`：发布文件 SHA-256 校验值。
 - `latest.json` 与 `.sig`：应用内自动更新使用的签名元数据。
 
@@ -79,7 +79,7 @@ App 启动不遍历全盘。首次保存安装目录时，即使没有全机索�
 
 ## 常用命令
 
-在 App 的“命令说明”页面生成并启用 CMD 脚本后，新开 CMD 或 PowerShell：
+在 App 的“命令说明”页面生成并启用 CMD 脚本后，新开 CMD 或 PowerShell。升级至 0.1.9 后需重新生成旧脚本，以应用 UTF-8 调用包装：
 
 ```powershell
 env-tools

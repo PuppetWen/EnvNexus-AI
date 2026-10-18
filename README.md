@@ -28,7 +28,7 @@
 
 EnvNexus AI 是一款使用 Rust + Tauri 2 开发的 Windows 桌面 App。它把常见开发工具的检测、官方版本查询、下载校验、自选目录安装、多版本切换、修复和卸载放到统一、安全且可回滚的工作流中。
 
-当前发布版本为 **[0.1.8](https://github.com/PuppetWen/EnvNexus-AI/releases/tag/v0.1.8)**：修复版本列表重叠、窄列按钮布局及通知中的路径字形，并增加 Maven 的完整 JDK 依赖检查。本地前端与浏览器检查、[Windows CI2](https://github.com/PuppetWen/EnvNexus-AI/actions/runs/39095241423) 和[独立签名验证](https://github.com/PuppetWen/EnvNexus-AI/actions/runs/39095973235)均通过，包含 Maven 实际安装回归；六项公开资产的直接下载、逐项哈希比对与两包签名复验已通过；自动更新 latest 入口已无凭据回读确认为 0.1.8，哈希与发布清单一致。下文 0.1.7 的验证结果仅为历史记录。
+当前待发布版本为 **0.1.9**：统一修复 15 类工具安装确认、进度、后台任务、通知和错误中的路径/多行文字显示，并改进工具输出解码与 CMD 脚本编码处理。Windows CI3 的 205 项 Rust、77 项前端、4 项 Node 测试和真实安装回归已通过，独立草稿资产签名验证也已通过；320 个浏览器 mock 场景通过，未运行真实安装。公开发布、合并/标签一致性及公开更新入口验收待完成，完整证据和边界见[测试报告](docs/TEST_REPORT.md)。
 
 ### 主要功能
 
@@ -74,10 +74,10 @@ AI 不会绕过本地安全边界：它不能直接修改环境。任何一键�
 
 ### 下载与启动
 
-从 [v0.1.8](https://github.com/PuppetWen/EnvNexus-AI/releases/tag/v0.1.8) 下载以下文件；六项公开资产回读及两包签名复验已通过：
+0.1.9 的目标发行文件如下；本轮 CI 与独立草稿资产签名验证已通过，公开发布仍待完成。已发布的可用资产以 [GitHub Releases](https://github.com/PuppetWen/EnvNexus-AI/releases/latest) 为准：
 
-- `EnvNexus-AI_0.1.8_x64-setup.exe`：当前用户安装版，可选择安装目录；检测到已有安装时会复用原路径并原地升级。
-- `EnvNexus-AI_0.1.8_x64-portable.exe`：便携主程序；App 内更新会在原路径安全自替换。
+- `EnvNexus-AI_0.1.9_x64-setup.exe`：当前用户安装版，可选择安装目录；检测到已有安装时会复用原路径并原地升级。
+- `EnvNexus-AI_0.1.9_x64-portable.exe`：便携主程序；App 内更新会在原路径安全自替换。
 - `SHA256SUMS.txt`：下载文件校验值。
 
 0.1.5 安装的受管 Python 可能使用不含 pip/venv 的嵌入式包。升级后，对仍有对应受支持官方完整发行包的版本，在 Python 版本卡片点击“修复”，可在原路径迁移到完整运行时；修复完成后再确认单独的 PATH/默认版本计划。旧的受限版本清单缓存会自动失效；没有可用完整发行包或有效官方校验信息时不会改用嵌入式包代替。
@@ -86,7 +86,7 @@ AI 不会绕过本地安全边界：它不能直接修改环境。任何一键�
 
 ### 终端命令
 
-在“命令说明”页选择脚本目录，生成脚本并确认把该目录加入用户 PATH。重新打开终端后可运行：
+在“命令说明”页选择脚本目录，生成脚本并确认把该目录加入用户 PATH。升级至 0.1.9 后需重新生成旧脚本，以应用 UTF-8 调用包装。重新打开终端后可运行：
 
 ```powershell
 env-tools
@@ -132,7 +132,7 @@ EnvNexus AI 不会自动整理用户的现有开发目录，也不会静默写�
 
 EnvNexus AI is a Windows desktop application built with Rust and Tauri 2. It provides one safe, reversible workflow for detecting, installing, switching, repairing, and uninstalling development toolchains.
 
-The current release is **[0.1.8](https://github.com/PuppetWen/EnvNexus-AI/releases/tag/v0.1.8)**. It fixes overlapping catalog rows, narrow-column actions and Windows path glyphs, and adds complete-JDK checks for Maven. Local frontend/browser checks, [Windows CI2](https://github.com/PuppetWen/EnvNexus-AI/actions/runs/39095241423), and [independent signature verification](https://github.com/PuppetWen/EnvNexus-AI/actions/runs/39095973235) passed, including a real Maven installation regression check. Anonymous downloads of all six direct release assets, exact hashes, and both package signatures passed. The latest-update endpoint also returned 0.1.8 anonymously with the verified release hash. Results cited for 0.1.7 below are historical evidence.
+The current release candidate is **0.1.9**. It improves path and multiline text display across installation plans, progress, background tasks, notices and errors for all 15 tools, plus process-output decoding and generated CMD encoding. Windows CI3 passed 205 Rust, 77 frontend and 4 Node tests and real installation regressions; independent draft-asset signature verification also passed. The 320 browser mock scenarios passed without running real installations. Public release, merge/tag consistency and public update-endpoint checks remain pending; see the [test report](docs/TEST_REPORT.md) for evidence and limits.
 
 ### Highlights
 
@@ -177,10 +177,10 @@ AI cannot bypass local safety controls or directly change the environment. One-c
 
 ### Download and use
 
-Download these files from [v0.1.8](https://github.com/PuppetWen/EnvNexus-AI/releases/tag/v0.1.8); all six direct public assets and both package signatures passed verification:
+The intended 0.1.9 files are listed below. CI and independent draft-asset signature checks passed; public release is pending. See [GitHub Releases](https://github.com/PuppetWen/EnvNexus-AI/releases/latest) for currently published assets:
 
-- `EnvNexus-AI_0.1.8_x64-setup.exe`: per-user installer with a selectable install directory. Existing installations are upgraded in their previous location.
-- `EnvNexus-AI_0.1.8_x64-portable.exe`: portable executable. In-app updates safely replace it in its original location.
+- `EnvNexus-AI_0.1.9_x64-setup.exe`: per-user installer with a selectable install directory. Existing installations are upgraded in their previous location.
+- `EnvNexus-AI_0.1.9_x64-portable.exe`: portable executable. In-app updates safely replace it in its original location.
 - `SHA256SUMS.txt`: release checksums.
 
 Managed Python installations created by 0.1.5 may use the embedded package without pip or venv. After upgrading, choose “Repair” on the installed version card to migrate it in place when a matching supported official full distribution is available, then confirm the separate PATH/default version plan. Old restricted catalog caches are invalidated. Missing full packages or valid official checksums do not trigger a fallback to embedded packages.
@@ -189,7 +189,7 @@ The first launch does not scan the machine. You can configure each tool's instal
 
 ### Terminal commands
 
-Choose a script directory on the “Commands” page, generate the scripts, and confirm its addition to the user PATH. Open a new terminal:
+Choose a script directory on the “Commands” page, generate the scripts, and confirm its addition to the user PATH. After upgrading to 0.1.9, regenerate existing scripts to use the UTF-8 wrapper. Open a new terminal:
 
 ```powershell
 env-tools

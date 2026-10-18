@@ -56,9 +56,7 @@ code {
   font-family: var(--font-mono);
 }
 
-.path-text,
-.path-input,
-.path-context {
+:root :is(.path-text, .path-input, .path-context) {
   /*
    * Some Japanese-capable fonts localize U+005C as a yen glyph. Paths retain
    * their original bytes; disabling `locl` fixes only their presentation.
@@ -67,16 +65,23 @@ code {
   font-variant-ligatures: none;
 }
 
-.path-text,
-.path-input,
-.path-context {
+:root :is(.path-text, .path-input, .path-context) {
   direction: ltr;
   font-family: var(--font-path);
+  text-transform: none;
   unicode-bidi: plaintext;
 }
 
 .path-context {
   overflow-wrap: anywhere;
+}
+
+.error-banner > span,
+.notice-banner > span,
+.plan-warnings p > span,
+.plan-steps p {
+  min-width: 0;
+  white-space: pre-wrap;
 }
 
 ::selection {
@@ -4008,8 +4013,8 @@ code {
   overflow: hidden;
   border-radius: 4px;
   font-size: 9.5px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 
 .diff-list code.add {
@@ -4077,7 +4082,10 @@ code {
 }
 
 .operation-progress strong {
+  max-width: 100%;
   font-size: 13px;
+  text-align: center;
+  white-space: pre-wrap;
 }
 
 .progress-track {

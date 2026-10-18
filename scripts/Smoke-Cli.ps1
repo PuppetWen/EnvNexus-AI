@@ -4,6 +4,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 $ProjectRoot = Split-Path -Parent $PSScriptRoot
+& (Join-Path $PSScriptRoot 'Use-ProjectCache.ps1')
 if (-not $Executable) {
     $Executable = Join-Path $ProjectRoot "src-tauri\target\release\envnexus-ai.exe"
 }
@@ -101,6 +102,28 @@ try {
         throw "The previously generated python-root.cmd did not read the latest saved root."
     }
 
+    # Exercise the generated root setter, including Unicode, quoted shell
+    # metacharacters, and the CLI's global --json flag on either side.
+    $UnicodePythonRoot = Join-Path $ArtifactRoot 'managed-tools\开发-日本語-é Python & !bang!'
+    $UnicodePythonRootArgument = $UnicodePythonRoot + '\'
+    $SetFromGeneratedScript = & $PythonRootScript 'set' $UnicodePythonRootArgument '--json' 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        throw "python-root.cmd set failed: $($SetFromGeneratedScript -join [Environment]::NewLine)"
+    }
+    $SetRoot = [string](($SetFromGeneratedScript -join [Environment]::NewLine) | ConvertFrom-Json).root
+    if ($SetRoot -ne [System.IO.Path]::GetFullPath($UnicodePythonRoot)) {
+        throw 'Generated python-root.cmd set did not preserve the Unicode path.'
+    }
+    $GetFromGeneratedScript = & $PythonRootScript '--json' 'get' 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        throw "python-root.cmd get failed: $($GetFromGeneratedScript -join [Environment]::NewLine)"
+    }
+    $GetRoot = [string](($GetFromGeneratedScript -join [Environment]::NewLine) | ConvertFrom-Json).root
+    $PreferencesAfterScriptSet = Get-Content -LiteralPath $RootPreferences -Raw -Encoding UTF8 | ConvertFrom-Json
+    if ($GetRoot -ne $SetRoot -or [string]$PreferencesAfterScriptSet.roots.python -ne $SetRoot) {
+        throw 'Generated root set/get did not persist and read back the same Unicode path.'
+    }
+
     Invoke-EnvNexusAICli -Arguments @("scan") | Out-Null
     if (-not (Test-Path -LiteralPath $Snapshot -PathType Leaf)) {
         throw "Explicit scan did not persist the shared snapshot."
@@ -161,6 +184,8 @@ try {
         scanFinishedAt = $JdkAfterScan.scanFinishedAt
         rootPersistenceVerified = $true
         generatedBeforeRootChangeReadsLatestRoot = $true
+        generatedUnicodeRootSetGetVerified = $true
+        generatedTrailingSeparatorRootSetVerified = $true
         readOnlyCommandsDidNotScan = $true
         previewGuardVerified = $PreviewChecked
         generatedCommandCount = $CommandStatus.scriptCount
