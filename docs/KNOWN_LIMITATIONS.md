@@ -1,6 +1,6 @@
 # 已知限制
 
-以下是 EnvNexus AI 0.1.8 的能力边界。本地浏览器检查、Windows CI2（192 项 Rust、62 项前端、4 项 Node 测试、Maven 独立回归、Python 与 15 类工具安装）及独立签名验证均通过；正式公开发布与公开资产回读待完成。下文 0.1.7 CI7、签名及公开资产结果仅为历史证据，实际范围见[测试报告](TEST_REPORT.md)：
+以下是 EnvNexus AI 0.1.8 的能力边界。本地浏览器检查、Windows CI2（192 项 Rust、62 项前端、4 项 Node 测试、Maven 独立回归、Python 与 15 类工具安装）及独立签名验证均通过；[v0.1.8](https://github.com/PuppetWen/EnvNexus-AI/releases/tag/v0.1.8) 已公开发布，六项资产直接下载回读及签名复验通过；自动更新 latest 入口已无凭据回读确认为 0.1.8，哈希与发布清单一致。下文 0.1.7 CI7、签名及公开资产结果仅为历史证据，实际范围见[测试报告](TEST_REPORT.md)：
 
 1. 仅构建和验证 Windows x64 MSVC 版本；没有 ARM64 包。
 2. 不执行系统级环境变量、HKLM 或系统 PATH 修改。系统 PATH 遮蔽时切换计划会阻止执行。

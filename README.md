@@ -28,7 +28,7 @@
 
 EnvNexus AI 是一款使用 Rust + Tauri 2 开发的 Windows 桌面 App。它把常见开发工具的检测、官方版本查询、下载校验、自选目录安装、多版本切换、修复和卸载放到统一、安全且可回滚的工作流中。
 
-当前待发布版本为 **0.1.8**：修复版本列表重叠、窄列按钮布局及通知中的路径字形，并增加 Maven 的完整 JDK 依赖检查。本地前端与浏览器检查、[Windows CI2](https://github.com/PuppetWen/EnvNexus-AI/actions/runs/39095241423) 和[独立签名验证](https://github.com/PuppetWen/EnvNexus-AI/actions/runs/39095973235)均通过，包含 Maven 实际安装回归；正式公开发布与公开资产回读待完成。下文 0.1.7 的验证结果仅为历史记录。
+当前发布版本为 **[0.1.8](https://github.com/PuppetWen/EnvNexus-AI/releases/tag/v0.1.8)**：修复版本列表重叠、窄列按钮布局及通知中的路径字形，并增加 Maven 的完整 JDK 依赖检查。本地前端与浏览器检查、[Windows CI2](https://github.com/PuppetWen/EnvNexus-AI/actions/runs/39095241423) 和[独立签名验证](https://github.com/PuppetWen/EnvNexus-AI/actions/runs/39095973235)均通过，包含 Maven 实际安装回归；六项公开资产的直接下载、逐项哈希比对与两包签名复验已通过；自动更新 latest 入口已无凭据回读确认为 0.1.8，哈希与发布清单一致。下文 0.1.7 的验证结果仅为历史记录。
 
 ### 主要功能
 
@@ -74,7 +74,7 @@ AI 不会绕过本地安全边界：它不能直接修改环境。任何一键�
 
 ### 下载与启动
 
-0.1.8 的发行文件已通过 CI 和签名验证，正式公开发布与公开资产回读待完成；已发布的可用资产以 [GitHub Releases](https://github.com/PuppetWen/EnvNexus-AI/releases/latest) 为准：
+从 [v0.1.8](https://github.com/PuppetWen/EnvNexus-AI/releases/tag/v0.1.8) 下载以下文件；六项公开资产回读及两包签名复验已通过：
 
 - `EnvNexus-AI_0.1.8_x64-setup.exe`：当前用户安装版，可选择安装目录；检测到已有安装时会复用原路径并原地升级。
 - `EnvNexus-AI_0.1.8_x64-portable.exe`：便携主程序；App 内更新会在原路径安全自替换。
@@ -132,7 +132,7 @@ EnvNexus AI 不会自动整理用户的现有开发目录，也不会静默写�
 
 EnvNexus AI is a Windows desktop application built with Rust and Tauri 2. It provides one safe, reversible workflow for detecting, installing, switching, repairing, and uninstalling development toolchains.
 
-The pending release is **0.1.8**. It fixes overlapping catalog rows, narrow-column actions and Windows path glyphs, and adds complete-JDK checks for Maven. Local frontend/browser checks, [Windows CI2](https://github.com/PuppetWen/EnvNexus-AI/actions/runs/39095241423), and [independent signature verification](https://github.com/PuppetWen/EnvNexus-AI/actions/runs/39095973235) passed, including a real Maven installation regression check. Public release and anonymous public-asset checks are pending. Results cited for 0.1.7 below are historical evidence.
+The current release is **[0.1.8](https://github.com/PuppetWen/EnvNexus-AI/releases/tag/v0.1.8)**. It fixes overlapping catalog rows, narrow-column actions and Windows path glyphs, and adds complete-JDK checks for Maven. Local frontend/browser checks, [Windows CI2](https://github.com/PuppetWen/EnvNexus-AI/actions/runs/39095241423), and [independent signature verification](https://github.com/PuppetWen/EnvNexus-AI/actions/runs/39095973235) passed, including a real Maven installation regression check. Anonymous downloads of all six direct release assets, exact hashes, and both package signatures passed. The latest-update endpoint also returned 0.1.8 anonymously with the verified release hash. Results cited for 0.1.7 below are historical evidence.
 
 ### Highlights
 
@@ -177,7 +177,7 @@ AI cannot bypass local safety controls or directly change the environment. One-c
 
 ### Download and use
 
-The 0.1.8 files passed CI and signature verification. Public release and anonymous public-asset checks are pending; see [GitHub Releases](https://github.com/PuppetWen/EnvNexus-AI/releases/latest) for currently published assets:
+Download these files from [v0.1.8](https://github.com/PuppetWen/EnvNexus-AI/releases/tag/v0.1.8); all six direct public assets and both package signatures passed verification:
 
 - `EnvNexus-AI_0.1.8_x64-setup.exe`: per-user installer with a selectable install directory. Existing installations are upgraded in their previous location.
 - `EnvNexus-AI_0.1.8_x64-portable.exe`: portable executable. In-app updates safely replace it in its original location.

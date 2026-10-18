@@ -35,7 +35,9 @@ Maven 回归故意给应用进程注入失效的 `JAVA_HOME` / `JAVACMD`、Maven
 | `EnvNexus-AI_0.1.8_x64-portable.exe` / NSIS 安装后主程序 | `f22eaa0e22533babe534fb29b445ec80bcf64e38879bc3bfa250242e6328ec4c` |
 | `latest.json` | `4017c504a9ec1135630b926ab532d84d54331aa71aacdf1769c38955cd03bc35` |
 
-**正式公开发布、最终合并提交/标签对应关系及无凭据公开资产回读仍待完成。** CI 与草稿签名通过不等同于已公开发布。未逐一验证全部历史/预览 Python、第三方包、原生扩展、真实 Maven 项目构建、用户开发机默认版本切换或所有卸载恢复；历史包的 MD5 仍只作为明确标注的弱校验。
+[PR #7](https://github.com/PuppetWen/EnvNexus-AI/pull/7) 的合并提交为 `b922b7b7528cb6d4c3fc1754cd1a8ea4e53d5ca8`，`v0.1.8` 标签已核对指向同一提交；与 CI2 的 `fac61ee` 比较仅六份文档不同。[v0.1.8](https://github.com/PuppetWen/EnvNexus-AI/releases/tag/v0.1.8) 于 `2026-10-18T04:26:20Z` 公开发布。不携带 GitHub 凭据下载该版本直接地址下的六项资产，逐文件哈希与已验证发布文件一致，两个下载包再次通过 Node 签名验证；日志为 `artifacts/public-layout-release-verification.log`，文件位于 `artifacts/published-layout-release-check/`。
+
+自动更新 `releases/latest/download/latest.json` 入口重试后于 `2026-10-18T04:36:35.1230094Z` 完成无凭据公开回读，返回 `0.1.8`，SHA-256 为 `4017c504a9ec1135630b926ab532d84d54331aa71aacdf1769c38955cd03bc35`，与已验证发布清单一致；原始结果为 `artifacts/public-layout-latest-result.json`。六项版本直接资产和 latest 重定向入口均已验收通过。未逐一验证全部历史/预览 Python、第三方包、原生扩展、真实 Maven 项目构建、用户开发机默认版本切换或所有卸载恢复；历史包的 MD5 仍只作为明确标注的弱校验。
 
 ## 0.1.7 验证记录（2026-10-17 UTC）
 

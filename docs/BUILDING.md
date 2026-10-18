@@ -1,6 +1,6 @@
 # 构建说明
 
-当前源码版本为 **0.1.8**，[Windows CI2](https://github.com/PuppetWen/EnvNexus-AI/actions/runs/39095241423) 与[独立签名验证](https://github.com/PuppetWen/EnvNexus-AI/actions/runs/39095973235)均通过，包含 Maven 实际安装与隔离检查；正式公开发布与公开资产回读待完成。下述 0.1.7 CI7 和公开资产结果作为历史证据保留。
+当前源码版本为 **0.1.8**，[Windows CI2](https://github.com/PuppetWen/EnvNexus-AI/actions/runs/39095241423) 与[独立签名验证](https://github.com/PuppetWen/EnvNexus-AI/actions/runs/39095973235)均通过，包含 Maven 实际安装与隔离检查；[v0.1.8](https://github.com/PuppetWen/EnvNexus-AI/releases/tag/v0.1.8) 已公开发布，六项资产直接下载回读及签名复验通过；自动更新 latest 入口已无凭据回读确认为 0.1.8，哈希与发布清单一致。下述 0.1.7 CI7 和公开资产结果作为历史证据保留。
 
 ## 支持平台
 

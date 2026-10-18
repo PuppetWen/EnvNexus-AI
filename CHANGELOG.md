@@ -8,7 +8,7 @@
 - 通知和错误中的 Windows 路径明确使用路径字体，避免反斜杠在部分主题或字体回退下显示为 `¥`；路径内容保持原值。
 - Maven 安装和修复在下载包前检查可运行且版本匹配的 `java.exe` / `javac.exe`，从最新环境、受检进程环境和已配置或受管 JDK 中选择满足版本要求的完整 JDK；缺少依赖时给出具体原因。
 - Maven 验证临时使用选中的 JDK，隔离外部启动脚本和 Java/Maven 选项；扫描提示默认 Java 仍需配置，不会自动修改全局 Java 或替用户确认环境切换。
-- 本地真实浏览器覆盖五主题的 591 条 Node.js 列表、662 条 Python 列表、980/1180 像素视口和路径字形。[0.1.8 CI2](https://github.com/PuppetWen/EnvNexus-AI/actions/runs/39095241423) 已通过 192 项 Rust、62 项前端、4 项 Node 测试、Maven 依赖隔离与实际安装、十个历史 Python、现代 Python 新装/修复及 15/15 类工具安装；[独立签名验证](https://github.com/PuppetWen/EnvNexus-AI/actions/runs/39095973235)通过。公开发布及公开资产回读待完成，详见[测试报告](docs/TEST_REPORT.md)。
+- 本地真实浏览器覆盖五主题的 591 条 Node.js 列表、662 条 Python 列表、980/1180 像素视口和路径字形。[0.1.8 CI2](https://github.com/PuppetWen/EnvNexus-AI/actions/runs/39095241423) 已通过 192 项 Rust、62 项前端、4 项 Node 测试、Maven 依赖隔离与实际安装、十个历史 Python、现代 Python 新装/修复及 15/15 类工具安装；[独立签名验证](https://github.com/PuppetWen/EnvNexus-AI/actions/runs/39095973235)通过。[v0.1.8](https://github.com/PuppetWen/EnvNexus-AI/releases/tag/v0.1.8) 已公开发布，六项资产直接下载回读及两包签名复验通过；自动更新 latest 入口无凭据回读及哈希核对也已通过，详见[测试报告](docs/TEST_REPORT.md)。
 
 ## 0.1.7 — 2026-10-17
 
