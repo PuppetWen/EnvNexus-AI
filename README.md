@@ -28,6 +28,8 @@
 
 EnvNexus AI 是一款使用 Rust + Tauri 2 开发的 Windows 桌面 App。它把常见开发工具的检测、官方版本查询、下载校验、自选目录安装、多版本切换、修复和卸载放到统一、安全且可回滚的工作流中。
 
+当前开发版本为 **0.1.8**：修复版本列表重叠、窄列按钮布局及通知中的路径字形，并增加 Maven 的完整 JDK 依赖检查。本地前端与浏览器检查已通过；0.1.8 完整 CI 和发布验证待完成，下文 0.1.7 的验证结果仅为历史记录。
+
 ### 主要功能
 
 - 管理 Python、Java/JDK、Go、Rust、Node.js、Git、Maven、.NET SDK、Ruby、PHP，以及 Android SDK、NDK、JDK、Gradle、CMake、ADB。
@@ -47,6 +49,8 @@ EnvNexus AI 是一款使用 Rust + Tauri 2 开发的 Windows 桌面 App。它把
 - 生成 `jdk-list`、`python-install`、`env-diagnose` 等 CMD 脚本；脚本调用同一个主程序，可从任意新开的 CMD 或 PowerShell 使用。
 - 支持现代科技、赛博朋克、日系轻量、游戏 HUD、专业极简主题，以及简体中文、繁体中文、English、日本語、한국어界面。
 - 支持托盘菜单、开机自启动、关闭到托盘、单实例运行和恢复上次离开的页面。
+
+Maven 需要满足该版本要求的完整 JDK，只有 JRE 或失效的 `JAVA_HOME` 不够。安装和修复会先运行 `java.exe` 与 `javac.exe` 检查依赖，说明临时使用的 JDK；缺少可用 JDK 时请先在 Java 页面安装或配置。临时验证不会自动修改全局 Java，终端默认版本仍需单独确认配置。
 
 ### Python 历史版本
 
@@ -70,10 +74,10 @@ AI 不会绕过本地安全边界：它不能直接修改环境。任何一键�
 
 ### 下载与启动
 
-从 [GitHub Releases](https://github.com/PuppetWen/EnvNexus-AI/releases/latest) 下载：
+0.1.8 的目标发行文件如下；本轮 CI 和发布尚待完成，已发布的可用资产以 [GitHub Releases](https://github.com/PuppetWen/EnvNexus-AI/releases/latest) 为准：
 
-- `EnvNexus-AI_0.1.7_x64-setup.exe`：当前用户安装版，可选择安装目录；检测到已有安装时会复用原路径并原地升级。
-- `EnvNexus-AI_0.1.7_x64-portable.exe`：便携主程序；App 内更新会在原路径安全自替换。
+- `EnvNexus-AI_0.1.8_x64-setup.exe`：当前用户安装版，可选择安装目录；检测到已有安装时会复用原路径并原地升级。
+- `EnvNexus-AI_0.1.8_x64-portable.exe`：便携主程序；App 内更新会在原路径安全自替换。
 - `SHA256SUMS.txt`：下载文件校验值。
 
 0.1.5 安装的受管 Python 可能使用不含 pip/venv 的嵌入式包。升级后，对仍有对应受支持官方完整发行包的版本，在 Python 版本卡片点击“修复”，可在原路径迁移到完整运行时；修复完成后再确认单独的 PATH/默认版本计划。旧的受限版本清单缓存会自动失效；没有可用完整发行包或有效官方校验信息时不会改用嵌入式包代替。
@@ -128,6 +132,8 @@ EnvNexus AI 不会自动整理用户的现有开发目录，也不会静默写�
 
 EnvNexus AI is a Windows desktop application built with Rust and Tauri 2. It provides one safe, reversible workflow for detecting, installing, switching, repairing, and uninstalling development toolchains.
 
+The current development version is **0.1.8**. It fixes overlapping catalog rows, narrow-column actions and Windows path glyphs, and adds complete-JDK checks for Maven. Local frontend and browser checks passed; full 0.1.8 CI and release verification are pending. Results cited for 0.1.7 below are historical evidence.
+
 ### Highlights
 
 - Manages Python, Java/JDK, Go, Rust, Node.js, Git, Maven, .NET SDK, Ruby, PHP, and the Android SDK/NDK/JDK/Gradle/CMake/ADB toolchain.
@@ -146,6 +152,8 @@ EnvNexus AI is a Windows desktop application built with Rust and Tauri 2. It pro
 - Detects existing managers such as pyenv-win, NVM for Windows, fnm, Volta, rustup, Jabba, goenv, rbenv, and Uru.
 - Generates commands such as `jdk-list`, `python-install`, and `env-diagnose` for any new CMD or PowerShell session.
 - Includes five distinct themes, five UI languages, a tray menu, launch at login, close-to-tray behavior, single-instance handling, and last-page restoration.
+
+Maven requires a complete JDK suitable for its version; a JRE or stale `JAVA_HOME` is insufficient. Install and repair plans first run `java.exe` and `javac.exe` and identify the JDK used temporarily for validation. If none is usable, install or configure a JDK on the Java page. Validation does not change global Java settings; configuring the terminal default requires separate confirmation.
 
 ### Historical Python releases
 
@@ -169,10 +177,10 @@ AI cannot bypass local safety controls or directly change the environment. One-c
 
 ### Download and use
 
-Download the latest build from [GitHub Releases](https://github.com/PuppetWen/EnvNexus-AI/releases/latest):
+The intended 0.1.8 files are listed below. CI and publication are pending; see [GitHub Releases](https://github.com/PuppetWen/EnvNexus-AI/releases/latest) for currently published assets:
 
-- `EnvNexus-AI_0.1.7_x64-setup.exe`: per-user installer with a selectable install directory. Existing installations are upgraded in their previous location.
-- `EnvNexus-AI_0.1.7_x64-portable.exe`: portable executable. In-app updates safely replace it in its original location.
+- `EnvNexus-AI_0.1.8_x64-setup.exe`: per-user installer with a selectable install directory. Existing installations are upgraded in their previous location.
+- `EnvNexus-AI_0.1.8_x64-portable.exe`: portable executable. In-app updates safely replace it in its original location.
 - `SHA256SUMS.txt`: release checksums.
 
 Managed Python installations created by 0.1.5 may use the embedded package without pip or venv. After upgrading, choose “Repair” on the installed version card to migrate it in place when a matching supported official full distribution is available, then confirm the separate PATH/default version plan. Old restricted catalog caches are invalidated. Missing full packages or valid official checksums do not trigger a fallback to embedded packages.

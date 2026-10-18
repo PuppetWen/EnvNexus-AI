@@ -174,6 +174,16 @@ impl PlanService {
             ))
         })?;
         validate_download_url(descriptor.id, &download_url)?;
+        let maven_java = if descriptor.id == "maven" {
+            Some(crate::tool_runtime::resolve_maven_java(
+                &self.data_root,
+                Some(&root),
+                &remote.version,
+                &crate::environment::current_process_environment()?,
+            )?)
+        } else {
+            None
+        };
         let user = read_environment(EnvironmentScope::User)?;
         let system = read_environment(EnvironmentScope::System)?;
         let fingerprint = combined_fingerprint(&user, &system);
@@ -189,6 +199,9 @@ impl PlanService {
             );
         }
         append_python_release_warnings(descriptor.id, remote, &mut warnings);
+        if let Some(java) = maven_java {
+            warnings.push(java.plan_warning());
+        }
         if root
             .to_string_lossy()
             .to_ascii_lowercase()
@@ -376,6 +389,16 @@ impl PlanService {
             ))
         })?;
         validate_download_url(descriptor.id, &download_url)?;
+        let maven_java = if descriptor.id == "maven" {
+            Some(crate::tool_runtime::resolve_maven_java(
+                &self.data_root,
+                Some(&root),
+                &remote.version,
+                &crate::environment::current_process_environment()?,
+            )?)
+        } else {
+            None
+        };
         let user = read_environment(EnvironmentScope::User)?;
         let system = read_environment(EnvironmentScope::System)?;
         let fingerprint = combined_fingerprint(&user, &system);
@@ -388,6 +411,9 @@ impl PlanService {
             warnings.push("官方清单未提供校验值，修复计划保留供应链警告。".to_string());
         }
         append_python_release_warnings(descriptor.id, remote, &mut warnings);
+        if let Some(java) = maven_java {
+            warnings.push(java.plan_warning());
+        }
         let plan = OperationPlan {
             id: id.clone(),
             tool_id: descriptor.id.to_string(),

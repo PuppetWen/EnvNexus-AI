@@ -4,6 +4,8 @@ EnvNexus AI 是面向 Windows 10/11 的开发环境与多版本工具链管理�
 
 [下载最新版](https://github.com/PuppetWen/EnvNexus-AI/releases/latest) · [更新日志](CHANGELOG.md) · [使用说明](docs/USER_GUIDE.md) · [构建说明](docs/BUILDING.md)
 
+当前开发版本为 **0.1.8**：修复版本列表重叠、窄列按钮布局及通知中的路径字形，并增加 Maven 的完整 JDK 依赖检查。本地前端与浏览器检查已通过；0.1.8 完整 CI 和发布验证待完成，下文 0.1.7 的验证结果仅为历史记录。
+
 ## 主要能力
 
 - 管理 Python、Java/JDK、Go、Rust、Node.js、Git、Maven、.NET SDK、Ruby、PHP、Android SDK/NDK、Gradle、CMake 和 ADB。
@@ -19,6 +21,8 @@ EnvNexus AI 是面向 Windows 10/11 的开发环境与多版本工具链管理�
 - 支持续传下载、哈希与签名校验、安全解压、事务安装、失败回滚和环境备份。
 - 安装版可以选择目录并原地升级；便携版在原路径安全自替换。
 - 支持托盘驻留、开机启动、多语言、五套主题及可选 AI 诊断增强。
+
+Maven 需要满足该版本要求的完整 JDK，只有 JRE 或失效的 `JAVA_HOME` 不够。安装和修复会先运行 `java.exe` 与 `javac.exe` 检查依赖，说明临时使用的 JDK；缺少可用 JDK 时请先在 Java 页面安装或配置。临时验证不会自动修改全局 Java，终端默认版本仍需单独确认配置。
 
 ## Python 历史版本
 
@@ -64,10 +68,10 @@ App 启动不遍历全盘。首次保存安装目录时，即使没有全机索�
 
 ## 下载
 
-从 [GitHub Releases](https://github.com/PuppetWen/EnvNexus-AI/releases/latest) 获取：
+0.1.8 的目标发行文件如下；本轮 CI 和发布尚待完成，已发布的可用资产以 [GitHub Releases](https://github.com/PuppetWen/EnvNexus-AI/releases/latest) 为准：
 
-- `EnvNexus-AI_0.1.7_x64-setup.exe`：安装版，可选择安装目录；已有安装会复用原目录覆盖升级。
-- `EnvNexus-AI_0.1.7_x64-portable.exe`：便携版，可放在任意可写目录运行。
+- `EnvNexus-AI_0.1.8_x64-setup.exe`：安装版，可选择安装目录；已有安装会复用原目录覆盖升级。
+- `EnvNexus-AI_0.1.8_x64-portable.exe`：便携版，可放在任意可写目录运行。
 - `SHA256SUMS.txt`：发布文件 SHA-256 校验值。
 - `latest.json` 与 `.sig`：应用内自动更新使用的签名元数据。
 
